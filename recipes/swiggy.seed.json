@@ -1,0 +1,11 @@
+{
+  "orders_page_url": "https://www.swiggy.com/my-account/orders",
+  "endpoint": "https://www.swiggy.com/dapi/order/all",
+  "method": "GET",
+  "query": {},
+  "body": null,
+  "headers": {},
+  "pagination": {"type": "cursor", "param": "order_id", "next_path": "data.orders.-1.order_id"},
+  "read_post_allowlist": [],
+  "source": "https://www.ashutoshshukla.in/posts/how-i-built-swiggy-expense-tracker-chrome-extension/"
+}
