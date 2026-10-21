@@ -1,0 +1,212 @@
+# expense-agent
+
+Local, read-only agent that pulls your own order history from Blinkit, Zepto, Swiggy (incl. Instamart)
+and Zomato into SQLite, categorizes items, and reports spend.
+
+There are no per-site scrapers in the code. An LLM agent finds each site's order-history API at
+runtime and saves what it learns as a JSON "recipe" in `recipes/<site>.json`.
+
+## Safety model
+
+- Your installed Google Chrome, one persistent profile per site (`profiles/<site>`). Swiggy and Instamart
+  share one profile. Chrome is started as a normal browser with a local debugging port, and Playwright
+  attaches over CDP. It isn't launched in automation mode (no "controlled by automated test software"
+  bar), which is what made Swiggy return 403.
+- Every request goes through `guard.py`:
+  - GET, HEAD and OPTIONS are allowed.
+  - POST is allowed only in login mode, or when it matches the recipe's `read_post_allowlist` and the
+    body doesn't contain `mutation`.
+  - The one exception: POSTs to bot-challenge services (`*.awswaf.com`, Cloudflare's
+    `/cdn-cgi/challenge-platform/`) are always allowed. They go to the WAF vendor, not your account, and
+    blocking them leaves Swiggy on a blank "Max challenge attempts exceeded" page.
+  - Every other method is aborted and logged.
+- Navigations matching `cart|checkout|payment|pay|address|place-?order|cancel` are aborted.
+- Downloads are denied through CDP `Browser.setDownloadBehavior: deny`, for the whole browser and for each
+  context. If that call fails, the session doesn't start.
+- The discovery agent has no typing tool. It refuses to click submit buttons, form buttons, and elements
+  whose text looks like a write action (add, cart, pay, cancel, reorder, invoice, logout, …).
+- The login agent can type only two things: your phone number and an OTP that you enter in the terminal.
+  The LLM picks the input field and names the value (`PHONE` or `OTP`); it never sees the number or the
+  code. Both are hidden from every page snapshot and log. The number is kept in memory and never written
+  to disk.
+- Before the agent adds a POST endpoint to the allowlist, it shows you the entry in the terminal and asks
+  for `y`.
+- Cookies and auth/token headers are never captured, saved or logged. Logged URLs have their query strings
+  removed.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env        # set OPENAI_API_KEY (model defaults to gpt-6-luna), optionally TYPESAFE_API_KEY
+```
+
+Google Chrome has to be installed. It's found in the usual install folders; otherwise set `CHROME_PATH`
+in `.env`. Close any Chrome window left open on a site's profile from an earlier run before starting a new
+one. Your everyday Chrome doesn't matter, because it uses a different profile.
+
+## Usage
+
+Sites: `blinkit`, `zepto`, `swiggy`, `instamart`, `zomato`.
+
+```bash
+python cli.py login             # asks for your number once, then logs in to Blinkit, Zepto, Swiggy and
+                                # Zomato in turn, asking for each site's OTP
+python cli.py login zepto       # one site
+python cli.py login --manual    # no auto-fill: log in by hand, open your Orders page, press Enter
+python cli.py login --dry-run   # test all 4: stops once the phone input is reached, no OTP sent
+python cli.py learn blinkit     # LLM agent finds the order API and writes recipes/blinkit.json
+python cli.py sync blinkit      # fetch everything
+python cli.py sync all --since 2025-01-01   # sites run in parallel, one Chrome each (--workers 4)
+python cli.py categorize        # LLM item categories, cached by item name
+python cli.py report --month 2025-06   # prints tables + reports/report_2025-06.csv
+python cli.py months --last 6          # month-wise split by platform and by category (+ CSVs)
+python cli.py insights                 # analyst agent: month-wise breakdown, trends, top restaurants
+python cli.py ask "how much did I spend on pizza per month in 2026?"
+```
+
+Start with one site (Blinkit), get `login`, `learn` and `sync` working end to end, then add the others.
+
+The first time you run `login`, `learn` or `sync`, it asks for your delivery address as
+`society/building, area, city, state` (for example `Sunrise Heights, Alkapuri, Vadodara, Gujarat`), or
+`lat,lon` copied from Google Maps. A bare `City, State` is rejected because it lands on the city centre.
+The address is looked up once through OpenStreetMap; if the society isn't known there, the lookup drops
+the society, then the area, until it finds a match. The result is saved in `settings.json`. Every browser
+session shares those coordinates with geolocation permission already granted, so "Use my current
+location" works. If a site needs the address typed, the login agent types the full address into its
+search box. Change it with `python cli.py location`.
+
+When the OTP field appears, the code notices it (not the model) and asks you for the code in the
+terminal. It handles both a single OTP input and split one-digit boxes.
+
+### How the browser agent picks each step
+
+1. **Snapshot.** It lists only the elements you could actually click right now: the centre of each one
+   must hit the element itself. When a popup is open, only the popup's contents are listed.
+2. **Code checks.** It checks for an OTP field, or a logged-out page with a Login button.
+3. **Jev decides.** One TypeSafe call (`kind` and `item`, about 0.5 s) picks the next action. If
+   `TYPESAFE_API_KEY` isn't set, Jev is unsure (confidence below 0.4), or the last action failed or
+   repeated, a single GPT call decides that step instead.
+4. **Act.** It clicks normally, falls back to a real mouse click at the element's centre, then waits
+   until the page stops changing instead of using fixed sleeps.
+5. **No early finish.** It won't accept "done" while a Login button is visible, or while the OTP is still
+   missing. During `learn`, it won't accept "done" until a response with real order records has arrived for
+   a further page. Before refusing, code clicks a visible "Load More", "Next" or next page number ("2")
+   itself, just as it fills the OTP itself. A separate Jev yes/no check ("does this page show the user's
+   past orders?") must also agree. Each refusal can happen at most twice, so an unsure check can't block
+   for ever.
+6. **Ask, don't fail.** When it's stuck (a CAPTCHA, a sign-up form, an unclear page), it asks you a question
+   in the terminal. You can answer, fix it in the browser and press Enter, or type `stop`.
+
+Other details:
+- The snapshot also covers same-site iframes (Zomato's login form is one).
+- Links that open a new tab are followed.
+- Icon-only buttons take their label from their image or SVG.
+- Safe actions (scroll, wait, Escape) need less Jev confidence (0.3) than clicks and typing (0.4).
+- Every step is logged to `runs/<site>-<login|learn>-<time>.jsonl`: the decision, Jev's probabilities,
+  timings and progress, with the phone number and OTP masked. Use it to see why the agent did something.
+
+If you run `sync` before logging in, it notices that you're logged out and asks whether to log in now.
+
+**Instamart** isn't synced on its own. On swiggy.com, Instamart's "My Account" opens the same single order
+feed as Swiggy food (`/dapi/order/all`), and there's no separate web order list. So `sync swiggy` already
+stores everything the web shows, and a separate Instamart recipe could only duplicate Swiggy orders and
+mislabel them. `sync instamart` prints this explanation. Two safeguards in `learn` back this up: sites that
+share a database site may not share an order endpoint, and each site's own goal is passed to the agent.
+
+### How sync works
+
+1. **Fast path.** `sync` opens `orders_page_url` and calls the learned endpoint from inside the page with
+   `fetch(...)`, so the site's own cookies apply. It then follows the pagination with 1–2 s pauses until
+   it reaches `--since` or runs out of pages.
+2. **Fallback 1.** If the fast path fails, `sync` replays the recipe's `nav_trace` (clicks, scrolls and URL
+   checkpoints) and reads the order API responses the page loads.
+3. **Fallback 2.** If that also fails, `sync` logs `DRIFT`, runs discovery again, and overwrites the recipe.
+4. If the session has expired (a redirect to a login page, or a 401/403), `sync` stops and tells you to
+   run `login <site>`.
+
+Some sites only accept their own signed headers, so the fast path can't call their API directly. Zepto and
+Blinkit are like this. Their recipes are saved with `fast_path_ok: false`, and `sync` goes straight to the
+replay. The replay scrolls the order list and clicks "Load More" / "Show more" / "Next" when the list has
+one (Zepto). With a numbered pager (Zomato: 1 2 3 … 18), it clicks the next page number in sequence, never
+just any "2".
+
+`sync all` runs each site that already has a recipe in its own worker process, with its own Chrome and
+profile, 4 at a time (`--workers`). The 1–2 s pause between pages applies within each site. A site that
+still needs `learn`, or whose worker fails (for example because you're logged out), runs afterwards in
+the main process, where it can prompt you. With all 4 sites ready, a full sync takes about 90 s.
+
+`learn` checks pagination before saving a recipe. It fetches page 2, and if page 2 returns page 1's
+orders, the endpoint is ignoring the page parameter. That's how Zomato's page JSON fooled it at first;
+Zomato's pager actually calls `/webroutes/user/orders?page=N`. The recipe is rejected, and the error tells
+the LLM to use the request the site makes for "next page". Validation errors also report, field by field,
+what the mapping extracted from the first order. Every candidate response comes with an "order-shape"
+hint: the path to each order-like collection and one full example item. That way the LLM never maps
+fields from a truncated response.
+
+### Seeds: known endpoints as data
+
+`recipes/<site>.seed.json` holds an endpoint and its pagination that are already known, but no field
+mapping. When a seed exists, `learn` skips browsing. It fetches page 1 inside your logged-in tab, has the
+LLM write the `field_map` from that real response, and validates it like any other recipe. Swiggy ships
+with one: `GET /dapi/order/all`, paged with `?order_id=<last order id>`. That's the endpoint used by
+[this Swiggy expense tracker](https://www.ashutoshshukla.in/posts/how-i-built-swiggy-expense-tracker-chrome-extension/).
+Delete the seed file to fall back to discovery.
+
+Zomato's bare `zomato.com` is now an app-download page. The Zomato session starts at
+`https://www.zomato.com/<city>/restaurants` instead, where `<city>` comes from your saved address
+(`Bengaluru` becomes `bangalore`, and the Delhi NCR cities become `ncr`).
+
+### Resetting a recipe
+
+```bash
+python cli.py reset blinkit     # or delete recipes/blinkit.json
+python cli.py learn blinkit
+```
+
+The orders-page hint (`recipes/<site>.hint.txt`) stays where it is. Run `login` again to change it.
+To clear a login, delete `profiles/<site>`.
+
+## Data
+
+`expenses.db` (SQLite):
+
+- **`orders`**: `site`, `order_id` (primary key together with `site`), `sub_platform` (`instamart` for
+  Instamart), `placed_at` (ISO), `total_amount`, `currency`, `status` (normalized to `delivered`,
+  `cancelled`, `refunded`, `failed`, or the raw value in lowercase), `merchant`, `raw_json`.
+- **`order_items`**: `site`, `order_id`, `idx`, `name`, `qty`, `price`. The price is the line total.
+- **`item_categories`**: the category cache, keyed by normalized item name.
+
+Upserts are idempotent: running `sync` again updates existing orders and replaces their items.
+
+Reports leave out cancelled, refunded and failed orders. Zomato and Swiggy-food items always count as
+`food delivery` and are never sent to the LLM. Category totals are summed from item prices, so they
+won't exactly match order totals, which include fees and discounts. Zepto's and Blinkit's order lists
+carry no item prices. For those orders, the order total is split across the items by quantity, so the
+category is an estimate but the total adds up.
+
+## Analyst agent
+
+`months` prints two pivots, month × platform and month × category, using the same rules as `report`
+(cancelled, refunded and failed orders are left out). It writes them to `reports/monthly_platform.csv`
+and `reports/monthly_category.csv`.
+
+`ask` and `insights` use an LLM analyst that answers only from your database. It may call `run_sql`,
+which accepts a single `SELECT`/`WITH` query and runs it on a connection opened read-only
+(`mode=ro`). It can never change the data. `insights` asks it for a month-wise breakdown: totals,
+per-platform amounts, change from the previous month, top restaurants and stores, the category split,
+and recent changes.
+
+## Tests
+
+```bash
+pytest
+```
+
+The tests cover:
+- the guard rules, including bot-challenge POSTs;
+- field_map extraction on fixture JSON, dates without a year, and item lists written as one string;
+- pagination (page, offset and cursor, in the query string and in a POST body), and the page-2 check;
+- idempotent DB upserts;
+- the login helpers: OTP masking, refusing to finish early or unverified, and ask-user;
+- the monthly pivot and the read-only SQL guard.
