@@ -1,0 +1,6 @@
+playwright>=1.49
+openai>=1.40
+typer>=0.12
+python-dotenv>=1.0
+pytest>=8
+typesafe-sdk==0.6.0

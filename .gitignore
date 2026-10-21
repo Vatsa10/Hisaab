@@ -1,0 +1,17 @@
+# secrets and personal data - never commit
+.env
+settings.json
+expenses.db
+profiles/
+logs/
+reports/
+runs/
+
+# learned at runtime from your own accounts (contain account-specific URLs); seeds are generic and tracked
+recipes/*.json
+recipes/*.hint.txt
+!recipes/*.seed.json
+
+__pycache__/
+.pytest_cache/
+.ruff_cache/
