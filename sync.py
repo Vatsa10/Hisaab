@@ -3,6 +3,7 @@ import logging
 import random
 import re
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import agent
@@ -55,7 +56,8 @@ def normalize_phone(raw: str) -> str:
 
 
 def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=None,
-          profile_dir=None, location: dict | None = None) -> bool:
+          profile_dir=None, location: dict | None = None, runs_dir=None,
+          on_orders_url: Callable[[str], None] | None = None) -> bool:
     """With a phone number the LoginAgent fills the form and asks for the OTP; otherwise (or if it gets
     stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input.
 
@@ -72,7 +74,8 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
         done = None
         if phone:
             address = browser.effective_location(location).get("query") or ""
-            la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt, home=home)
+            la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt, home=home,
+                                  runs_dir=runs_dir)
             try:
                 done = la.run()
             except Exception as e:
@@ -83,7 +86,7 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
                       f"{agent.mask(done['note'], {'PHONE': phone})}")
                 return done["success"]
             if not done["success"]:
-                print(f"\n[{site}] automatic login stopped: {agent.mask(done['note'], {'PHONE': phone})}")
+                print(f"\n[{site}] automatic login stopped: {agent.mask(done['note'], la.secrets)}")
         if not done or not done["success"]:
             if unattended:
                 if done and done["note"] in _TIMEOUT_NOTES:
@@ -101,7 +104,9 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
             raise SessionExpired("orders page returned 401/403")
         if agent.shows_login_button(agent.snapshot(page)["elements"]):
             raise SessionExpired("the site still shows a Login button")
-        if not recipe:
+        if on_orders_url:  # a worker run keeps the URL per user; the global hint file is CLI-only
+            on_orders_url(orders_url)
+        elif not recipe:
             recipes.RECIPES.mkdir(exist_ok=True)
             recipes.hint_path(site).write_text(orders_url, encoding="utf-8")
     print(f"Session OK for {site}; orders page {urlsplit(orders_url).path}")

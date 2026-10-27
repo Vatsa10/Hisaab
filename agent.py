@@ -358,9 +358,11 @@ class Discovery:
     GOAL = "Open this site's order history page and load more past orders (scroll / show more) at least twice."
 
     def __init__(self, site, page, guard, capture, prompt: Callable[[str, str], str] | None = None,
-                 home: str | None = None):
+                 home: str | None = None, runs_dir: Path | None = None):
         self.site, self.page, self.guard, self.capture = site, page, guard, capture
         self._prompt = prompt
+        self.runs_dir = runs_dir  # per-run step-log dir (cloud worker); None: the global RUNS
+        self.run_log: Path | None = None
         self.home = home  # start page for recovery; None: home_url from the CLI's saved location
         self.refs: dict[str, dict] = {}
         self.snap: dict = {"elements": [], "aria": "", "overlay": False}
@@ -407,8 +409,8 @@ class Discovery:
             self.done = {"success": False, "note": "user stopped the agent", "url": self.page.url}
             return {"ok": True}
         settle(self.page)
-        # The answer may hold personal details: the models see only that the user answered, not what.
-        self.history.append(f"user answered ({len(answer)} chars)" if answer
+        # The model gets the answer text, with the phone/OTP masked out.
+        self.history.append(f"user answered: {mask(answer, self.secrets)}" if answer
                             else "user answered: (no answer; may have acted in the browser)")
         return {"answer": answer}
 
@@ -662,16 +664,21 @@ class Discovery:
     def record(self, entry: dict) -> None:
         """Pointer-style replayable run log: one JSON line per step in runs/<site>-<time>.jsonl."""
         try:
-            RUNS.mkdir(exist_ok=True)
+            if self.run_log is None:
+                self.run_log = self._new_run_log()
+            self.run_log.parent.mkdir(parents=True, exist_ok=True)
             with self.run_log.open("a", encoding="utf-8") as f:
                 f.write(mask(json.dumps(entry, ensure_ascii=False, default=str), self.secrets) + "\n")
         except OSError:
             pass
 
+    def _new_run_log(self) -> Path:
+        kind = "login" if self.login else "learn"
+        return (self.runs_dir or RUNS) / f"{self.site}-{kind}-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+
     def run(self) -> dict:
         started = time.time()
-        kind = "login" if self.login else "learn"
-        self.run_log = RUNS / f"{self.site}-{kind}-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+        self.run_log = self._new_run_log()
         for step in range(1, MAX_STEPS + 1):
             if time.time() - started > TIME_BUDGET_S:
                 break
@@ -743,8 +750,9 @@ class LoginAgent(Discovery):
     }
 
     def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False,
-                 prompt: Callable[[str, str], str] | None = None, home: str | None = None):
-        super().__init__(site, page, guard, capture, prompt, home)
+                 prompt: Callable[[str, str], str] | None = None, home: str | None = None,
+                 runs_dir: Path | None = None):
+        super().__init__(site, page, guard, capture, prompt, home, runs_dir)
         self.secrets["PHONE"] = phone
         self.location, self.dry_run = location, dry_run
         self.phone_typed = self.otp_entered = False

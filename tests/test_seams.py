@@ -79,12 +79,12 @@ def test_ask_user_prompt_timeout_ends_run():
 
 
 @pytest.mark.parametrize("injected", [True, False])
-def test_ask_user_answer_is_not_put_in_model_history(monkeypatch, injected):
+def test_ask_user_answer_reaches_model_history_masked(monkeypatch, injected):
     from types import SimpleNamespace
 
     import agent
     monkeypatch.setattr(agent, "settle", lambda *a, **k: None)
-    answer = "my flat is 4B, code 7781"
+    answer = "my flat is 4B, phone 9000000000"
     if injected:
         la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000",
                         prompt=lambda q, kind: answer)
@@ -92,8 +92,7 @@ def test_ask_user_answer_is_not_put_in_model_history(monkeypatch, injected):
         monkeypatch.setattr("builtins.input", lambda *a: answer)
         la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000")
     assert la.ask_user("which flat?") == {"answer": answer}
-    assert la.history == [f"user answered ({len(answer)} chars)"]
-    assert answer not in " ".join(la.history)
+    assert la.history == ["user answered: my flat is 4B, phone <PHONE>"]
 
 
 def test_type_value_otp_prompt_timeout_ends_run():
