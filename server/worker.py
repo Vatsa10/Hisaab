@@ -22,8 +22,9 @@ from psycopg import sql
 
 import browser
 import sync
-from server import jobs, store, vault
+from server import fake_sites, jobs, store, vault
 from server.config import Settings, settings
+from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
 
 log = logging.getLogger("worker")
@@ -65,6 +66,17 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
 
 # Plan 1 name (it only asked for OTPs then); kept so code and tests written against Plan 1 still work.
 make_otp_prompt = make_prompt
+
+
+def _fake_mode() -> bool:
+    """Only WORKER_FAKE=1 swaps the browser login/sync for server.fake_sites (no browser, vault or proxy)."""
+    return os.getenv("WORKER_FAKE") == "1"
+
+
+def _check_fake_mode(database_url: str) -> None:
+    """Fake data must never be written into a real project: refuse unless the database is on this machine."""
+    if _fake_mode() and not is_local_db(database_url):
+        raise RuntimeError("WORKER_FAKE=1 refused: DATABASE_URL is not a local database")
 
 
 def _profiles_root() -> Path:
@@ -191,7 +203,7 @@ def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
 def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profile_dir: Path,
              proxy_server: str | None) -> None:
     own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
-    orders = sync.fetch_orders(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
+    orders = (fake_sites.fetch_orders if _fake_mode() else sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                                allow_learn=False, proxy_server=proxy_server,
                                recipe_loader=lambda site: store.get_recipe(conn, site),
                                orders_page_url=own.get("orders_page_url"))
@@ -221,6 +233,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                                  args=(s.database_url, job.id, job.worker_id, s.heartbeat_s, stop_hb,
                                        s.max_job_s, lambda: exit_process(EXIT_JOB_OVERRUN)))
     vault_store = None
+    fake = _fake_mode()
 
     def fail(error: str, status: str | None = None) -> None:
         if status is None and _status(conn, job.user_id, db_site) == "syncing":
@@ -230,6 +243,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         jobs.finish(conn, job.id, error=error, worker_id=job.worker_id)
 
     def save_profile() -> None:
+        if fake:
+            return
         key = vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
         store.set_connection(conn, job.user_id, db_site, profile_blob_key=key)
 
@@ -237,9 +252,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     heartbeat.start()
     try:
         shutil.rmtree(profile_dir, ignore_errors=True)
-        vault_store = vault.store_from_url(s.profile_store_url)
+        vault_store = None if fake else vault.store_from_url(s.profile_store_url)
         try:
-            vault.restore_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
+            if not fake:
+                vault.restore_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
         except vault.VaultError as e:
             log.warning("job %s: stored profile unusable (%s); starting empty", job.id, type(e).__name__)
             shutil.rmtree(profile_dir, ignore_errors=True)
@@ -250,7 +266,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
 
         with contextlib.ExitStack() as stack:
             proxy_server = None
-            if s.proxy_url_template:
+            if s.proxy_url_template and not fake:
                 # Any failure here (a template that does not parse, a relay that will not start, an unreachable
                 # or refusing upstream) is "proxy_unavailable". Exception text is never used: it can quote the
                 # upstream URL, which carries the proxy credentials.
@@ -269,7 +285,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 store.set_connection(conn, job.user_id, db_site, status="syncing")
                 listen_conn = _connect(s.database_url)
                 prompt = make_prompt(listen_conn, conn, job.id, s.otp_timeout_s)
-                ok = sync.login(job.site, phone, prompt=prompt, profile_dir=profile_dir,
+                ok = (fake_sites.login if fake else sync.login)(job.site, phone, prompt=prompt, profile_dir=profile_dir,
                                 location=_location(conn, job.user_id), runs_dir=runs_dir,
                                 on_orders_url=lambda url: store.set_connection(conn, job.user_id, db_site,
                                                                                orders_page_url=url),
@@ -408,6 +424,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     exit_process = exit_process or os._exit
     s = settings(for_worker=True)
+    _check_fake_mode(s.database_url)
     _wipe_profiles_root(s.profile_store_url)
     log.info("worker started id=%s", worker_id)
     drain = _Drain(s, worker_id, exit_process)
