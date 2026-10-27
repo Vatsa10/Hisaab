@@ -26,13 +26,25 @@ def test_recipes_readable_by_any_user(pg, as_user):
         assert pg.execute("select count(*) from recipes").fetchone() == (1,)
 
 
-def test_one_running_job_per_user_site(pg):
-    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'connect','zepto','running')", (A,))
-    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'sync','zepto','queued')", (A,))
-    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'sync','blinkit','running')", (A,))
+def test_one_running_job_per_user_profile(pg):
+    pg.execute("insert into jobs(user_id, type, site, profile, status) values (%s,'connect','zepto','zepto','running')", (A,))
+    pg.execute("insert into jobs(user_id, type, site, profile, status) values (%s,'sync','zepto','zepto','queued')", (A,))
+    pg.execute("insert into jobs(user_id, type, site, profile, status) values (%s,'sync','blinkit','blinkit','running')", (A,))
     with pytest.raises(psycopg.errors.UniqueViolation) as e:
         pg.execute("update jobs set status='running' where type='sync' and site='zepto'")
     assert e.value.diag.constraint_name == "one_running_job_per_profile"
+
+
+def test_instamart_and_swiggy_share_a_running_slot(pg):
+    pg.execute("insert into jobs(user_id, type, site, profile, status) values (%s,'sync','swiggy','swiggy','running')", (A,))
+    with pytest.raises(psycopg.errors.UniqueViolation) as e:
+        pg.execute("insert into jobs(user_id, type, site, profile, status) values (%s,'sync','instamart','swiggy','running')", (A,))
+    assert e.value.diag.constraint_name == "one_running_job_per_profile"
+
+
+def test_jobs_have_heartbeat_column(pg):
+    assert pg.execute("select count(*) from information_schema.columns where table_name='jobs' "
+                      "and column_name in ('heartbeat_at','profile')").fetchone() == (2,)
 
 
 TABLES = ("profiles", "connections", "orders", "order_items", "item_categories", "recipes", "jobs", "consents")

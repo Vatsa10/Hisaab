@@ -27,7 +27,7 @@ def test_finish_strips_phone(pg):
 def test_requeue_stale_running_jobs(pg):
     jid = jobs.enqueue(pg, A, "sync", "zepto")
     jobs.claim(pg, "w1", ("sync",))
-    pg.execute("update jobs set started_at = now() - interval '11 minutes'")
+    pg.execute("update jobs set started_at = now() - interval '11 minutes', heartbeat_at = now() - interval '11 minutes'")
     assert jobs.requeue_stale(pg, 600) == 1
     assert jobs.claim(pg, "w2", ("sync",)).id == jid
 
@@ -96,7 +96,7 @@ def test_requeue_stale_fails_dead_connect_jobs(pg):
     jobs.claim(pg, "w1", ("connect",))
     jobs.claim(pg, "w1", ("sync",))
     store.set_connection(pg, A, "zepto", status="syncing")
-    pg.execute("update jobs set started_at = now() - interval '11 minutes'")
+    pg.execute("update jobs set started_at = now() - interval '11 minutes', heartbeat_at = now() - interval '11 minutes'")
     assert jobs.requeue_stale(pg, 600) == 2
     row = pg.execute("select status, error, payload, finished_at is not null from jobs where id=%s",
                      (connect,)).fetchone()
@@ -110,10 +110,34 @@ def test_stale_worker_cannot_finish_a_reclaimed_job(pg):
     jid = jobs.enqueue(pg, A, "sync", "zepto")
     first = jobs.claim(pg, "w1", ("sync",))
     assert first.worker_id == "w1"
-    pg.execute("update jobs set started_at = now() - interval '11 minutes'")
+    pg.execute("update jobs set started_at = now() - interval '11 minutes', heartbeat_at = now() - interval '11 minutes'")
     jobs.requeue_stale(pg, 600)
     assert jobs.claim(pg, "w2", ("sync",)).id == jid
     jobs.finish(pg, jid, error="late failure", worker_id="w1")  # the old worker wakes up
     assert pg.execute("select status, error, worker_id from jobs").fetchone() == ("running", None, "w2")
     jobs.finish(pg, jid, worker_id="w2")
     assert pg.execute("select status, error from jobs").fetchone() == ("done", None)
+
+
+def test_heartbeating_job_is_not_requeued(pg):
+    jid = jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
+    pg.execute("update jobs set started_at = now() - interval '2 hours'")
+    assert jobs.heartbeat(pg, jid, "w1") is True
+    assert jobs.requeue_stale(pg, 2400) == 0
+
+
+def test_silent_job_is_requeued(pg):
+    jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
+    pg.execute("update jobs set heartbeat_at = now() - interval '41 minutes'")
+    assert jobs.requeue_stale(pg, 2400) == 1
+
+
+def test_heartbeat_from_other_worker_is_ignored(pg):
+    jid = jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
+    assert jobs.heartbeat(pg, jid, "w2") is False
+
+
+def test_shared_profile_blocks_second_running_job(pg):
+    jobs.enqueue(pg, A, "sync", "swiggy"); jobs.enqueue(pg, A, "sync", "instamart")
+    assert jobs.claim(pg, "w1", ("sync",)) is not None
+    assert jobs.claim(pg, "w2", ("sync",)) is None

@@ -71,9 +71,14 @@ def destructive_db_allowed(url: str, env) -> bool:
     (localhost / 127.0.0.1 / ::1 / a local socket) unless ALLOW_DESTRUCTIVE_TEST_DB=1 is set."""
     if env.get("ALLOW_DESTRUCTIVE_TEST_DB") == "1":
         return True
+    import os
+
     from psycopg.conninfo import conninfo_to_dict
     try:
-        hosts = (conninfo_to_dict(url).get("host") or "").split(",")
+        params = conninfo_to_dict(url)
     except Exception:
         return False
+    # libpq connects to hostaddr when it is given, whatever host says; with no host at all it uses PGHOST.
+    target = params.get("hostaddr") or params.get("host") or env.get("PGHOST") or os.environ.get("PGHOST") or ""
+    hosts = target.split(",")
     return all(h.strip().strip("[]") in LOCAL_HOSTS or h.startswith("/") for h in hosts)

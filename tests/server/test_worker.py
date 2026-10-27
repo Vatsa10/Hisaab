@@ -234,7 +234,7 @@ def test_main_reconnects_after_a_db_error(pg, monkeypatch):
 def test_main_uses_stale_job_setting(pg, monkeypatch):
     jid = jobs.enqueue(pg, A, "sync", "zepto")
     jobs.claim(pg, "other", ("sync",))
-    pg.execute("update jobs set started_at = now() - interval '20 minutes' where id=%s", (jid,))
+    pg.execute("update jobs set started_at = now() - interval '20 minutes', heartbeat_at = now() - interval '20 minutes' where id=%s", (jid,))
     monkeypatch.setattr(worker, "settings", settings_for_tests)
     monkeypatch.setattr(worker.time, "sleep", lambda _: None)
     worker.main("w1", poll_s=0.01, max_loops=1)

@@ -23,3 +23,18 @@ def test_remote_database_is_refused(url):
 def test_remote_database_allowed_with_explicit_opt_in():
     url = "postgresql://postgres:pw@db.abcd.supabase.co:5432/postgres"
     assert destructive_db_allowed(url, {"ALLOW_DESTRUCTIVE_TEST_DB": "1"})
+
+
+def test_guard_refuses_remote_hostaddr():
+    assert not destructive_db_allowed("postgresql://u:p@localhost/db?hostaddr=10.0.0.5", {})
+
+
+def test_guard_allows_local_hostaddr():
+    assert destructive_db_allowed("postgresql://u:p@localhost/db?hostaddr=127.0.0.1", {})
+
+
+def test_guard_uses_pghost_when_url_has_no_host(monkeypatch):
+    monkeypatch.setenv("PGHOST", "db.example.com")
+    assert not destructive_db_allowed("postgresql:///postgres", {})
+    monkeypatch.setenv("PGHOST", "localhost")
+    assert destructive_db_allowed("postgresql:///postgres", {})
