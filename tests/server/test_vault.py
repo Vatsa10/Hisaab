@@ -1,9 +1,11 @@
 import base64
 import io
 import os
+import json
 import tarfile
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from server import vault
 from helpers import A, B
@@ -17,6 +19,17 @@ def make_profile(root):
     return root
 
 
+def save(store, key, user, profile, src):
+    vault.stamp(src, user, profile)
+    return vault.save_profile(store, key, user, profile, src)
+
+
+def _legacy_blob(key, user, profile, plaintext):
+    nonce = os.urandom(12)
+    ct = AESGCM(vault._user_key(key, user)).encrypt(nonce, plaintext, f"{user}/{profile}".encode())
+    return nonce + ct
+
+
 def _setup(tmp_path):
     src = make_profile(tmp_path / "src")
     store = vault.LocalStore(tmp_path / "store")
@@ -25,7 +38,7 @@ def _setup(tmp_path):
 
 def test_round_trip_restores_files_and_skips_caches(tmp_path):
     src, store, key = _setup(tmp_path)
-    k = vault.save_profile(store, key, A, "zepto", src)
+    k = save(store, key, A, "zepto", src)
     assert k == f"{A}/zepto.tar.gz.enc"
     assert vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
     assert (tmp_path / "dst/Default/Cookies").read_bytes() == b"cookie-db"
@@ -35,14 +48,14 @@ def test_round_trip_restores_files_and_skips_caches(tmp_path):
 
 def test_blob_is_encrypted(tmp_path):
     src, store, key = _setup(tmp_path)
-    vault.save_profile(store, key, A, "zepto", src)
+    save(store, key, A, "zepto", src)
     raw = store.get(vault.blob_key(A, "zepto"))
     assert b"cookie-db" not in raw and b"Cookies" not in raw
 
 
 def test_other_users_key_cannot_decrypt(tmp_path):
     src, store, key = _setup(tmp_path)
-    vault.save_profile(store, key, A, "zepto", src)
+    save(store, key, A, "zepto", src)
     store.put(vault.blob_key(B, "zepto"), store.get(vault.blob_key(A, "zepto")))
     with pytest.raises(vault.VaultError):
         vault.restore_profile(store, key, B, "zepto", tmp_path / "dst")
@@ -50,7 +63,7 @@ def test_other_users_key_cannot_decrypt(tmp_path):
 
 def test_tampered_blob_raises(tmp_path):
     src, store, key = _setup(tmp_path)
-    k = vault.save_profile(store, key, A, "zepto", src)
+    k = save(store, key, A, "zepto", src)
     raw = bytearray(store.get(k))
     raw[len(raw) // 2] ^= 1
     store.put(k, bytes(raw))
@@ -68,6 +81,98 @@ def test_short_blob_raises(tmp_path):
 def test_missing_blob_returns_false(tmp_path):
     store = vault.LocalStore(tmp_path / "store")
     assert vault.restore_profile(store, os.urandom(32), A, "zepto", tmp_path / "dst") is False
+
+
+def test_v1_blob_layout(tmp_path):
+    src, store, key = _setup(tmp_path)
+    save(store, key, A, "zepto", src)
+    raw = store.get(vault.blob_key(A, "zepto"))
+    assert raw.startswith(b"EAPV")
+    assert vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
+    assert (tmp_path / "dst/Default/Cookies").read_bytes() == b"cookie-db"
+
+
+def test_legacy_blob_still_restores_and_is_stamped(tmp_path):
+    src, store, key = _setup(tmp_path)
+    store.put(vault.blob_key(A, "zepto"), _legacy_blob(key, A, "zepto", vault._pack(src)))
+    dst = tmp_path / "dst"
+    assert vault.restore_profile(store, key, A, "zepto", dst)
+    assert (dst / "Default/Cookies").read_bytes() == b"cookie-db"
+    vault.check_owner(dst, A, "zepto")  # stamped, does not raise
+    assert json.loads((dst / vault.CANARY_NAME).read_text())["user_id"] == A
+
+
+def test_wrong_master_key_is_key_mismatch(tmp_path):
+    src, store, key = _setup(tmp_path)
+    save(store, key, A, "zepto", src)
+    with pytest.raises(vault.VaultKeyMismatch):
+        vault.restore_profile(store, os.urandom(32), A, "zepto", tmp_path / "dst")
+
+
+@pytest.mark.parametrize("idx", [0, 3, 5, 10, 20])
+def test_flipped_header_byte_fails_auth(tmp_path, idx):
+    src, store, key = _setup(tmp_path)
+    k = save(store, key, A, "zepto", src)
+    raw = bytearray(store.get(k))
+    raw[idx] ^= 1
+    store.put(k, bytes(raw))
+    with pytest.raises(vault.VaultError):
+        vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
+
+
+def test_flipped_nonce_byte_fails_auth(tmp_path):
+    src, store, key = _setup(tmp_path)
+    k = save(store, key, A, "zepto", src)
+    raw = bytearray(store.get(k))
+    raw[len(vault.MAGIC) + 1 + 16] ^= 1
+    store.put(k, bytes(raw))
+    with pytest.raises(vault.VaultError):
+        vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
+
+
+def test_unknown_version_rejected(tmp_path):
+    src, store, key = _setup(tmp_path)
+    k = save(store, key, A, "zepto", src)
+    raw = bytearray(store.get(k))
+    raw[4] = 2
+    store.put(k, bytes(raw))
+    with pytest.raises(vault.VaultError, match="unsupported vault format"):
+        vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
+
+
+def test_save_refuses_other_users_profile(tmp_path):
+    src, store, key = _setup(tmp_path)
+    vault.stamp(src, B, "zepto")
+    with pytest.raises(vault.ProfileOwnerMismatch):
+        vault.save_profile(store, key, A, "zepto", src)
+    assert store.get(vault.blob_key(A, "zepto")) is None
+    assert not any(store.root.rglob("*")) if store.root.exists() else True
+
+
+def test_save_refuses_unstamped_dir(tmp_path):
+    src, store, key = _setup(tmp_path)
+    with pytest.raises(vault.ProfileOwnerMismatch):
+        vault.save_profile(store, key, A, "zepto", src)
+    assert store.get(vault.blob_key(A, "zepto")) is None
+
+
+def test_restore_with_foreign_canary_wipes_dir(tmp_path):
+    src, store, key = _setup(tmp_path)
+    vault.stamp(src, B, "zepto")
+    store.put(vault.blob_key(A, "zepto"), _legacy_blob(key, A, "zepto", vault._pack(src)))
+    dst = tmp_path / "dst"
+    with pytest.raises(vault.ProfileOwnerMismatch):
+        vault.restore_profile(store, key, A, "zepto", dst)
+    assert not dst.exists() or not any(dst.iterdir())
+
+
+def test_delete_profile_removes_only_that_profile(tmp_path):
+    src, store, key = _setup(tmp_path)
+    save(store, key, A, "swiggy", src)
+    save(store, key, A, "zomato", src)
+    assert vault.delete_profile(store, A, "swiggy") == 1
+    assert store.get(vault.blob_key(A, "swiggy")) is None
+    assert store.get(vault.blob_key(A, "zomato")) is not None
 
 
 def _evil_blob(key, member_setup):
@@ -124,9 +229,9 @@ def test_archive_with_parent_path_is_refused(tmp_path):
 
 def test_delete_user_profiles_only_touches_that_user(tmp_path):
     src, store, key = _setup(tmp_path)
-    vault.save_profile(store, key, A, "zepto", src)
-    vault.save_profile(store, key, A, "blinkit", src)
-    vault.save_profile(store, key, B, "zepto", src)
+    save(store, key, A, "zepto", src)
+    save(store, key, A, "blinkit", src)
+    save(store, key, B, "zepto", src)
     assert vault.delete_user_profiles(store, A) == 2
     assert store.get(vault.blob_key(A, "zepto")) is None
     assert store.get(vault.blob_key(B, "zepto")) is not None
@@ -149,7 +254,7 @@ def test_blob_store_round_trip(tmp_path):
     src = make_profile(tmp_path / "src")
     store = vault.BlobStore(os.environ["AZURITE_CONNECTION_STRING"], container="profiles-test")
     key = os.urandom(32)
-    vault.save_profile(store, key, A, "zepto", src)
+    save(store, key, A, "zepto", src)
     assert vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
     assert vault.delete_user_profiles(store, A) == 1
 
@@ -163,7 +268,7 @@ def test_pack_skips_singleton_lockfile_and_symlinks(tmp_path):
         os.symlink("Local State", src / "rel_link")
     except (OSError, NotImplementedError):
         pass  # no symlink privilege (Windows): regular-file exclusions are still checked
-    vault.save_profile(store, key, A, "zepto", src)
+    save(store, key, A, "zepto", src)
     dst = tmp_path / "dst"
     assert vault.restore_profile(store, key, A, "zepto", dst)
     assert (dst / "Default/Cookies").read_bytes() == b"cookie-db"

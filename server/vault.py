@@ -2,16 +2,24 @@
 
 A profile directory is packed as tar.gz and sealed with AES-256-GCM using a per-user key
 derived from the master key (HKDF-SHA256, info = b"profile:" + user_id). The blob layout is
-nonce(12) || ciphertext+tag, and the AAD binds it to f"{user_id}/{profile}". Plaintext
-profile content is never logged.
+MAGIC(4) || version(1) || key_check(16) || nonce(12) || ciphertext+tag. The AAD is the
+whole header plus f"{user_id}/{profile}", so a flipped header byte fails authentication.
+key_check is an HMAC of the per-user key, so a wrong master key is reported distinctly.
+Blobs written before versioning (nonce(12) || ciphertext+tag, AAD f"{user_id}/{profile}")
+still restore. Each profile carries an owner canary file that save and restore verify.
+Plaintext profile content is never logged.
 """
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import io
+import json
 import os
 import posixpath
+import shutil
 import tarfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -23,11 +31,23 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 NONCE_LEN = 12
+MAGIC = b"EAPV"
+FORMAT_VERSION = 1
+KEY_CHECK_LEN = 16
+CANARY_NAME = ".ea-profile.json"
 EXCLUDED_NAMES = {"Cache", "Code Cache", "GPUCache", "DawnCache", "Crashpad"}
 EXCLUDED_SEQUENCES = [("Service Worker", "CacheStorage")]
 
 
 class VaultError(Exception):
+    pass
+
+
+class VaultKeyMismatch(VaultError):
+    pass
+
+
+class ProfileOwnerMismatch(VaultError):
     pass
 
 
@@ -129,18 +149,36 @@ def _aad(user_id: str, profile: str) -> bytes:
     return f"{user_id}/{profile}".encode()
 
 
+def _key_check(user_key: bytes) -> bytes:
+    return hmac.new(user_key, b"ea-vault-key-check", hashlib.sha256).digest()[:KEY_CHECK_LEN]
+
+
 def _seal(master_key: bytes, user_id: str, profile: str, plaintext: bytes) -> bytes:
+    user_key = _user_key(master_key, user_id)
+    header = MAGIC + bytes([FORMAT_VERSION]) + _key_check(user_key)
     nonce = os.urandom(NONCE_LEN)
-    ct = AESGCM(_user_key(master_key, user_id)).encrypt(nonce, plaintext, _aad(user_id, profile))
-    return nonce + ct
+    ct = AESGCM(user_key).encrypt(nonce, plaintext, header + _aad(user_id, profile))
+    return header + nonce + ct
 
 
 def _open(master_key: bytes, user_id: str, profile: str, blob: bytes) -> bytes:
-    if len(blob) < NONCE_LEN + 16:
-        raise VaultError("profile blob is too short")
+    user_key = _user_key(master_key, user_id)
+    if blob.startswith(MAGIC):
+        hlen = len(MAGIC) + 1 + KEY_CHECK_LEN
+        if len(blob) < hlen + NONCE_LEN + 16:
+            raise VaultError("profile blob is too short")
+        if blob[len(MAGIC)] != FORMAT_VERSION:
+            raise VaultError("unsupported vault format")
+        header = blob[:hlen]
+        if not hmac.compare_digest(header[len(MAGIC) + 1:], _key_check(user_key)):
+            raise VaultKeyMismatch("profile blob was sealed with a different key")
+        nonce, body, aad = blob[hlen:hlen + NONCE_LEN], blob[hlen + NONCE_LEN:], header + _aad(user_id, profile)
+    else:  # legacy: nonce || ciphertext+tag
+        if len(blob) < NONCE_LEN + 16:
+            raise VaultError("profile blob is too short")
+        nonce, body, aad = blob[:NONCE_LEN], blob[NONCE_LEN:], _aad(user_id, profile)
     try:
-        return AESGCM(_user_key(master_key, user_id)).decrypt(
-            blob[:NONCE_LEN], blob[NONCE_LEN:], _aad(user_id, profile))
+        return AESGCM(user_key).decrypt(nonce, body, aad)
     except InvalidTag as e:
         raise VaultError("profile blob failed authentication") from e
 
@@ -203,9 +241,29 @@ def _unpack(data: bytes, dest_dir: Path) -> None:
         raise VaultError(f"profile archive could not be extracted: {type(e).__name__}") from e
 
 
+# ---------------------------------------------------------------- owner canary
+
+def stamp(profile_dir: Path, user_id: str, profile: str) -> None:
+    d = Path(profile_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / CANARY_NAME).write_text(
+        json.dumps({"v": 1, "user_id": user_id, "profile": profile}), encoding="utf-8")
+
+
+def check_owner(profile_dir: Path, user_id: str, profile: str) -> None:
+    try:
+        data = json.loads((Path(profile_dir) / CANARY_NAME).read_text(encoding="utf-8"))
+        ok = data["user_id"] == user_id and data["profile"] == profile
+    except (OSError, ValueError, KeyError, TypeError):
+        ok = False
+    if not ok:
+        raise ProfileOwnerMismatch("profile directory is not stamped for this user and profile")
+
+
 # ---------------------------------------------------------------- public API
 
 def save_profile(store, master_key: bytes, user_id: str, profile: str, profile_dir: Path) -> str:
+    check_owner(profile_dir, user_id, profile)
     key = blob_key(user_id, profile)
     store.put(key, _seal(master_key, user_id, profile, _pack(profile_dir)))
     return key
@@ -215,8 +273,22 @@ def restore_profile(store, master_key: bytes, user_id: str, profile: str, dest_d
     blob = store.get(blob_key(user_id, profile))
     if blob is None:
         return False
+    legacy = not blob.startswith(MAGIC)
     _unpack(_open(master_key, user_id, profile, blob), dest_dir)
+    if legacy and not (Path(dest_dir) / CANARY_NAME).exists():
+        stamp(dest_dir, user_id, profile)
+    try:
+        check_owner(dest_dir, user_id, profile)
+    except ProfileOwnerMismatch:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
     return True
+
+
+def delete_profile(store, user_id: str, profile: str) -> int:
+    key = blob_key(user_id, profile)
+    n = store.delete_prefix(key)
+    return n
 
 
 def delete_user_profiles(store, user_id: str) -> int:
