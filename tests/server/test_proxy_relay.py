@@ -289,3 +289,15 @@ def test_open_site_passes_proxy_server(monkeypatch, tmp_path):
 def test_open_site_without_proxy_has_no_proxy_flags(monkeypatch, tmp_path):
     args = _open_dead(monkeypatch, tmp_path)
     assert not any(a.startswith("--proxy") for a in args)
+
+
+def test_open_site_appends_chrome_extra_args(monkeypatch, tmp_path):
+    monkeypatch.setenv("CHROME_EXTRA_ARGS", "--no-sandbox  --disable-dev-shm-usage")
+    args = _open_dead(monkeypatch, tmp_path)
+    assert "--no-sandbox" in args and "--disable-dev-shm-usage" in args
+    assert args.index("about:blank") == len(args) - 1
+
+
+def test_open_site_without_extra_args_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHROME_EXTRA_ARGS", raising=False)
+    assert "--no-sandbox" not in _open_dead(monkeypatch, tmp_path)

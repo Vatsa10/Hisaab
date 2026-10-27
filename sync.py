@@ -57,16 +57,18 @@ def normalize_phone(raw: str) -> str:
 
 def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=None,
           profile_dir=None, location: dict | None = None, runs_dir=None,
-          on_orders_url: Callable[[str], None] | None = None) -> bool:
+          on_orders_url: Callable[[str], None] | None = None, proxy_server: str | None = None,
+          recipe_loader: Callable[[str], dict | None] | None = None) -> bool:
     """With a phone number the LoginAgent fills the form and asks for the OTP; otherwise (or if it gets
     stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input.
 
     An injected prompt(text, kind) means an unattended run: there is no manual fallback. A prompt that timed
     out raises OtpTimeout; any other failure returns False."""
     unattended = prompt is not None
-    recipe = recipes.load(site)
+    recipe = (recipe_loader or recipes.load)(site)
     home = browser.home_url(site, location)  # location None: the CLI's saved one; {}: none
-    with open_site(site, login_mode=True, profile_dir=profile_dir, location=location) as (_, page, guard, capture):
+    with open_site(site, login_mode=True, profile_dir=profile_dir, location=location,
+                   proxy_server=proxy_server) as (_, page, guard, capture):
         try:
             browser.goto(page, home)
         except Exception as e:  # e.g. a bot-filter 403; the agent backs off and retries from the error page
@@ -215,16 +217,18 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
 
 
 def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None,
-                 allow_learn: bool = True) -> list[dict]:
+                 allow_learn: bool = True, proxy_server: str | None = None,
+                 recipe_loader: Callable[[str], dict | None] | None = None) -> list[dict]:
     """Fast path -> nav_trace replay -> re-learn; returns the orders (no database).
-    allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead."""
-    recipe = recipes.load(site)
+    allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead.
+    recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file."""
+    recipe = (recipe_loader or recipes.load)(site)
     if not recipe:
         if not allow_learn:
             raise RecipeError(f"no recipe for {site}; an admin must learn it")
         recipe = learn(site)
     with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
-                   location=location) as (_, page, guard, capture):
+                   location=location, proxy_server=proxy_server) as (_, page, guard, capture):
         orders = None
         goto(page, recipe["orders_page_url"])
         if recipe.get("fast_path_ok", True):

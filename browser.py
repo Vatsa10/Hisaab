@@ -259,6 +259,7 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
     if proxy_server:
         # <-loopback> clears Chrome's implicit loopback bypass so even 127.0.0.1 goes via the relay
         chrome_args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>"]
+    chrome_args += os.environ.get("CHROME_EXTRA_ARGS", "").split()  # e.g. --no-sandbox in a container
     proc = subprocess.Popen(
         chrome_args + ["about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

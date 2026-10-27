@@ -226,6 +226,25 @@ def reset(site: str):
         print(f"removed {p}")
 
 
+@app.command("publish-recipe")
+def publish_recipe(site: str):
+    """Admin: publish the locally learned recipes/<site>.json to Postgres (DATABASE_URL) for the cloud worker."""
+    import psycopg
+
+    from server import store
+    recipe = recipes.load(_check_site(site))
+    if recipe is None:
+        typer.secho(f"no learned recipe for {site}: run `python cli.py learn {site}` first", fg="red")
+        raise typer.Exit(1)
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        typer.secho("DATABASE_URL is not set", fg="red")
+        raise typer.Exit(1)
+    with psycopg.connect(url, autocommit=True) as conn:
+        version = store.put_recipe(conn, site, recipe)
+    typer.echo(f"published {site} recipe as version {version}")
+
+
 if __name__ == "__main__":
     _setup_logging()
     app()

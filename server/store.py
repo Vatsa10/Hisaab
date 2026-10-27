@@ -61,3 +61,19 @@ def get_profile(conn, user_id: str) -> dict | None:
     if row is not None:
         row["user_id"] = str(row["user_id"])
     return row
+
+
+def get_recipe(conn, site: str, kind: str = "orders") -> dict | None:
+    """The learned recipe for a site, or None. Recipes are shared by all users."""
+    row = conn.execute("SELECT recipe FROM recipes WHERE site=%s AND kind=%s", (site, kind)).fetchone()
+    return row[0] if row else None
+
+
+def put_recipe(conn, site: str, recipe: dict, kind: str = "orders") -> int:
+    """Insert or replace a site's recipe; the version increments on every put. Returns the new version."""
+    return conn.execute(
+        "INSERT INTO recipes (site, kind, recipe) VALUES (%s,%s,%s) "
+        "ON CONFLICT (site, kind) DO UPDATE SET recipe=excluded.recipe, version=recipes.version+1, "
+        "learned_at=now(), healthy=true RETURNING version",
+        (site, kind, Jsonb(recipe)),
+    ).fetchone()[0]

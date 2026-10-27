@@ -52,3 +52,15 @@ def test_get_profile(pg):
     pg.execute("insert into profiles (user_id, display_name, address) values (%s, 'Asha', 'Pune')", (A,))
     p = store.get_profile(pg, A)
     assert p["display_name"] == "Asha" and p["address"] == "Pune" and p["user_id"] == A
+
+
+def test_recipe_put_get_and_version(pg):
+    assert store.get_recipe(pg, "zepto") is None
+    assert store.put_recipe(pg, "zepto", {"orders_page_url": "https://x/1", "n": 1}) == 1
+    assert store.get_recipe(pg, "zepto") == {"orders_page_url": "https://x/1", "n": 1}
+    assert store.put_recipe(pg, "zepto", {"orders_page_url": "https://x/2"}) == 2
+    assert store.get_recipe(pg, "zepto") == {"orders_page_url": "https://x/2"}
+    assert store.get_recipe(pg, "blinkit") is None
+    assert store.get_recipe(pg, "zepto", kind="search") is None
+    assert store.put_recipe(pg, "zepto", {"s": 1}, kind="search") == 1
+    assert pg.execute("select healthy from recipes where site='zepto' and kind='orders'").fetchone() == (True,)
