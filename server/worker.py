@@ -22,7 +22,7 @@ from psycopg import sql
 
 import browser
 import sync
-from server import fake_sites, jobs, store, vault
+from server import categorize_pg, fake_sites, jobs, store, vault
 from server.config import Settings, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
@@ -200,15 +200,39 @@ def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
         (user_id, site, secrets.token_hex(6))).fetchone()[0]
 
 
+_categorize_skip_logged = False
+_NOT_COUNTED = ("cancelled", "refunded", "failed")  # same statuses the spend views leave out
+
+
+def _categorize(conn) -> None:
+    """Categorise items the sync just stored. Off with CATEGORIZE=0 or without OPENAI_API_KEY (logged once per
+    process). A failure is logged by exception class only (the text can quote a key) and never fails the job."""
+    global _categorize_skip_logged
+    if os.getenv("CATEGORIZE") == "0" or not (os.getenv("OPENAI_API_KEY") or "").strip():
+        if not _categorize_skip_logged:
+            _categorize_skip_logged = True
+            log.info("categorisation disabled (CATEGORIZE=0 or OPENAI_API_KEY not set)")
+        return
+    try:
+        categorize_pg.categorize_new_items(conn)  # default classifier: OpenAI
+    except Exception as e:
+        log.warning("categorisation failed (%s)", type(e).__name__)
+
+
 def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profile_dir: Path,
              proxy_server: str | None, fetch: Callable | None = None) -> None:
     own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
+    jobs.set_progress(conn, job.id, stage="syncing")
     orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                    allow_learn=False, proxy_server=proxy_server,
                    recipe_loader=lambda site: store.get_recipe(conn, site),
                    orders_page_url=own.get("orders_page_url"))
     n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
-    jobs.set_progress(conn, job.id, stage="synced", orders_found=n)
+    total = conn.execute(
+        "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "
+        "AND coalesce(status, '') <> ALL(%s)",
+        (job.user_id, db_site, [o["order_id"] for o in orders], list(_NOT_COUNTED))).fetchone()[0]
+    jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2))
     store.set_connection(conn, job.user_id, db_site, status="connected",
                          last_synced_at=datetime.now(timezone.utc))
 
@@ -298,6 +322,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
                      fetch=fake_sites.fetch_orders if fake else sync.fetch_orders)
             save_profile()
+            _categorize(conn)
         jobs.finish(conn, job.id, worker_id=job.worker_id)
     except browser.SessionExpired:
         fail("needs_login", "needs_login")

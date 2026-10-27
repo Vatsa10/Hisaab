@@ -873,3 +873,104 @@ def test_connect_then_sync_uses_the_url_found_at_login(pg, monkeypatch):
     jobs.enqueue(pg, A, "connect", "zomato", {"phone": "9876543210"})
     worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
     assert seen == ["https://www.zomato.com/users/me-2/ordering"]
+
+
+# --- progress and categorisation after a sync (Plan 3 Task 6) ---
+
+def _items_order(oid, name="Amul Milk 500ml", **k):
+    return order(oid, items=[{"name": name, "qty": 1, "price": 30.0}], **k)
+
+
+def test_sync_progress_reports_syncing_then_amount(pg, monkeypatch):
+    seen = []
+
+    def fetch(site, since, **k):
+        seen.append(pg.execute("select progress->>'stage' from jobs").fetchone()[0])
+        return [order("1", total=100.5), order("2", total=50.25), order("3", total=999, status="cancelled"),
+                order("4", total=70, status="refunded"), order("5", total=5, status="failed")]
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    # an order from an earlier sync must not count towards this job's amount
+    store.upsert_orders(pg, A, "zepto", [order("old", total=1000)])
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert seen == ["syncing"]
+    prog = pg.execute("select progress from jobs").fetchone()[0]
+    assert prog["stage"] == "synced" and prog["orders_found"] == 5
+    assert prog["amount_found"] == 150.75 and isinstance(prog["amount_found"], float)
+
+
+def test_connect_job_reports_syncing_before_fetch(pg, monkeypatch):
+    seen = []
+
+    def fetch(site, since=None, **k):
+        seen.append(pg.execute("select progress->>'stage' from jobs").fetchone()[0])
+        return [order("1")]
+    monkeypatch.setattr(worker.sync, "login", lambda *a, **k: True)
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert seen == ["syncing"]
+    assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("synced",)
+
+
+def _enable_classifier(monkeypatch, stub):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("CATEGORIZE", raising=False)
+    monkeypatch.setattr(worker.categorize_pg, "openai_classify", stub)
+
+
+def test_sync_job_categorizes_new_items(pg, monkeypatch):
+    calls = []
+
+    def stub(names):
+        calls.append(list(names))
+        return {n: "dairy" for n in names}
+    _enable_classifier(monkeypatch, stub)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: [_items_order("1")])
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert calls == [["Amul Milk 500ml"]]
+    assert pg.execute("select category from item_categories").fetchall() == [("dairy",)]
+    assert pg.execute("select status, error from jobs").fetchone() == ("done", None)
+
+
+def test_categorize_failure_does_not_fail_job(pg, monkeypatch, caplog):
+    def boom(names):
+        raise RuntimeError("key sk-secret-1234567 rejected")
+    _enable_classifier(monkeypatch, boom)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: [_items_order("1")])
+    jobs.enqueue(pg, A, "sync", "zepto")
+    with caplog.at_level("INFO"):
+        worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert pg.execute("select status, error from jobs").fetchone() == ("done", None)
+    assert pg.execute("select status from connections").fetchone() == ("connected",)
+    assert "RuntimeError" in caplog.text and "sk-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("env", [{"CATEGORIZE": "0"}, {"OPENAI_API_KEY": None}])
+def test_categorize_disabled_skips_and_logs_once(pg, monkeypatch, caplog, env):
+    _enable_classifier(monkeypatch, lambda names: pytest.fail("must not classify"))
+    for k, v in env.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+    monkeypatch.setattr(worker, "_categorize_skip_logged", False)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: [_items_order("1")])
+    with caplog.at_level("INFO"):
+        for _ in range(2):
+            jobs.enqueue(pg, A, "sync", "zepto")
+            worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+            pg.execute("update jobs set status='done'")
+    assert pg.execute("select count(*) from item_categories").fetchone() == (0,)
+    assert caplog.text.count("categorisation disabled") == 1
+
+
+def test_fake_mode_still_categorizes(pg, monkeypatch):
+    calls = []
+    _enable_classifier(monkeypatch, lambda names: calls.append(1) or {n: "dairy" for n in names})
+    monkeypatch.setattr(worker, "_fake_mode", lambda: True)
+    monkeypatch.setattr(worker.fake_sites, "fetch_orders", lambda site, since=None, **k: [_items_order("1")])
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert calls == [1]
