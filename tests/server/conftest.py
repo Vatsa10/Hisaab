@@ -86,3 +86,10 @@ def token_a():
 def token_b():
     from helpers import B, auth_header
     return auth_header(B)
+
+
+@pytest.fixture
+def pg_listen(_applied):
+    """Autocommit connection dedicated to LISTEN/NOTIFY."""
+    with psycopg.connect(_applied, autocommit=True) as c:
+        yield c

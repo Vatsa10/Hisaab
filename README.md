@@ -211,6 +211,16 @@ pytest tests/server -v
 The tests apply `tests/server/bootstrap.sql` (stand-ins for Supabase's `auth.uid()` and roles) and
 then the migrations. Without `TEST_DATABASE_URL` the server tests are skipped.
 
+Run the API and the worker (one process each; set `DATABASE_URL` and `SUPABASE_JWT_SECRET`):
+
+```bash
+uvicorn server.api:app
+python -m server.worker
+```
+
+The worker claims `connect` and `sync` jobs, keeps each user's browser profile under `PROFILE_ROOT`
+(default `profiles_users/`), and relays OTPs sent to `POST /jobs/<id>/otp`.
+
 ## Tests
 
 ```bash
