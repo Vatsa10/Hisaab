@@ -197,6 +197,20 @@ which accepts a single `SELECT`/`WITH` query and runs it on a connection opened 
 per-platform amounts, change from the previous month, top restaurants and stores, the category split,
 and recent changes.
 
+## Server (local)
+
+The multi-user backend uses Postgres (Supabase in production). The schema is in
+`supabase/migrations/`. To run the server tests against a throwaway Postgres:
+
+```bash
+docker run -d --name ea-pg -p 54329:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+export TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:54329/postgres
+pytest tests/server -v
+```
+
+The tests apply `tests/server/bootstrap.sql` (stand-ins for Supabase's `auth.uid()` and roles) and
+then the migrations. Without `TEST_DATABASE_URL` the server tests are skipped.
+
 ## Tests
 
 ```bash
