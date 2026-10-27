@@ -69,22 +69,8 @@ def fake_login_env(monkeypatch, run, settings_location=None):
     return seen
 
 
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
-
-
 def destructive_db_allowed(url: str, env) -> bool:
     """The server tests drop and recreate the public and auth schemas. Only allow that on a local database
     (localhost / 127.0.0.1 / ::1 / a local socket) unless ALLOW_DESTRUCTIVE_TEST_DB=1 is set."""
-    if env.get("ALLOW_DESTRUCTIVE_TEST_DB") == "1":
-        return True
-    import os
-
-    from psycopg.conninfo import conninfo_to_dict
-    try:
-        params = conninfo_to_dict(url)
-    except Exception:
-        return False
-    # libpq connects to hostaddr when it is given, whatever host says; with no host at all it uses PGHOST.
-    target = params.get("hostaddr") or params.get("host") or env.get("PGHOST") or os.environ.get("PGHOST") or ""
-    hosts = target.split(",")
-    return all(h.strip().strip("[]") in LOCAL_HOSTS or h.startswith("/") for h in hosts)
+    from server.local_db import is_local_db
+    return env.get("ALLOW_DESTRUCTIVE_TEST_DB") == "1" or is_local_db(url, env)
