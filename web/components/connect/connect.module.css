@@ -1,0 +1,22 @@
+/* Indeterminate progress: a short bar sweeping across the track. Transform only (no layout
+   animation). Under reduced motion the global rule stops it, and a still 40% bar remains. */
+.sweep {
+  width: 40%;
+  animation: sweep 1.4s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep {
+    animation: none;
+    transform: none;
+  }
+}

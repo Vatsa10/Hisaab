@@ -1,36 +1,42 @@
 import type { Metadata } from "next";
 import { SignOutButton } from "@/components/auth/SignOutButton";
+import { AccountsScreen, type ConsentRow } from "@/components/connect/AccountsScreen";
+import type { Profile } from "@/components/connect/AddressRow";
 import { Card } from "@/components/ui/Card";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { APPS } from "@/lib/apps";
-import { cn } from "@/lib/cn";
+import { CONNECTION_COLUMNS, JOB_COLUMNS, type Connection, type Job } from "@/lib/jobs";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Accounts" };
 
+/**
+ * Accounts: the first paint comes from the server (the user's own rows, through RLS), then
+ * AccountsScreen keeps connections and jobs live over Realtime.
+ */
 export default async function AccountsPage() {
   const supabase = await getSupabaseServerClient();
   const { data } = await supabase.auth.getUser();
   const email = data.user?.email;
 
+  // Each read degrades to "nothing yet" on error; the live subscription fills in the rest.
+  const [connections, consents, profile, jobs] = await Promise.all([
+    supabase.from("connections").select(CONNECTION_COLUMNS),
+    supabase.from("consents").select("site, text_version"),
+    supabase.from("profiles").select("address, lat, lon").maybeSingle(),
+    supabase
+      .from("jobs")
+      .select(JOB_COLUMNS)
+      .in("status", ["queued", "running"])
+      .order("created_at", { ascending: true }),
+  ]);
+
   return (
     <>
-      <PageHeader title="Your apps" subtitle="Read-only. We never order or pay." />
-
-      <Card as="section" aria-label="Delivery apps" padding="none">
-        <ul className="divide-y divide-line-soft px-4">
-          {APPS.map((app) => (
-            <li key={app.id} className="flex min-h-14 items-center gap-3">
-              <span aria-hidden="true" className={cn("size-7 shrink-0 rounded-tile", app.dotClass)} />
-              <span className="flex-1 font-medium">{app.name}</span>
-              <span className="text-label text-ink-muted">Not connected</span>
-            </li>
-          ))}
-        </ul>
-      </Card>
-      <p className="mt-2 text-label text-ink-muted">
-        Instamart orders come in with your Swiggy account.
-      </p>
+      <AccountsScreen
+        initialConnections={(connections.data as Connection[] | null) ?? []}
+        initialConsents={(consents.data as ConsentRow[] | null) ?? []}
+        initialProfile={(profile.data as Profile | null) ?? null}
+        initialJobs={(jobs.data as Job[] | null) ?? []}
+      />
 
       <Card as="section" aria-label="Your account" className="mt-6">
         <p className="text-label text-ink-muted">Signed in as</p>
