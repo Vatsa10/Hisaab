@@ -87,16 +87,26 @@ def heartbeat(conn, job_id: str, worker_id: str) -> bool:
     ).rowcount == 1
 
 
-def finish(conn, job_id: str, error: str | None = None, worker_id: str | None = None) -> None:
+def finish(conn, job_id: str, error: str | None = None, worker_id: str | None = None) -> bool:
     """Mark done/failed and drop the phone number from the payload. With worker_id, only a job that is still
     running under that worker is touched, so a worker whose job was declared stale and re-claimed by another
-    worker cannot overwrite it."""
+    worker cannot overwrite it. Returns whether the row was updated."""
     query = "UPDATE jobs SET status=%s, error=%s, finished_at=now(), payload = payload - 'phone' WHERE id=%s"
     params = ["failed" if error else "done", error, job_id]
     if worker_id is not None:
         query += " AND status='running' AND worker_id=%s"
         params.append(worker_id)
-    conn.execute(query, params)
+    return conn.execute(query, params).rowcount == 1
+
+
+def requeue(conn, job_id: str, worker_id: str) -> bool:
+    """Put a job this worker is running back in the queue at once (e.g. a sync aborted at shutdown), instead of
+    waiting for it to go stale. Only a job still running under worker_id is touched; returns whether it was."""
+    return conn.execute(
+        "UPDATE jobs SET status='queued', worker_id=NULL, started_at=NULL, heartbeat_at=NULL "
+        "WHERE id=%s AND status='running' AND worker_id=%s",
+        (job_id, worker_id),
+    ).rowcount == 1
 
 
 def requeue_stale(conn, older_than_s: int = 600) -> int:

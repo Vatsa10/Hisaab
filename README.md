@@ -256,7 +256,13 @@ python -m server.worker
 
 `MAX_JOB_S` (default 1200 s) is the longest a job may run. A job still running after that is presumed
 hung: its heartbeat stops and the worker process exits (non-zero), so the container restarts and the
-stale job is reclaimed. In-page API calls time out after 60 s.
+stale job is reclaimed. In-page API calls time out after 60 s. `STALE_JOB_S` (default 300 s) is how
+long a running job may go without a heartbeat (every 30 s) before it is requeued (a sync) or failed
+with `worker_lost` (a connect).
+
+On `SIGTERM` the worker drains: it claims no new job and lets the current one finish for up to
+`DRAIN_S` (default 540 s, inside Azure's 600 s grace period). A job still running then is aborted: a
+sync goes straight back to the queue, a connect fails with `worker_shutdown`. Ctrl-C aborts at once.
 
 ## Tests
 

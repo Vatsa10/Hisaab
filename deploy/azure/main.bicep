@@ -206,7 +206,8 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
       ]
     }
     template: {
-      // Let the in-flight job finish when KEDA scales the replica in.
+      // On SIGTERM the worker stops claiming and lets the in-flight job run up to DRAIN_S (540 s), then aborts it
+      // (sync requeued, connect failed) before this grace period ends.
       terminationGracePeriodSeconds: 600
       containers: [
         {
@@ -222,6 +223,9 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             { name: 'PROFILE_STORE_URL', secretRef: 'profile-store-url' }
             { name: 'CHROME_EXTRA_ARGS', value: chromeExtraArgs }
             { name: 'PROFILE_ROOT', value: '/tmp/profiles' }
+            // SIGTERM drain must end inside terminationGracePeriodSeconds (600); a silent job is reclaimed after 300 s.
+            { name: 'DRAIN_S', value: '540' }
+            { name: 'STALE_JOB_S', value: '300' }
           ]
         }
       ]

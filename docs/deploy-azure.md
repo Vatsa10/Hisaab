@@ -35,7 +35,11 @@ on the command line, and end up only as Container Apps secrets. This spends Azur
 - The worker wakes via a KEDA `postgresql` scaler while `jobs` has rows with `status in ('queued','running')`,
   so a replica is not scaled in mid-job (counting only queued rows would let KEDA remove it once a job is claimed).
   Stale `running` rows are cleared by the heartbeat-based requeue, so they cannot pin a replica for long.
-  The worker has `terminationGracePeriodSeconds: 600` so a scale-in lets the current job finish.
+  On a scale-in the worker gets `SIGTERM`: it stops claiming jobs and lets the current one run for up to
+  `DRAIN_S` (540 s); a job still running then is aborted (a sync goes straight back to the queue, a connect fails
+  with `worker_shutdown`), all inside the `terminationGracePeriodSeconds: 600` grace period. A job that hangs
+  past `MAX_JOB_S` (1200 s) stops heart-beating and the worker exits; with `STALE_JOB_S` 300 s the job is
+  reclaimed about five minutes later.
   The scaler polls the database (about every 30 s), so Supabase must accept connections from Azure.
 - ACR Basic (about INR 450/month) is the largest fixed cost; Storage Standard_LRS and Log Analytics
   (30-day retention, pay per GB) are small at this volume.

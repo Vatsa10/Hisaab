@@ -149,3 +149,20 @@ def test_job_without_profile_is_rejected(pg):
         pg.execute("insert into jobs (user_id, type, site) values (%s, 'sync', 'zepto')", (A,))
     jid = jobs.enqueue(pg, A, "sync", "instamart")
     assert pg.execute("select profile from jobs where id=%s", (jid,)).fetchone() == ("swiggy",)
+
+
+def test_requeue_only_touches_our_running_job(pg):
+    jid = jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
+    assert jobs.requeue(pg, jid, "w2") is False
+    assert pg.execute("select status, worker_id from jobs").fetchone() == ("running", "w1")
+    assert jobs.requeue(pg, jid, "w1") is True
+    assert pg.execute("select status, worker_id, started_at, heartbeat_at from jobs").fetchone() == \
+        ("queued", None, None, None)
+    assert jobs.requeue(pg, jid, "w1") is False
+
+
+def test_finish_reports_whether_it_touched_the_job(pg):
+    jid = jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
+    assert jobs.finish(pg, jid, worker_id="w2") is False
+    assert jobs.finish(pg, jid, worker_id="w1") is True
+    assert jobs.finish(pg, jid, worker_id="w1") is False

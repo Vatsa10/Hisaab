@@ -76,6 +76,7 @@ services:
       PROFILE_MASTER_KEY: ${PROFILE_MASTER_KEY:-}
       ALLOW_DEV_PROFILE_KEY: "1"  # local file:// vault only: fixed dev key when PROFILE_MASTER_KEY is empty
       PROXY_URL_TEMPLATE: ${PROXY_URL_TEMPLATE:-}
+      STALE_JOB_S: "300"  # a running job with no heartbeat for this long is requeued (sync) or failed (connect)
     shm_size: 1gb
     volumes:
       - vault:/data/vault

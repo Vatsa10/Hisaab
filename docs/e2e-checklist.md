@@ -282,7 +282,7 @@ docker compose exec db psql -U postgres -c "select error from jobs where id='$JO
 Other:
 
 - `409 a connect job is already active`: a previous connect is still `queued`/`running`. Wait up to 180 s for it to
-  time out, or check its row; a job whose worker died is failed automatically after `STALE_JOB_S` (2400 s).
+  time out, or check its row; a job whose worker died is failed automatically after `STALE_JOB_S` (300 s).
 - Job stays `queued`: the worker is not running or cannot reach the database. `docker compose ps`, then
   `docker compose logs worker`.
 - `PROFILE_MASTER_KEY is not set` in the worker log: use the compose file as shipped (it sets `ALLOW_DEV_PROFILE_KEY=1`).

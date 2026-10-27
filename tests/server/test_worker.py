@@ -232,14 +232,16 @@ def test_main_reconnects_after_a_db_error(pg, monkeypatch):
 
 
 def test_main_uses_stale_job_setting(pg, monkeypatch):
+    from server.config import settings
     jid = jobs.enqueue(pg, A, "sync", "zepto")
     jobs.claim(pg, "other", ("sync",))
     pg.execute("update jobs set started_at = now() - interval '20 minutes', heartbeat_at = now() - interval '20 minutes' where id=%s", (jid,))
-    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker, "settings", lambda **k: dataclasses.replace(settings_for_tests(), stale_job_s=2400))
     monkeypatch.setattr(worker.time, "sleep", lambda _: None)
     worker.main("w1", poll_s=0.01, max_loops=1)
     assert pg.execute("select status from jobs").fetchone() == ("running",)
-    assert settings_for_tests().stale_job_s == 2400
+    monkeypatch.delenv("STALE_JOB_S", raising=False)
+    assert settings().stale_job_s == 300 and settings_for_tests().stale_job_s == 300
 
 
 def test_prompt_unlisten_failure_does_not_mask_the_error(pg):
@@ -551,7 +553,7 @@ def test_sigterm_during_connect_fails_job_with_worker_shutdown(pg, monkeypatch):
     assert pg.execute("select status from connections").fetchone() == ("error",)
 
 
-def test_sigterm_during_sync_leaves_job_running(pg, monkeypatch):
+def test_interrupt_during_sync_requeues_job(pg, monkeypatch):
     jobs.enqueue(pg, A, "sync", "zepto")
 
     def fetch(*a, **k):
@@ -559,7 +561,7 @@ def test_sigterm_during_sync_leaves_job_running(pg, monkeypatch):
     monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
     monkeypatch.setattr(worker, "settings", settings_for_tests)
     worker.main("w1", poll_s=0.01, max_loops=3)
-    assert pg.execute("select status from jobs").fetchone() == ("running",)
+    assert pg.execute("select status, worker_id, started_at, heartbeat_at from jobs").fetchone() ==         ("queued", None, None, None)
 
 
 def test_settings_require_master_key_for_remote_store(monkeypatch):
@@ -749,3 +751,101 @@ def test_heartbeat_connection_has_connect_timeout(monkeypatch):
 def test_in_page_fetch_has_a_timeout():
     import browser
     assert "signal: AbortSignal.timeout(60000)" in browser._FETCH_JS
+
+
+# ---------------------------------------------------------------- SIGTERM drains (final review)
+
+import signal
+
+
+def _sigterm():
+    """Deliver SIGTERM to this process (the real handler runs), or call the installed handler directly."""
+    if hasattr(signal, "raise_signal"):
+        signal.raise_signal(signal.SIGTERM)
+    else:
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+
+@pytest.fixture
+def signal_wakeup_off():
+    """An event loop created by an earlier test can leave a closed socket as the signal wakeup fd; delivering a
+    signal then warns "Exception ignored when trying to send to the signal wakeup fd". Not ours: switch it off."""
+    old = signal.set_wakeup_fd(-1)
+    yield
+    try:
+        signal.set_wakeup_fd(old)
+    except (OSError, ValueError):  # it was already a closed handle: leave it off
+        pass
+
+
+def _drain_settings(drain_s):
+    return lambda **k: dataclasses.replace(settings_for_tests(), drain_s=drain_s)
+
+
+def test_sigterm_lets_the_current_job_finish_and_claims_no_more(pg, monkeypatch, signal_wakeup_off):
+    first = jobs.enqueue(pg, A, "sync", "zepto")
+    second = jobs.enqueue(pg, A, "sync", "blinkit")
+    calls = []
+
+    def fetch(site, since, **k):
+        calls.append(site)
+        _sigterm()
+        time.sleep(0.5)  # the job keeps running after SIGTERM
+        return [order("1")]
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    monkeypatch.setattr(worker, "settings", _drain_settings(30))
+    exits = []
+    worker.main("w1", poll_s=0.01, max_loops=5, exit_process=exits.append)
+    assert calls == ["zepto"]
+    assert pg.execute("select status, error from jobs where id=%s", (first,)).fetchone() == ("done", None)
+    assert pg.execute("select status from jobs where id=%s", (second,)).fetchone() == ("queued",)
+    assert exits == []
+    assert signal.getsignal(signal.SIGTERM) is not None and not [
+        t for t in threading.enumerate() if t.name == "drain-watchdog" and t.is_alive()]
+
+
+def _hang(seconds=10):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        time.sleep(0.05)
+    pytest.fail("the job was not aborted at DRAIN_S")
+
+
+def test_sigterm_sync_past_drain_s_is_requeued_immediately(pg, monkeypatch, signal_wakeup_off):
+    jobs.enqueue(pg, A, "sync", "zepto")
+
+    def fetch(*a, **k):
+        _sigterm()
+        _hang()
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    monkeypatch.setattr(worker, "settings", _drain_settings(1))
+    exits = []
+    t0 = time.monotonic()
+    worker.main("w1", poll_s=0.01, max_loops=5, exit_process=exits.append)
+    assert time.monotonic() - t0 < 6
+    assert pg.execute("select status, worker_id, started_at, heartbeat_at from jobs").fetchone() == \
+        ("queued", None, None, None)
+    assert exits == []
+
+
+def test_sigterm_connect_past_drain_s_fails_with_worker_shutdown(pg, monkeypatch, signal_wakeup_off):
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+
+    def login(*a, **k):
+        _sigterm()
+        _hang()
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker, "settings", _drain_settings(1))
+    worker.main("w1", poll_s=0.01, max_loops=5, exit_process=lambda code: None)
+    assert pg.execute("select status, error, payload ? 'phone' from jobs").fetchone() == \
+        ("failed", "worker_shutdown", False)
+    assert pg.execute("select status from connections").fetchone() == ("error",)
+
+
+def test_drain_and_stale_settings(monkeypatch):
+    from server.config import settings
+    for name in ("DRAIN_S", "STALE_JOB_S"):
+        monkeypatch.delenv(name, raising=False)
+    assert (settings().drain_s, settings().stale_job_s) == (540, 300)
+    monkeypatch.setenv("DRAIN_S", "60")
+    assert settings().drain_s == 60

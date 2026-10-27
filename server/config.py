@@ -15,12 +15,13 @@ class Settings:
     jwks_url: str = ""
     consent_version: str = "2026-10-27"
     otp_timeout_s: int = 180
-    stale_job_s: int = 2400
+    stale_job_s: int = 300  # 10 heartbeat intervals without a beat: the worker is presumed dead
     profile_store_url: str = "file://vault_local"
     profile_master_key: bytes | None = field(default=None, repr=False)
     proxy_url_template: str = field(default="", repr=False)
     heartbeat_s: int = 30
     max_job_s: int = 1200  # a job running longer is presumed hung: the worker stops heart-beating and exits
+    drain_s: int = 540  # after SIGTERM the current job may run this long (Azure grace period is 600 s)
 
 
 def _master_key(env, store_url: str, for_worker: bool) -> bytes | None:
@@ -68,10 +69,11 @@ def settings(for_worker: bool = False) -> Settings:
         database_url=env("DATABASE_URL", ""),
         jwt_secret=env("SUPABASE_JWT_SECRET", ""),
         jwks_url=env("SUPABASE_JWKS_URL", ""),
-        stale_job_s=int(env("STALE_JOB_S", "2400")),
+        stale_job_s=int(env("STALE_JOB_S", "300")),
         profile_store_url=store_url,
         profile_master_key=_master_key(env, store_url, for_worker),
         proxy_url_template=proxy_template,
         heartbeat_s=int(env("HEARTBEAT_S", "30")),
         max_job_s=int(env("MAX_JOB_S", "1200")),
+        drain_s=int(env("DRAIN_S", "540")),
     )

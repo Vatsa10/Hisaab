@@ -1,4 +1,5 @@
 """Worker: claims connect/sync jobs from Postgres and runs the browser login/sync code per user."""
+import _thread
 import contextlib
 import logging
 import os
@@ -310,39 +311,112 @@ def _close(*conns) -> None:
             pass
 
 
-def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str) -> None:
-    """SIGTERM mid-job. A connect job cannot be resumed (its OTP exchange dies with us): fail it. A sync job is
-    left running; with no more heartbeats it is requeued once stale."""
-    if job.type != "connect":
-        return
+def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str) -> bool:
+    """Abort a job this worker is still running because the worker is going away. A connect job cannot be
+    resumed (its OTP exchange dies with us): it fails with "worker_shutdown" and a connection left "syncing"
+    becomes "error". A sync job goes straight back to the queue for another worker. Both updates only touch a
+    job still running under worker_id. Returns whether the job was aborted (False: already finished, or the
+    database could not be reached; then the stale-job requeue deals with it)."""
     try:
-        db_site = browser.SITES[job.site].get("db_site", job.site)
-        if _status(conn, job.user_id, db_site) == "syncing":
-            store.set_connection(conn, job.user_id, db_site, status="error")
-        jobs.finish(conn, job.id, error="worker_shutdown", worker_id=worker_id)
+        if job.type == "connect":
+            if not jobs.finish(conn, job.id, error="worker_shutdown", worker_id=worker_id):
+                return False
+            db_site = browser.SITES[job.site].get("db_site", job.site)
+            if _status(conn, job.user_id, db_site) == "syncing":
+                store.set_connection(conn, job.user_id, db_site, status="error")
+            return True
+        return jobs.requeue(conn, job.id, worker_id)
     except Exception as e:
-        log.error("could not fail job %s on shutdown (%s)", job.id, type(e).__name__)
+        log.error("could not abort job %s on shutdown (%s)", job.id, type(e).__name__)
+        return False
 
 
-def _on_sigterm(signum, frame):
-    raise KeyboardInterrupt
+DRAIN_UNWIND_S = 10  # after an abort at DRAIN_S, how long the job gets to unwind before the process exits
+EXIT_DRAIN_TIMEOUT = 71  # process exit code when an aborted job did not unwind
 
 
-def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | None = None) -> None:
-    """Poll for jobs forever. Any error outside run_job (e.g. a dropped DB connection) is logged,
-    the connection is reopened after a backoff, and the loop continues. SIGTERM is handled like Ctrl-C.
-    max_loops is for tests."""
+class _Drain:
+    """SIGTERM handling. The worker stops claiming jobs; the current job may finish for up to drain_s seconds.
+    If it is still running then, a watchdog thread aborts it in the database (_abort_on_shutdown, on its own
+    connection), interrupts the main thread so the job unwinds and cleans up, and exits the process if the job
+    has not unwound within DRAIN_UNWIND_S."""
+
+    def __init__(self, s: Settings, worker_id: str, exit_process: Callable[[int], None]):
+        self.s, self.worker_id, self.exit_process = s, worker_id, exit_process
+        self.requested = threading.Event()  # SIGTERM received: claim nothing more
+        self.stopped = threading.Event()  # the main loop has ended
+        self.idle = threading.Event()  # no job is running
+        self.idle.set()
+        self.aborted = False  # the watchdog aborted the current job
+        self._job: jobs.Job | None = None
+        self._lock = threading.Lock()
+
+    def start_job(self, job: jobs.Job) -> None:
+        with self._lock:
+            self._job = job
+            self.idle.clear()
+
+    def end_job(self) -> None:
+        with self._lock:
+            self._job = None
+            self.idle.set()
+
+    def on_sigterm(self, signum=None, frame=None) -> None:
+        if self.requested.is_set():
+            return
+        self.requested.set()
+        log.info("worker %s: SIGTERM, draining (current job may run %ss more)", self.worker_id, self.s.drain_s)
+        threading.Thread(target=self._watch, name="drain-watchdog", daemon=True).start()
+
+    def _watch(self) -> None:
+        if self.stopped.wait(self.s.drain_s):
+            return
+        with self._lock:
+            job = self._job
+        if job is None:
+            return
+        conn = None
+        try:
+            conn = psycopg.connect(self.s.database_url, autocommit=True, connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_S)
+            done = _abort_on_shutdown(job, conn, self.worker_id)
+        except Exception as e:
+            log.error("could not reach the database to abort job %s (%s)", job.id, type(e).__name__)
+            done = False
+        finally:
+            _close(conn)
+        self.aborted = True
+        log.warning("job %s still running after DRAIN_S (%ss): %s", job.id, self.s.drain_s,
+                    "aborted" if done else "left for the stale-job requeue")
+        if self.stopped.is_set():  # the main loop ended meanwhile: nothing left to interrupt
+            return
+        _thread.interrupt_main()
+        if not self.idle.wait(DRAIN_UNWIND_S) and not self.stopped.is_set():
+            log.error("job %s did not unwind after the abort; worker exiting", job.id)
+            self.exit_process(EXIT_DRAIN_TIMEOUT)
+
+
+def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | None = None,
+         exit_process: Callable[[int], None] | None = None) -> None:
+    """Poll for jobs until SIGTERM (or Ctrl-C). Any error outside run_job (e.g. a dropped DB connection) is
+    logged, the connection is reopened after a backoff, and the loop continues.
+
+    SIGTERM drains: no new job is claimed and the current one may finish within s.drain_s; past that it is
+    aborted (see _Drain). Ctrl-C aborts the current job at once. exit_process (default os._exit) ends the
+    process when a job hangs (MAX_JOB_S) or will not unwind after a drain abort; max_loops is for tests."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
+    exit_process = exit_process or os._exit
     s = settings(for_worker=True)
     _wipe_profiles_root(s.profile_store_url)
     log.info("worker started id=%s", worker_id)
-    old_handler = None
+    drain = _Drain(s, worker_id, exit_process)
+    installed, old_handler = False, None
     if threading.current_thread() is threading.main_thread():
-        old_handler = signal.signal(signal.SIGTERM, _on_sigterm)
+        old_handler = signal.signal(signal.SIGTERM, drain.on_sigterm)
+        installed = True
     conn = None
     failures = loops = 0
     try:
-        while max_loops is None or loops < max_loops:
+        while (max_loops is None or loops < max_loops) and not drain.requested.is_set():
             loops += 1
             try:
                 if conn is None:
@@ -353,15 +427,22 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                     failures = 0
                     time.sleep(poll_s)
                     continue
+                if drain.requested.is_set():  # SIGTERM arrived while claiming: hand the job straight back
+                    jobs.requeue(conn, job.id, worker_id)
+                    break
+                drain.start_job(job)
                 try:
-                    run_job(job, conn, s)
+                    run_job(job, conn, s, exit_process=exit_process)
                 except KeyboardInterrupt:
-                    _abort_on_shutdown(job, conn, worker_id)
+                    if not drain.aborted:  # Ctrl-C (the drain watchdog has already aborted its job)
+                        _abort_on_shutdown(job, conn, worker_id)
                     raise
                 except Exception as e:
                     phone = (job.payload or {}).get("phone")
                     log.error("job %s crashed: %s", job.id, _clean_error(e, phone))
                     jobs.finish(conn, job.id, error=_clean_error(e, phone), worker_id=worker_id)
+                finally:
+                    drain.end_job()
                 failures = 0
             except Exception as e:
                 failures += 1
@@ -372,11 +453,13 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 conn = None
                 time.sleep(delay)
     except KeyboardInterrupt:
-        log.info("worker %s stopping", worker_id)
+        pass
     finally:
+        drain.stopped.set()
         _close(conn)
-        if old_handler is not None:
-            signal.signal(signal.SIGTERM, old_handler)
+        if installed:
+            signal.signal(signal.SIGTERM, old_handler if old_handler is not None else signal.SIG_DFL)
+    log.info("worker %s stopping", worker_id)
 
 
 if __name__ == "__main__":
