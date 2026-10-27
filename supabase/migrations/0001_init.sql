@@ -109,6 +109,16 @@ create policy read_all on item_categories for select to authenticated using (tru
 create policy read_all on recipes for select to authenticated using (true);
 
 -- Grants: authenticated can only SELECT (RLS filters rows); service_role does all writes.
+-- Supabase's default privileges grant ALL (including TRUNCATE, which ignores RLS) on new tables to anon and
+-- authenticated, so take everything back first.
+revoke all on profiles from anon, authenticated;
+revoke all on connections from anon, authenticated;
+revoke all on orders from anon, authenticated;
+revoke all on order_items from anon, authenticated;
+revoke all on item_categories from anon, authenticated;
+revoke all on recipes from anon, authenticated;
+revoke all on jobs from anon, authenticated;
+revoke all on consents from anon, authenticated;
 grant select on profiles, connections, orders, order_items, item_categories, recipes, jobs, consents
   to authenticated;
 grant all on profiles, connections, orders, order_items, item_categories, recipes, jobs, consents

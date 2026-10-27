@@ -33,3 +33,25 @@ def test_one_running_job_per_user_site(pg):
     with pytest.raises(psycopg.errors.UniqueViolation) as e:
         pg.execute("update jobs set status='running' where type='sync' and site='zepto'")
     assert e.value.diag.constraint_name == "one_running_job_per_profile"
+
+
+TABLES = ("profiles", "connections", "orders", "order_items", "item_categories", "recipes", "jobs", "consents")
+
+
+@pytest.mark.parametrize("table", TABLES)
+@pytest.mark.parametrize("stmt", ["truncate {t}", "delete from {t}", "update {t} set {c} = {c}"])
+def test_authenticated_cannot_modify(pg, as_user, table, stmt):
+    col = {"item_categories": "category", "recipes": "kind"}.get(table, "user_id")
+    with as_user(pg, A), pytest.raises(psycopg.errors.InsufficientPrivilege):
+        pg.execute(stmt.format(t=table, c=col))
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_anon_has_no_access(pg, table):
+    pg.execute("begin")
+    try:
+        pg.execute("set local role anon")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg.execute(f"select 1 from {table}")
+    finally:
+        pg.execute("rollback")
