@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ApiError, apiFetch } from "@/lib/api";
@@ -63,25 +63,44 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
     return () => clearInterval(t);
   }, []);
 
-  // Follow every unfinished job until it ends (one channel each; the set is tiny).
+  // Follow every unfinished job until it ends, one channel each. Channels are diffed: a job that
+  // appears gets a channel, one that finishes loses its own, and the others are left alone.
+  const watching = useRef(new Map<string, () => void>());
   const runningIds = Object.values(jobs)
     .filter((j) => !isTerminal(j))
     .map((j) => j.id)
     .sort()
     .join(",");
   useEffect(() => {
-    if (!runningIds) return;
-    const stops = runningIds.split(",").map((id) =>
-      watchJob(id, (job) => {
-        setJobs((all) => (all[job.site]?.id === job.id ? { ...all, [job.site]: job } : all));
-        if (job.type === "sync" && job.status === "failed" && job.error !== "needs_login") {
-          const app = byId(job.site);
-          if (app) setNotice(`${app.name} didn't refresh. Try again in a bit.`);
-        }
-      }),
-    );
-    return () => stops.forEach((stop) => stop());
+    const want = new Set(runningIds ? runningIds.split(",") : []);
+    const subs = watching.current;
+    for (const [id, stop] of subs) {
+      if (!want.has(id)) {
+        stop();
+        subs.delete(id);
+      }
+    }
+    for (const id of want) {
+      if (subs.has(id)) continue;
+      subs.set(
+        id,
+        watchJob(id, (job) => {
+          setJobs((all) => (all[job.site]?.id === job.id ? { ...all, [job.site]: job } : all));
+          if (job.type === "sync" && job.status === "failed" && job.error !== "needs_login") {
+            const app = byId(job.site);
+            if (app) setNotice(`${app.name} didn't refresh. Try again in a bit.`);
+          }
+        }),
+      );
+    }
   }, [runningIds]);
+  useEffect(() => {
+    const subs = watching.current;
+    return () => {
+      for (const stop of subs.values()) stop();
+      subs.clear();
+    };
+  }, []);
 
   const connectionFor = useMemo(() => {
     const map = new Map<string, Connection>();

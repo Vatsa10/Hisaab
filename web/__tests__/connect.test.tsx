@@ -35,6 +35,7 @@ vi.mock("@/lib/jobs", async (importOriginal) => {
         live.connectionUnsubs += 1;
       };
     }),
+    firstOrderMonth: vi.fn(async () => "Oct 2025"),
   };
 });
 
@@ -113,7 +114,7 @@ describe("ConnectFlow", () => {
     render(<ConnectFlow app={swiggy} consented onClose={vi.fn()} onConnectNext={vi.fn()} />);
     expect(screen.getByText("+91")).toBeInTheDocument();
     expect(
-      screen.getByText("Swiggy sends the code. We keep only an encrypted session — never your OTP."),
+      screen.getByText("Swiggy sends the code. We keep only an encrypted session, never your OTP."),
     ).toBeInTheDocument();
   });
 
@@ -268,12 +269,79 @@ describe("ConnectFlow", () => {
     expect(live.jobs.has("j2")).toBe(true);
   });
 
+  it("while a resend waits out a 409, the old job's otp_timeout does not flash 'Code expired'", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    api.apiFetch.mockResolvedValueOnce({ job_id: "j1" });
+    render(<ConnectFlow app={swiggy} consented onClose={vi.fn()} onConnectNext={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "9876543210" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send OTP" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    push(job({ progress: { stage: "otp_needed" } }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(180_000);
+    });
+    api.apiFetch
+      .mockRejectedValueOnce(new ApiError(409, "a connect job is already active"))
+      .mockResolvedValueOnce({ job_id: "j2" });
+    fireEvent.click(screen.getByRole("button", { name: "Send a new code" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    push(job({ status: "failed", error: "otp_timeout", progress: { stage: "otp_needed" } }));
+    expect(screen.queryByText("Code expired — try again")).toBeNull();
+    expect(screen.getByText("Asking Swiggy for a new code…")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_500);
+    });
+    expect(live.jobs.has("j2")).toBe(true);
+    expect(screen.queryByText("Code expired — try again")).toBeNull();
+  });
+
+  it("a first Send OTP that gets 409 says the app is busy at once (no waiting loop)", async () => {
+    api.apiFetch.mockRejectedValueOnce(new ApiError(409, "a connect job is already active"));
+    render(<ConnectFlow app={swiggy} consented onClose={vi.fn()} onConnectNext={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "9876543210" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send OTP" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Swiggy is still busy");
+    expect(api.apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("412 on connect goes back to the consent step", async () => {
+    api.apiFetch.mockRejectedValueOnce(new ApiError(412, "consent required"));
+    render(<ConnectFlow app={swiggy} consented onClose={vi.fn()} onConnectNext={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Phone number"), { target: { value: "9876543210" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send OTP" }));
+    expect(await screen.findByRole("button", { name: "I understand" })).toBeInTheDocument();
+    expect(screen.getByText("You'll only see this once for each app.")).toBeInTheDocument();
+  });
+
+  it("a resumed job counts the resend timer from when the job started, not a fresh 180 s", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date("2026-10-27T10:01:00Z"));
+    render(<ConnectFlow app={swiggy} consented attachJobId="j9" onClose={vi.fn()} onConnectNext={vi.fn()} />);
+    push(
+      job({ id: "j9", started_at: "2026-10-27T10:00:00Z", progress: { stage: "otp_needed" } }),
+    );
+    expect(screen.getByText("Resend in 2:00")).toBeInTheDocument();
+  });
+
   it("syncing shows an indeterminate bar and Finding your orders…", async () => {
     await startFlow();
     push(job({ progress: { stage: "syncing" } }));
     expect(screen.getByText("Finding your orders…")).toBeInTheDocument();
     const bar = screen.getByRole("progressbar");
     expect(bar).not.toHaveAttribute("aria-valuenow");
+    expect(screen.queryByText("Found so far")).toBeNull();
+  });
+
+  it("syncing shows the live count found so far in a polite live region", async () => {
+    await startFlow();
+    push(job({ progress: { stage: "syncing", orders_found: 12, amount_found: 3400 } }));
+    const label = screen.getByText("Found so far");
+    expect(label.closest("[aria-live='polite']")).not.toBeNull();
+    expect(screen.getByText("12 orders")).toBeInTheDocument();
   });
 
   it("first sync shows count and total", async () => {
@@ -286,7 +354,9 @@ describe("ConnectFlow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send OTP" }));
     await waitFor(() => expect(live.jobs.has("j1")).toBe(true));
     push(job({ status: "done", progress: { stage: "synced", orders_found: 43, amount_found: 13240 } }));
-    expect(screen.getByText((_, el) => el?.textContent === "43 orders · ₹13,240 found" && el.tagName === "P")).toBeInTheDocument();
+    expect(screen.getByText("Found")).toBeInTheDocument();
+    expect(screen.getByText("43 orders")).toHaveClass("text-title");
+    expect(await screen.findByText("₹13,240 · Oct 2025 – today")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Connect Zomato" }));
     expect(onConnectNext).toHaveBeenCalledWith(APPS[3]);
   });
@@ -294,7 +364,16 @@ describe("ConnectFlow", () => {
   it("first sync renders without amount_found", async () => {
     await startFlow();
     push(job({ status: "done", progress: { stage: "synced", orders_found: 1 } }));
-    expect(screen.getByText((_, el) => el?.textContent === "1 order found" && el.tagName === "P")).toBeInTheDocument();
+    expect(screen.getByText("1 order")).toBeInTheDocument();
+    expect(await screen.findByText("Oct 2025 – today")).toBeInTheDocument();
+  });
+
+  it("moves focus to the sheet title when a step change drops it", async () => {
+    await startFlow();
+    (document.activeElement as HTMLElement | null)?.blur();
+    push(job({ status: "failed", error: "worker_lost" }));
+    await waitFor(() => expect(document.activeElement?.tagName).toBe("H2"));
+    expect(document.activeElement).toHaveTextContent("Connect Swiggy");
   });
 
   it("keeps the phone and OTP out of browser storage and stops watching on unmount", async () => {
@@ -331,6 +410,19 @@ describe("AccountsScreen", () => {
     });
     expect(CONSENT_VERSION).toBe("2026-10-27");
     expect(await screen.findByLabelText("Phone number")).toBeInTheDocument();
+  });
+
+  it.each([
+    [new ApiError(401, "invalid token"), "Please sign in again."],
+    [new ApiError(0, "Can't reach the server. Check your connection and try again."), "Can't reach the server"],
+    [new ApiError(500, "boom"), "Couldn't save that. Try again."],
+  ])("consent errors: %o", async (err, copy) => {
+    render(<AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Connect Zepto" }));
+    api.apiFetch.mockRejectedValueOnce(err);
+    await userEvent.click(await screen.findByRole("button", { name: "I understand" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(copy);
+    expect(screen.queryByLabelText("Phone number")).toBeNull();
   });
 
   it("skips the consent sheet once consent is stored", async () => {
@@ -405,7 +497,70 @@ describe("AccountsScreen", () => {
       body: JSON.stringify({ address: "Alkapuri, Vadodara" }),
     });
     expect(await screen.findByText("Alkapuri, Vadodara")).toBeInTheDocument();
-    expect(screen.getByText(/22\.3119° N, 73\.1723° E/)).toBeInTheDocument();
+    expect(screen.getByText("✓ Found on the map")).toBeInTheDocument();
+    expect(screen.queryByText(/22\.3119/)).toBeNull(); // no raw coordinates
+  });
+
+  it("names the resolved place when the API returns one", async () => {
+    render(<AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /Delivery address/ }));
+    await userEvent.type(await screen.findByLabelText("Address"), "Surmandir Society, Gorwa, Vadodara");
+    api.apiFetch.mockResolvedValueOnce({
+      address: "Surmandir Society, Gorwa, Vadodara",
+      lat: 22.33,
+      lon: 73.16,
+      display: "Gorwa, Vadodara, Vadodara Taluka, Gujarat, 390016, India",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Save address" }));
+    expect(await screen.findByText("Pinned near Gorwa, Vadodara")).toBeInTheDocument();
+  });
+
+  it("explains a geocoder outage (503)", async () => {
+    render(<AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /Delivery address/ }));
+    await userEvent.type(await screen.findByLabelText("Address"), "Alkapuri, Vadodara");
+    api.apiFetch.mockRejectedValueOnce(new ApiError(503, "geocoding is unavailable, try again"));
+    await userEvent.click(screen.getByRole("button", { name: "Save address" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Address lookup is down right now");
+  });
+
+  it.each([
+    [409, "Zepto is already syncing."],
+    [404, "Connect Zepto first."],
+  ])("refresh %i shows its own copy", async (status, copy) => {
+    api.apiFetch.mockRejectedValueOnce(new ApiError(status, "x"));
+    render(
+      <AccountsScreen
+        initialConnections={[{ site: "zepto", status: "connected", last_synced_at: new Date().toISOString() }]}
+        initialConsents={[]}
+        initialProfile={null}
+        initialJobs={[]}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Refresh Zepto now" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(copy);
+  });
+
+  it("follows each job on its own channel and does not rebuild the others", async () => {
+    api.apiFetch.mockResolvedValueOnce({ job_id: "r2" });
+    render(
+      <AccountsScreen
+        initialConnections={[
+          { site: "zepto", status: "connected", last_synced_at: new Date().toISOString() },
+          { site: "blinkit", status: "connected", last_synced_at: new Date().toISOString() },
+        ]}
+        initialConsents={[]}
+        initialProfile={null}
+        initialJobs={[job({ id: "r1", site: "zepto", type: "sync", status: "running" })]}
+      />,
+    );
+    expect(vi.mocked(watchJob).mock.calls.map((c) => c[0])).toEqual(["r1"]);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh Blinkit now" }));
+    await waitFor(() => expect(vi.mocked(watchJob).mock.calls.map((c) => c[0])).toEqual(["r1", "r2"]));
+    expect(live.jobUnsubs).toEqual([]); // r1 kept its channel
+    push(job({ id: "r1", site: "zepto", type: "sync", status: "done" }));
+    await waitFor(() => expect(live.jobUnsubs).toEqual(["r1"]));
+    expect(vi.mocked(watchJob)).toHaveBeenCalledTimes(2);
   });
 
   it("explains an address the geocoder cannot find", async () => {
@@ -553,6 +708,40 @@ describe("lib/jobs watchJob / watchConnections", () => {
     expect(client.removeChannel).toHaveBeenCalledWith(channels[0]);
     channels[0]!.handler!({ new: { ...row, status: "done" } });
     expect(onChange).toHaveBeenCalledTimes(3);
+  });
+
+  it("watchJob drops a re-read that a realtime event overtook (no stage roll-back)", async () => {
+    const real = await vi.importActual<typeof import("@/lib/jobs")>("@/lib/jobs");
+    const { client, channels } = fakeClient({});
+    // Re-reads answer only when the test says so.
+    const pending: Array<(row: Record<string, unknown>) => void> = [];
+    client.from.mockImplementation(() => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: () =>
+            new Promise((resolve) => pending.push((row) => resolve({ data: row, error: null }))),
+        }),
+      }),
+    }));
+    const onChange = vi.fn();
+    real.watchJob("j1", onChange, client as never);
+    const base = { id: "j1", site: "zepto", type: "connect", error: null };
+
+    channels[0]!.status!("SUBSCRIBED"); // re-read #1 starts (snapshot: still queued)
+    channels[0]!.handler!({ new: { ...base, status: "running", progress: { stage: "otp_needed" } } });
+    pending[0]!({ ...base, status: "queued", progress: {} }); // #1 answers late, with the old state
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0].progress.stage).toBe("otp_needed");
+
+    // Two re-reads in flight: only the newer may deliver.
+    channels[0]!.status!("SUBSCRIBED"); // #2
+    channels[0]!.status!("SUBSCRIBED"); // #3
+    pending[2]!({ ...base, status: "running", progress: { stage: "otp_received" } });
+    pending[1]!({ ...base, status: "running", progress: { stage: "otp_needed" } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.calls[1]![0].progress.stage).toBe("otp_received");
   });
 
   it("watchJob never goes back from a finished job to a running one", async () => {

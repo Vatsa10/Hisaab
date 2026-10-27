@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { apiFetch } from "@/lib/api";
+import { ApiError, apiFetch } from "@/lib/api";
 import type { AppInfo } from "@/lib/apps";
 import { CONSENT_POINTS, CONSENT_VERSION } from "./copy";
 import { ShieldIcon } from "./icons";
@@ -18,9 +18,10 @@ export interface ConsentBodyProps {
 export function ConsentBody({ app }: ConsentBodyProps) {
   return (
     <div className="flex flex-col gap-4">
-      <span aria-hidden="true" className="grid size-11 place-items-center rounded-control bg-accent-soft text-accent">
-        <ShieldIcon size={24} />
-      </span>
+      <p className="flex items-center gap-2 text-body font-medium">
+        <ShieldIcon size={20} className="shrink-0 text-accent" />
+        <span>Here&apos;s what connecting {app.name} means:</span>
+      </p>
       <ul className="flex flex-col gap-3">
         {CONSENT_POINTS(app.name).map((point, i) => (
           <li key={point} className="flex gap-3">
@@ -34,9 +35,15 @@ export function ConsentBody({ app }: ConsentBodyProps) {
           </li>
         ))}
       </ul>
-      <p className="text-label text-ink-muted">Consent version {CONSENT_VERSION}. You agree once per app.</p>
+      <p className="text-label text-ink-muted">You&apos;ll only see this once for each app.</p>
     </div>
   );
+}
+
+function consentProblem(e: unknown): string {
+  if (e instanceof ApiError && e.status === 401) return "Please sign in again.";
+  if (e instanceof ApiError && e.status === 0) return e.detail; // a real network failure
+  return "Couldn't save that. Try again.";
 }
 
 export interface ConsentActionProps {
@@ -45,7 +52,7 @@ export interface ConsentActionProps {
   onAgreed: () => void;
 }
 
-/** "I understand": stores the consent for this app (POST /consents) and moves on. */
+/** "I understand": stores the consent for this app (POST /consents, version 2026-10-27) and moves on. */
 export function ConsentAction({ app, onAgreed }: ConsentActionProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,9 +66,9 @@ export function ConsentAction({ app, onAgreed }: ConsentActionProps) {
         body: JSON.stringify({ site: app.id, text_version: CONSENT_VERSION }),
       });
       onAgreed();
-    } catch {
+    } catch (e) {
       setBusy(false);
-      setError("Couldn't save that. Check your connection and try again.");
+      setError(consentProblem(e));
     }
   }
 

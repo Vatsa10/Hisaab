@@ -26,6 +26,8 @@ export interface JobProgress {
   orders_found?: number;
   /** Sum of the stored orders (added by the worker in Plan 3 Task 6; may be absent). */
   amount_found?: number;
+  /** When the current prompt was published (ISO), if the worker records it. Not written today. */
+  prompt_at?: string;
 }
 
 export interface Job {
@@ -36,6 +38,8 @@ export interface Job {
   progress: JobProgress;
   /** Failure code, e.g. "otp_timeout", "login_failed", "proxy_unavailable". */
   error: string | null;
+  /** When a worker claimed the job (ISO); null while queued. */
+  started_at?: string | null;
 }
 
 export type ConnectionStatus = "connected" | "needs_login" | "syncing" | "error" | "disconnected";
@@ -47,7 +51,7 @@ export interface Connection {
 }
 
 /** Columns read from `jobs`. Never `payload` (it carries the phone while a connect runs). */
-export const JOB_COLUMNS = "id, site, type, status, progress, error";
+export const JOB_COLUMNS = "id, site, type, status, progress, error, started_at";
 export const CONNECTION_COLUMNS = "site, status, last_synced_at";
 
 const TERMINAL: ReadonlySet<string> = new Set(["done", "failed"]);
@@ -66,6 +70,7 @@ function toJob(row: Record<string, unknown>): Job {
     status: String(row.status ?? "queued") as JobStatus,
     progress: { ...progress },
     error: typeof row.error === "string" ? row.error : null,
+    started_at: typeof row.started_at === "string" ? row.started_at : null,
   };
 }
 
@@ -95,8 +100,12 @@ function onWake(refetch: () => void): () => void {
 
 /**
  * Follow one job: `onChange` gets the job's row now (once the channel joins), on every change,
- * and again after every reconnect. Once the job has finished, later "running" rows (a stale
- * re-read racing the final update) are ignored. Returns an unsubscribe function.
+ * and again after every reconnect. Returns an unsubscribe function.
+ *
+ * Ordering: a re-read is a snapshot taken when it starts. If a realtime event arrives while it is
+ * in flight, the event is newer, so the re-read's answer is dropped (otherwise a slow re-read
+ * could roll "otp_needed" back to "queued" and hide the OTP field). Only the newest re-read may
+ * deliver, and once the job has finished no later row may move it back to running.
  */
 export function watchJob(
   jobId: string,
@@ -105,6 +114,8 @@ export function watchJob(
 ): () => void {
   let active = true;
   let finished = false;
+  let events = 0; // realtime events seen so far
+  let reads = 0; // re-reads started so far
 
   const deliver = (row: Record<string, unknown> | null | undefined) => {
     if (!active || !row || String(row.id) !== jobId) return;
@@ -115,10 +126,15 @@ export function watchJob(
   };
 
   const refetch = () => {
+    const read = ++reads;
+    const eventsAtStart = events;
     void Promise.resolve(
       client.from("jobs").select(JOB_COLUMNS).eq("id", jobId).maybeSingle(),
     ).then(
-      ({ data }) => deliver(data as Record<string, unknown> | null),
+      ({ data }) => {
+        if (read !== reads || events !== eventsAtStart) return; // superseded while in flight
+        deliver(data as Record<string, unknown> | null);
+      },
       () => {}, // a failed re-read is retried on the next reconnect / wake
     );
   };
@@ -128,7 +144,10 @@ export function watchJob(
     .on(
       "postgres_changes",
       { event: "*", schema: "public", table: "jobs", filter: `id=eq.${jobId}` },
-      (payload) => deliver(payload.new as Record<string, unknown>),
+      (payload) => {
+        events += 1;
+        deliver(payload.new as Record<string, unknown>);
+      },
     )
     .subscribe((status) => {
       if (status === "SUBSCRIBED") refetch();
@@ -140,6 +159,31 @@ export function watchJob(
     stopWake();
     void client.removeChannel(channel);
   };
+}
+
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** The month of the user's earliest stored order on a site, as "Oct 2025" (null if none). */
+export async function firstOrderMonth(
+  site: string,
+  client: SupabaseClient = getSupabaseBrowserClient(),
+): Promise<string | null> {
+  try {
+    const { data, error } = await client
+      .from("orders")
+      .select("placed_at")
+      .eq("site", site)
+      .not("placed_at", "is", null)
+      .order("placed_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    const raw = !error && data ? (data as { placed_at?: unknown }).placed_at : null;
+    const m = typeof raw === "string" ? /^(\d{4})-(\d{2})/.exec(raw) : null;
+    const month = m ? SHORT_MONTHS[Number(m[2]) - 1] : undefined;
+    return m && month ? `${month} ${m[1]}` : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

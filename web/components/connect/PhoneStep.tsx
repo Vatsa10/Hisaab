@@ -99,7 +99,7 @@ export function PhoneStep({ app, onSubmit }: PhoneStepProps) {
         className="flex items-start gap-2.5 rounded-field bg-accent-soft px-3.5 py-3 text-label text-accent-strong"
       >
         <LockIcon size={16} className="mt-px shrink-0" />
-        <span>{app.name} sends the code. We keep only an encrypted session — never your OTP.</span>
+        <span>{app.name} sends the code. We keep only an encrypted session, never your OTP.</span>
       </p>
     </form>
   );

@@ -5,13 +5,14 @@ import { Button } from "@/components/ui/Button";
 import { Sheet } from "@/components/ui/Sheet";
 import { ApiError, apiFetch } from "@/lib/api";
 import type { AppInfo } from "@/lib/apps";
-import { isTerminal, watchJob, type Job } from "@/lib/jobs";
+import { firstOrderMonth, isTerminal, watchJob, type Job } from "@/lib/jobs";
 import { ConsentAction, ConsentBody } from "./ConsentSheet";
 import { COPY, failureMessage, maskPhone } from "./copy";
 import { AlertIcon } from "./icons";
 import { OtpStep } from "./OtpStep";
 import { PhoneStep } from "./PhoneStep";
 import { QuestionStep } from "./QuestionStep";
+import { closeSheetFrom, focusSheetTitleIfLost } from "./sheetControls";
 import { IndeterminateBar, SyncProgress } from "./SyncProgress";
 import { useKeyboardInset } from "./useKeyboardInset";
 
@@ -25,8 +26,11 @@ type View =
   | { kind: "syncing" }
   | { kind: "synced" };
 
-/** A 409 on resend usually means the old job is still timing out; wait for it this long. */
-const BUSY_RETRIES = 8;
+/**
+ * A resend or retry right as the old job times out gets 409 (one active job per app) until the
+ * worker marks it failed; keep trying for up to a minute. A first "Send OTP" never waits.
+ */
+const BUSY_RETRIES = 24;
 const BUSY_WAIT_MS = 2500;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -44,6 +48,11 @@ export function viewForJob(job: Job | null, app: AppInfo): View {
     return { kind: "working", text: `Signing in to ${app.name}…` };
   }
   return { kind: "working", text: `Opening ${app.name}…` };
+}
+
+function parseTime(iso: string | null | undefined): number | null {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(t) ? t : null;
 }
 
 function connectProblem(e: unknown, app: AppInfo): string {
@@ -118,10 +127,12 @@ export function ConnectFlow({
   const [jobId, setJobId] = useState<string | null>(attachJobId ?? null);
   const [job, setJob] = useState<Job | null>(null);
   const [otpStartedAt, setOtpStartedAt] = useState<number | null>(null);
+  const [mountedAt] = useState(() => Date.now()); // computed once; a last-resort timer origin
+  const [since, setSince] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const phoneRef = useRef<string | null>(null);
-  const otpSeenFor = useRef<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
 
   // "Connect <next app>" reuses this sheet: start over for the new app.
@@ -131,13 +142,13 @@ export function ConnectFlow({
     setJobId(attachJobId ?? null);
     setJob(null);
     setOtpStartedAt(null);
+    setSince(null);
     setStarting(false);
     setStartError(null);
   }
 
   useEffect(() => {
     phoneRef.current = null; // never carry one app's number into another app's flow
-    otpSeenFor.current = null;
   }, [app.id]);
 
   useEffect(() => {
@@ -150,18 +161,27 @@ export function ConnectFlow({
 
   useEffect(() => {
     if (!jobId) return;
+    let previousStage: string | undefined | null = null; // null: nothing delivered yet
+    let otpTimed = false;
     return watchJob(jobId, (next) => {
       setJob(next);
-      if (next.progress.stage === "otp_needed" && !isTerminal(next) && otpSeenFor.current !== next.id) {
-        otpSeenFor.current = next.id;
-        setOtpStartedAt(Date.now());
+      const stage = next.progress.stage;
+      if (stage === "otp_needed" && !isTerminal(next) && !otpTimed) {
+        otpTimed = true;
+        // The worker's 180 s window starts when it asked. Seen live: now. Already asking when we
+        // first looked (a resumed job): when the prompt was published if the worker records it,
+        // otherwise when the job started (never later than the ask, so the timer never overstays).
+        const prompted = parseTime(next.progress.prompt_at);
+        const seenLive = previousStage !== null && previousStage !== "otp_needed";
+        setOtpStartedAt(prompted ?? (seenLive ? Date.now() : (parseTime(next.started_at) ?? Date.now())));
       }
+      previousStage = stage;
     });
   }, [jobId]);
 
   /** POST connect for the remembered number; resolves to a problem to show, or null. */
   const startConnect = useCallback(
-    async (digits: string): Promise<string | null> => {
+    async (digits: string, waitIfBusy: boolean): Promise<string | null> => {
       phoneRef.current = digits;
       setStarting(true);
       setStartError(null);
@@ -172,7 +192,6 @@ export function ConnectFlow({
             body: JSON.stringify({ phone: `+91${digits}` }),
           });
           if (!mounted.current) return null;
-          otpSeenFor.current = null;
           setOtpStartedAt(null);
           setJob(null);
           setJobId(res.job_id);
@@ -181,7 +200,7 @@ export function ConnectFlow({
           onJobStarted?.(app, res.job_id);
           return null;
         } catch (e) {
-          if (e instanceof ApiError && e.status === 409 && attempt < BUSY_RETRIES) {
+          if (waitIfBusy && e instanceof ApiError && e.status === 409 && attempt < BUSY_RETRIES) {
             await sleep(BUSY_WAIT_MS);
             if (!mounted.current) return null;
             continue;
@@ -199,6 +218,8 @@ export function ConnectFlow({
     [app, onJobStarted],
   );
 
+  const sendOtp = useCallback((digits: string) => startConnect(digits, false), [startConnect]);
+
   function retry() {
     const phone = phoneRef.current;
     if (!phone) {
@@ -207,7 +228,7 @@ export function ConnectFlow({
       setStep("phone");
       return;
     }
-    void startConnect(phone).then((problem) => {
+    void startConnect(phone, true).then((problem) => {
       if (problem && mounted.current) setStartError(problem);
     });
   }
@@ -218,6 +239,10 @@ export function ConnectFlow({
     setJob(null);
     setStartError(null);
     setStep("phone");
+  }
+
+  function done() {
+    if (!closeSheetFrom(bodyRef.current)) onClose();
   }
 
   async function relay(path: "otp" | "answer", value: string): Promise<string | null> {
@@ -234,6 +259,39 @@ export function ConnectFlow({
   }
 
   // ---- what to show ------------------------------------------------------------------------
+
+  let view: View | null = null;
+  if (step === "job") {
+    if (starting) {
+      // A resend / retry is waiting for the old job to end: its timeout is expected, not news.
+      view = { kind: "working", text: `Asking ${app.name} for a new code…` };
+    } else if (startError) {
+      view = { kind: "failed", message: startError };
+    } else {
+      view = viewForJob(job, app);
+    }
+  }
+  const viewKey = `${step}:${view?.kind ?? ""}`;
+
+  // The earliest order's month for the "Found" card, once the first sync is in.
+  const synced = view?.kind === "synced";
+  useEffect(() => {
+    if (!synced) return;
+    let live = true;
+    firstOrderMonth(app.id)
+      .then((month) => {
+        if (live) setSince(month);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [synced, app.id]);
+
+  // Never leave focus on <body> when a step replaces the control that had it.
+  useEffect(() => {
+    focusSheetTitleIfLost(bodyRef.current);
+  }, [viewKey]);
 
   let title: string;
   let description: ReactNode = undefined;
@@ -252,12 +310,11 @@ export function ConnectFlow({
         }}
       />
     );
-  } else if (step === "phone") {
+  } else if (step === "phone" || !view) {
     title = `Connect ${app.name}`;
     description = `Use the number on your ${app.name} account.`;
-    body = <PhoneStep app={app} onSubmit={startConnect} />;
+    body = <PhoneStep app={app} onSubmit={sendOtp} />;
   } else {
-    const view: View = startError ? { kind: "failed", message: startError } : viewForJob(job, app);
     switch (view.kind) {
       case "otp":
         title = `Enter ${app.name}'s OTP`;
@@ -265,7 +322,7 @@ export function ConnectFlow({
         body = (
           <OtpStep
             key={jobId ?? ""}
-            startedAt={otpStartedAt ?? Date.now()}
+            startedAt={otpStartedAt ?? mountedAt}
             onSubmit={(otp) => relay("otp", otp)}
             onResend={retry}
             resending={starting}
@@ -296,9 +353,10 @@ export function ConnectFlow({
             state={view.kind}
             ordersFound={job?.progress.orders_found}
             amountFound={job?.progress.amount_found}
+            since={since}
             nextApp={nextApp}
             onNext={onConnectNext}
-            onDone={onClose}
+            onDone={done}
           />
         );
         break;
@@ -343,9 +401,9 @@ export function ConnectFlow({
       title={title}
       description={description}
       footer={footer}
-      className="mb-[var(--kb-inset,0px)]"
+      className="mb-[var(--kb-inset,0px)] !max-h-[calc(90dvh-var(--kb-inset,0px))]"
     >
-      {body}
+      <div ref={bodyRef}>{body}</div>
     </Sheet>
   );
 }
