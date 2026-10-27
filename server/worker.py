@@ -44,7 +44,10 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
                     return note.payload
             raise sync.OtpTimeout(kind)
         finally:
-            listen_conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
+            try:  # best effort: a broken listen connection must not mask the original error
+                listen_conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
+            except Exception as e:
+                log.warning("UNLISTEN failed (%s)", type(e).__name__)
 
     return prompt
 
@@ -83,7 +86,9 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None) -> Non
                          last_synced_at=datetime.now(timezone.utc))
 
 
-def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
+def run_job(job: jobs.Job, conn, s: Settings) -> None:
+    """Run one claimed job. A connect job gets its own fresh LISTEN connection, closed when the job ends,
+    so a listen connection that died during one job never affects the next."""
     cfg = browser.SITES[job.site]
     db_site, sub_platform = cfg.get("db_site", job.site), cfg.get("sub_platform")
     phone = (job.payload or {}).get("phone")
@@ -95,12 +100,11 @@ def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
             store.set_connection(conn, job.user_id, db_site, status=status)
         jobs.finish(conn, job.id, error=error)
 
-    own_listen = None
+    listen_conn = None
     try:
         if job.type == "connect":
             store.set_connection(conn, job.user_id, db_site, status="syncing")
-            if listen_conn is None:
-                listen_conn = own_listen = psycopg.connect(s.database_url, autocommit=True)
+            listen_conn = _connect(s.database_url)
             prompt = make_prompt(listen_conn, conn, job.id, s.otp_timeout_s)
             ok = sync.login(job.site, phone, prompt=prompt, profile_dir=_profile_dir(job.user_id, job.site),
                             location=_location(conn, job.user_id))
@@ -120,8 +124,7 @@ def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
         log.error("job %s failed: %s", job.id, msg)
         fail(msg)
     finally:
-        if own_listen is not None:
-            own_listen.close()
+        _close(listen_conn)
 
 
 def _connect(url: str):
@@ -139,18 +142,18 @@ def _close(*conns) -> None:
 
 def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | None = None) -> None:
     """Poll for jobs forever. Any error outside run_job (e.g. a dropped DB connection) is logged,
-    both connections are reopened after a backoff, and the loop continues. max_loops is for tests."""
+    the connection is reopened after a backoff, and the loop continues. max_loops is for tests."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     s = settings()
     log.info("worker %s started", worker_id)
-    conn = listen_conn = None
+    conn = None
     failures = loops = 0
     try:
         while max_loops is None or loops < max_loops:
             loops += 1
             try:
                 if conn is None:
-                    conn, listen_conn = _connect(s.database_url), _connect(s.database_url)
+                    conn = _connect(s.database_url)
                 jobs.requeue_stale(conn, s.stale_job_s)
                 job = jobs.claim(conn, worker_id, JOB_TYPES)
                 if job is None:
@@ -158,7 +161,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                     time.sleep(poll_s)
                     continue
                 try:
-                    run_job(job, conn, s, listen_conn=listen_conn)
+                    run_job(job, conn, s)
                 except Exception as e:
                     phone = (job.payload or {}).get("phone")
                     log.error("job %s crashed: %s", job.id, _clean_error(e, phone))
@@ -169,13 +172,13 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 delay = min(30.0, poll_s * 2 ** failures)
                 log.error("worker loop error (%s), reconnecting in %.1fs: %s", type(e).__name__, delay,
                           _clean_error(e, None))
-                _close(conn, listen_conn)
-                conn = listen_conn = None
+                _close(conn)
+                conn = None
                 time.sleep(delay)
     except KeyboardInterrupt:
         log.info("worker %s stopping", worker_id)
     finally:
-        _close(conn, listen_conn)
+        _close(conn)
 
 
 if __name__ == "__main__":

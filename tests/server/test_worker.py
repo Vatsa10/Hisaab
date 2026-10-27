@@ -226,7 +226,7 @@ def test_main_reconnects_after_a_db_error(pg, monkeypatch):
     monkeypatch.setattr(worker, "settings", settings_for_tests)
     monkeypatch.setattr(worker.time, "sleep", lambda _: None)
     worker.main("w1", poll_s=0.01, max_loops=3)
-    assert len(opened) == 4  # two connections, then both reopened after the error
+    assert len(opened) == 2  # one job connection, reopened after the error (listen connections are per job)
     assert len(ran) == 1
     assert pg.execute("select status from jobs").fetchone() == ("done",)
 
@@ -240,3 +240,43 @@ def test_main_uses_stale_job_setting(pg, monkeypatch):
     worker.main("w1", poll_s=0.01, max_loops=1)
     assert pg.execute("select status from jobs").fetchone() == ("running",)
     assert settings_for_tests().stale_job_s == 2400
+
+
+def test_prompt_unlisten_failure_does_not_mask_the_error(pg):
+    jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+
+    class Broken:
+        def execute(self, q, *a):
+            if "UNLISTEN" in q.as_string(None):
+                raise RuntimeError("connection is closed")
+
+        def notifies(self, **k):
+            raise ValueError("listen connection died")
+    with pytest.raises(ValueError, match="listen connection died"):
+        worker.make_prompt(Broken(), pg, jid, timeout_s=1)("Enter OTP", "otp")
+
+
+def test_broken_listen_connection_does_not_break_the_next_connect_job(pg, pg2, monkeypatch):
+    opened = []
+    real_connect = worker._connect
+    monkeypatch.setattr(worker, "_connect", lambda url: opened.append(real_connect(url)) or opened[-1])
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [order("1")])
+    s = settings_for_tests()
+
+    def login_with_dead_listener(site, phone=None, prompt=None, **k):
+        opened[-1].close()  # the listen connection drops mid-job
+        prompt("Enter OTP", "otp")
+        return True
+    monkeypatch.setattr(worker.sync, "login", login_with_dead_listener)
+    first = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, s)
+    assert pg.execute("select status from jobs where id=%s", (first,)).fetchone() == ("failed",)
+
+    def login(site, phone=None, prompt=None, **k):
+        _notify_later(pg2, second, "4321")
+        return prompt("Enter OTP", "otp") == "4321"
+    monkeypatch.setattr(worker.sync, "login", login)
+    second = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, s)
+    assert pg.execute("select status, error from jobs where id=%s", (second,)).fetchone() == ("done", None)
+    assert len(opened) == 2 and all(c.closed for c in opened)
