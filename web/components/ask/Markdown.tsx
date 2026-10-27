@@ -93,20 +93,24 @@ function shapeTable(table: HastNode): void {
     RANK_HEADER.test(textOf(cellsOf(headRow)[0] ?? { type: "text" }).trim()) &&
     column(0).length > 0 &&
     column(0).every((v) => RANK_VALUE.test(v));
+  // The pinned label column is capped (see PIN_CAP) and keeps its full text in `title`. The
+  // second pin is dropped at run time if it would eat too much of the card (TableCard).
+  const capped = (cell: HastNode) => ({ dataPinCap: "", title: textOf(cell).trim() || undefined });
   for (const row of rows) {
     const cells = cellsOf(row);
     const [first, second] = cells;
     if (!first) continue;
     if (rankFirst && second) {
       setProps(first, {}, ["w-11", "min-w-11", "max-w-11"]);
-      setProps(second, { dataPinEdge: "" }, [
+      setProps(second, { ...capped(second), dataPinSecond: "" }, [
         "sticky",
         "left-11",
         "z-[1]",
+        "group-data-[unpin-second]/table:static",
         second.tagName === "th" ? "bg-canvas" : "bg-surface",
       ]);
     } else {
-      setProps(first, { dataPinEdge: "" });
+      setProps(first, capped(first));
     }
   }
 }
@@ -130,28 +134,44 @@ const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm];
 const EDGE =
   "pointer-events-none absolute inset-y-px w-3 from-ink/[0.08] to-transparent transition-opacity duration-150 ease-out-quart";
 
+/** Pinned columns may take at most this share of the card; past it the second pin is dropped. */
+export const MAX_PIN_SHARE = 0.45;
+
+/**
+ * The pinned label column is at most 8rem wide (6.5rem of text plus 0.75rem padding each side):
+ * long names wrap to two lines, then end in an ellipsis. The cell's `title` keeps the full name,
+ * and screen readers still read all of it (line-clamp only hides it visually).
+ */
+const PIN_CAP = "line-clamp-2 max-w-[6.5rem] whitespace-normal break-words";
+
 /**
  * A table in its own bordered card that scrolls sideways inside the bubble, so the page never
  * does. Soft 12px shadows mark the edges where columns are hidden: at the right while more is to
- * come, and just past the pinned column once scrolled. (They are overlays, not the classic
+ * come, and just past the pinned column(s) once scrolled. (They are overlays, not the classic
  * local/scroll background trick, because the opaque pinned column and header row would paint
- * over a background shadow.)
+ * over a background shadow.) When a rank column and the name after it are both pinned but would
+ * cover more than MAX_PIN_SHARE of the card, only the rank stays pinned.
  */
 function TableCard({ children }: { children?: ReactNode }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const [edges, setEdges] = useState({ start: false, end: false, pin: 0 });
+  const [edges, setEdges] = useState({ start: false, end: false, pin: 0, unpinSecond: false });
 
   const measure = useCallback(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const max = el.scrollWidth - el.clientWidth;
-    const pinEdge = el.querySelector<HTMLElement>("[data-pin-edge]");
-    const pin = pinEdge
-      ? Math.round(pinEdge.getBoundingClientRect().right - el.getBoundingClientRect().left)
-      : 1;
-    const next = { start: el.scrollLeft > 1, end: el.scrollLeft < max - 1, pin };
+    const first = el.querySelector<HTMLElement>("tr > :first-child");
+    const second = el.querySelector<HTMLElement>("[data-pin-second]");
+    // Widths don't depend on stickiness, so this can't flip back and forth.
+    const unpinSecond =
+      first !== null && second !== null && first.offsetWidth + second.offsetWidth > MAX_PIN_SHARE * el.clientWidth;
+    const edge = second && !unpinSecond ? second : first;
+    const pin = edge ? Math.round(edge.getBoundingClientRect().right - el.getBoundingClientRect().left) : 1;
+    const next = { start: el.scrollLeft > 1, end: el.scrollLeft < max - 1, pin, unpinSecond };
     setEdges((prev) =>
-      prev.start === next.start && prev.end === next.end && prev.pin === next.pin ? prev : next,
+      prev.start === next.start && prev.end === next.end && prev.pin === next.pin && prev.unpinSecond === next.unpinSecond
+        ? prev
+        : next,
     );
   }, []);
 
@@ -172,7 +192,8 @@ function TableCard({ children }: { children?: ReactNode }) {
         role="region"
         aria-label="Table, scrolls sideways"
         tabIndex={0}
-        className="max-w-full overflow-x-auto overscroll-x-contain rounded-tile border border-line bg-surface"
+        data-unpin-second={edges.unpinSecond ? "" : undefined}
+        className="group/table max-w-full overflow-x-auto overscroll-x-contain rounded-tile border border-line bg-surface"
       >
         <table className="w-full border-separate border-spacing-0 text-label tabular-nums">{children}</table>
       </div>
@@ -248,34 +269,53 @@ const COMPONENTS: Components = {
   ),
   code: ({ children }) => <code className="rounded bg-canvas px-1 py-0.5 font-mono text-label">{children}</code>,
   table: ({ children }) => <TableCard>{children}</TableCard>,
-  th: ({ children, style, className, ...rest }) => (
-    <th
-      scope="col"
-      style={style}
-      data-pin-edge={(rest as Record<string, unknown>)["data-pin-edge"] as string | undefined}
-      className={cn(
-        "whitespace-nowrap bg-canvas px-3 py-2 text-left font-medium text-ink-muted",
-        "first:sticky first:left-0 first:z-[1] first:bg-canvas",
-        className,
-      )}
-    >
-      {children}
-    </th>
-  ),
-  td: ({ children, style, className, ...rest }) => (
-    <td
-      style={style}
-      data-pin-edge={(rest as Record<string, unknown>)["data-pin-edge"] as string | undefined}
-      className={cn(
-        "whitespace-nowrap border-t border-line-soft px-3 py-2 text-ink",
-        "first:sticky first:left-0 first:z-[1] first:bg-surface",
-        className,
-      )}
-    >
-      {children}
-    </td>
-  ),
+  th: ({ children, style, className, title, ...rest }) => {
+    const pin = pinProps(rest);
+    return (
+      <th
+        scope="col"
+        style={style}
+        title={title}
+        {...pin.attrs}
+        className={cn(
+          "whitespace-nowrap bg-canvas px-3 py-2 text-left font-medium text-ink-muted",
+          "first:sticky first:left-0 first:z-[1] first:bg-canvas",
+          className,
+        )}
+      >
+        {pin.capped ? <span className={PIN_CAP}>{children}</span> : children}
+      </th>
+    );
+  },
+  td: ({ children, style, className, title, ...rest }) => {
+    const pin = pinProps(rest);
+    return (
+      <td
+        style={style}
+        title={title}
+        {...pin.attrs}
+        className={cn(
+          "whitespace-nowrap border-t border-line-soft px-3 py-2 text-ink",
+          "first:sticky first:left-0 first:z-[1] first:bg-surface",
+          className,
+        )}
+      >
+        {pin.capped ? <span className={PIN_CAP}>{children}</span> : children}
+      </td>
+    );
+  },
 };
+
+/** The pinning markers rehypeShapeTables put on a cell, as DOM attributes. */
+function pinProps(rest: object) {
+  const props = rest as Record<string, unknown>;
+  const capped = props["data-pin-cap"] !== undefined;
+  const second = props["data-pin-second"] !== undefined;
+  return {
+    capped,
+    attrs: { "data-pin-cap": capped ? "" : undefined, "data-pin-second": second ? "" : undefined },
+  };
+}
 
 /**
  * The analyst's markdown answer. GitHub-flavoured (tables, lists, strikethrough); raw HTML in

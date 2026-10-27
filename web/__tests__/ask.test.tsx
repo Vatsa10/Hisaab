@@ -183,7 +183,7 @@ describe("AskChat", () => {
       expect(within(table).getByRole("cell", { name: "Swiggy" }).className).toContain(cls);
     }
     expect(within(table).getByRole("columnheader", { name: "App" }).className).toContain("first:bg-canvas");
-    expect(within(table).getByRole("columnheader", { name: "App" })).toHaveAttribute("data-pin-edge");
+    expect(within(table).getByRole("columnheader", { name: "App" })).toHaveAttribute("data-pin-cap");
   });
 
   it("also pins the name column when the first column is only a rank", async () => {
@@ -192,10 +192,65 @@ describe("AskChat", () => {
     const name = within(table).getByRole("cell", { name: "Meghana Foods" });
     expect(name.className).toContain("sticky");
     expect(name.className).toContain("left-11");
-    expect(name).toHaveAttribute("data-pin-edge");
+    expect(name).toHaveAttribute("data-pin-second");
     expect(within(table).getByRole("cell", { name: "1" }).className).toContain("w-11");
-    expect(within(table).getByRole("cell", { name: "1" })).not.toHaveAttribute("data-pin-edge");
+    expect(within(table).getByRole("cell", { name: "1" })).not.toHaveAttribute("data-pin-cap");
     expect(within(table).getByRole("columnheader", { name: "Restaurant" }).className).toContain("bg-canvas");
+  });
+
+  it("caps the pinned label column at two lines, keeping the full name in title", async () => {
+    const long = "Meghana Foods Koramangala 5th Block";
+    await answerWith(
+      ["| Restaurant | Orders | Spend |", "|---|---|---|", `| ${long} | 17 | ₹5,113 |`].join("\n"),
+    );
+    const table = await screen.findByRole("table");
+    const cell = within(table).getByRole("cell", { name: long });
+    expect(cell).toHaveAttribute("title", long);
+    const clamp = cell.firstElementChild as HTMLElement;
+    expect(clamp.textContent).toBe(long);
+    for (const cls of ["line-clamp-2", "max-w-[6.5rem]", "whitespace-normal"]) expect(clamp.className).toContain(cls);
+    // Other columns are not capped.
+    expect(within(table).getByRole("cell", { name: "₹5,113" })).not.toHaveAttribute("title");
+    expect(within(table).getByRole("cell", { name: "₹5,113" }).firstElementChild).toBeNull();
+  });
+
+  it("caps the pinned name column after a rank too", async () => {
+    await answerWith(RANK_ANSWER);
+    const table = await screen.findByRole("table");
+    const name = within(table).getByRole("cell", { name: "Meghana Foods" });
+    expect(name).toHaveAttribute("title", "Meghana Foods");
+    expect((name.firstElementChild as HTMLElement).className).toContain("line-clamp-2");
+  });
+
+  describe("second pin vs. card width", () => {
+    /** Cells: rank 44px, name 120px (164px pinned). The card is `card` px wide. */
+    function layout(card: number) {
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+        if (this instanceof HTMLTableCellElement) return this.cellIndex === 0 ? 44 : 120;
+        return 0;
+      });
+      vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (this: Element) {
+        return this.getAttribute("role") === "region" ? card : 0;
+      });
+    }
+
+    it("drops the second pin when both would cover more than 45% of the card", async () => {
+      layout(313); // 164 > 0.45 × 313 = 140.85
+      await answerWith(RANK_ANSWER);
+      await screen.findByRole("table");
+      const scroller = screen.getByRole("region", { name: "Table, scrolls sideways" });
+      expect(scroller).toHaveAttribute("data-unpin-second");
+      expect(scroller.className).toContain("group/table");
+      const name = screen.getByRole("cell", { name: "Meghana Foods" });
+      expect(name.className).toContain("group-data-[unpin-second]/table:static");
+    });
+
+    it("keeps the second pin when there is room", async () => {
+      layout(600); // 164 < 0.45 × 600 = 270
+      await answerWith(RANK_ANSWER);
+      await screen.findByRole("table");
+      expect(screen.getByRole("region", { name: "Table, scrolls sideways" })).not.toHaveAttribute("data-unpin-second");
+    });
   });
 
   it("writes negative numbers with a true minus sign", async () => {
