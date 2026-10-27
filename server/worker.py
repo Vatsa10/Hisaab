@@ -10,6 +10,7 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -61,14 +62,39 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
 
 
 def _profiles_root() -> Path:
-    return Path(os.getenv("PROFILE_ROOT", "profiles_users"))
+    return Path((os.getenv("PROFILE_ROOT") or "").strip() or "profiles_users")
 
 
-def _wipe_profiles_root() -> None:
-    """Plaintext profiles never outlive a job; whatever a dead worker left behind goes at start-up."""
-    root = _profiles_root()
-    shutil.rmtree(root, ignore_errors=True)
+def _check_profiles_root(root: Path, store_url: str) -> Path:
+    """Refuse a PROFILE_ROOT that could make the start-up wipe (or a job) touch something that is not ours:
+    the filesystem root, the home directory, the working directory or a parent of it, or the vault."""
+    resolved = root.resolve()
+    cwd = Path.cwd().resolve()
+    forbidden = {Path(resolved.anchor), Path.home().resolve(), cwd, *cwd.parents}
+    if store_url.startswith("file://"):
+        forbidden.add(vault.store_from_url(store_url).root.resolve())
+    if resolved in forbidden:
+        raise ValueError(f"PROFILE_ROOT {str(resolved)!r} is not a safe scratch directory "
+                         "(filesystem root, home, working directory, a parent of it, or the vault)")
+    return resolved
+
+
+def _is_job_dir(p: Path) -> bool:
+    try:
+        uuid.UUID(p.name)
+    except ValueError:
+        return False
+    return p.is_dir() and not p.is_symlink()
+
+
+def _wipe_profiles_root(store_url: str) -> None:
+    """Plaintext profiles never outlive a job; per-job directories (UUID names) a dead worker left behind go
+    at start-up. Nothing else under the root, and never the root itself, is deleted."""
+    root = _check_profiles_root(_profiles_root(), store_url)
     root.mkdir(parents=True, exist_ok=True)
+    for child in root.iterdir():
+        if _is_job_dir(child):
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def _location(conn, user_id: str) -> dict:
@@ -260,7 +286,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     max_loops is for tests."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     s = settings(for_worker=True)
-    _wipe_profiles_root()
+    _wipe_profiles_root(s.profile_store_url)
     log.info("worker started id=%s", worker_id)
     old_handler = None
     if threading.current_thread() is threading.main_thread():

@@ -331,12 +331,13 @@ def _sync_job(pg, site="zepto"):
 
 def test_startup_wipes_leftover_profiles(pg, monkeypatch):
     root = Path(os.environ["PROFILE_ROOT"])
-    (root / "dead-job" / "Default").mkdir(parents=True)
-    (root / "dead-job" / "Default" / "Cookies").write_text("secret")
+    dead = root / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10"
+    (dead / "Default").mkdir(parents=True)
+    (dead / "Default" / "Cookies").write_text("secret")
     monkeypatch.setattr(worker, "settings", settings_for_tests)
     monkeypatch.setattr(worker.time, "sleep", lambda _: None)
     worker.main("w1", poll_s=0.01, max_loops=1)
-    assert not (root / "dead-job").exists()
+    assert not dead.exists()
 
 
 def test_successful_job_saves_encrypted_profile(pg, monkeypatch):
@@ -580,3 +581,46 @@ def test_settings_file_store_needs_key_or_dev_flag(monkeypatch):
     monkeypatch.setenv("ALLOW_DEV_PROFILE_KEY", "1")
     assert len(settings(for_worker=True).profile_master_key) == 32
 
+
+
+def _start(monkeypatch):
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=1)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_profile_root_uses_default(monkeypatch, value):
+    monkeypatch.setenv("PROFILE_ROOT", value)
+    assert worker._profiles_root() == Path("profiles_users")
+
+
+def test_startup_wipe_only_removes_job_dirs(pg, monkeypatch):
+    root = Path(os.environ["PROFILE_ROOT"])
+    job_dir = root / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10"
+    job_dir.mkdir(parents=True)
+    (job_dir / "x").write_text("1")
+    keep_dir, keep_file = root / "keep-me", root / "notes.txt"
+    keep_dir.mkdir()
+    keep_file.write_text("1")
+    _start(monkeypatch)
+    assert not job_dir.exists() and keep_dir.is_dir() and keep_file.is_file() and root.is_dir()
+
+
+def test_startup_refuses_cwd_parent_and_vault(pg, monkeypatch, tmp_path):
+    guarded = tmp_path / "keep"
+    guarded.mkdir()
+    (guarded / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10").mkdir()
+    monkeypatch.chdir(guarded)
+    for bad in (guarded, tmp_path, guarded.anchor, Path.home()):
+        monkeypatch.setenv("PROFILE_ROOT", str(bad))
+        with pytest.raises(ValueError, match="PROFILE_ROOT"):
+            _start(monkeypatch)
+    assert (guarded / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10").is_dir()
+    vault_dir = Path(os.environ["PROFILE_STORE_URL"].removeprefix("file:///"))
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10").mkdir()
+    monkeypatch.setenv("PROFILE_ROOT", str(vault_dir))
+    with pytest.raises(ValueError, match="PROFILE_ROOT"):
+        _start(monkeypatch)
+    assert (vault_dir / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10").is_dir()
