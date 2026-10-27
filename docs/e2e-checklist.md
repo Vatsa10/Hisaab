@@ -13,35 +13,13 @@ never paste your real phone number or address into a file or commit.
 - `.env` next to `docker-compose.yml` (or exported in your shell) with `OPENAI_API_KEY` set. The worker may need it
   for the login agent. Leave `PROFILE_MASTER_KEY` empty locally: compose sets `ALLOW_DEV_PROFILE_KEY=1` and the
   worker uses the fixed development key with the `file:///data/vault` vault.
+- Proxy template: the worker substitutes the per-user sticky session with Python `str.format(session=...)`, so
+  `PROXY_URL_TEMPLATE` must contain exactly `{session}` and no other literal `{` or `}`. Shape (placeholders, not real
+  values): `http://<user>-session-{session}:<pass>@<host>:<port>`.
 - Leave `PROXY_URL_TEMPLATE` empty for the local run (the worker then goes out directly from your machine). Set it
   only if you want to test the proxy path.
 
-## 1. Publish the zepto recipe (once)
-
-The worker only replays recipes stored in the database. It never learns on a user's account, so without this the
-job fails with `no_recipe`. The recipe is learned on your machine with your own browser, then uploaded.
-
-Start the stack first so the database exists (step 2), then:
-
-```bash
-python cli.py learn zepto          # interactive, logs in on your own machine; writes recipes/zepto.json
-export DATABASE_URL='postgresql://postgres:postgres@localhost:54330/postgres'
-python cli.py publish-recipe zepto
-```
-
-Expected: `published zepto recipe as version 1` (a number; it increases on each re-publish).
-
-Check:
-
-```bash
-docker compose exec db psql -U postgres -c "select site, kind, version, healthy from recipes"
-```
-
-Expected: a row `zepto | orders | 1 | t`.
-
-Note: `docker compose down -v` wipes the database, so the recipe must be published again after it.
-
-## 2. Start the stack
+## 1. Start the stack
 
 ```bash
 docker compose up -d --build
@@ -57,6 +35,36 @@ docker compose logs worker | grep "worker started"
 Expected: a line containing `worker started id=`.
 
 Both containers must be running: `docker compose ps` shows `api`, `db`, `worker` as running (`migrate` is exited 0).
+
+## 2. Publish the zepto recipe (once)
+
+The worker only replays recipes stored in the database. It never learns on a user's account, so without this the
+job fails with `no_recipe`. The recipe is learned on your machine with your own browser, then uploaded to the
+compose database (the stack from step 1 must be running).
+
+If `recipes/zepto.json` already exists on your machine, skip login and learn and go straight to publish. Otherwise
+log in to Zepto on the host first (learn raises SessionExpired without a logged-in host profile):
+
+```bash
+python cli.py login zepto          # interactive; skip if recipes/zepto.json already exists
+python cli.py learn zepto          # writes recipes/zepto.json; skip if it already exists
+export DATABASE_URL='postgresql://postgres:postgres@localhost:54330/postgres'   # host-side CLI only
+python cli.py publish-recipe zepto
+```
+
+`DATABASE_URL` here is used only by the host-side CLI; the containers have their own.
+
+Expected: `published zepto recipe as version 1` (a number; it increases on each re-publish).
+
+Check:
+
+```bash
+docker compose exec db psql -U postgres -c "select site, kind, version, healthy from recipes"
+```
+
+Expected: a row `zepto | orders | 1 | t`.
+
+Note: `docker compose down -v` wipes the database, so the recipe must be published again after it.
 
 ## 3. Mint a test token
 
@@ -104,20 +112,19 @@ Use your own number as 10 digits or with country code, e.g. `+91<10-digit-number
 ```bash
 export PHONE='+91<your-10-digit-number>'
 curl -s -X POST $API/connections/zepto/connect \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"phone\":\"$PHONE\"}" | tee /tmp/connect.json
-export JOB_ID=$(python -c "import json; print(json.load(open('/tmp/connect.json'))['job_id'])")
-echo $JOB_ID
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"phone\":\"$PHONE\"}")
+
 ```
 
-Expected: HTTP 202 with `{"job_id":"<uuid>"}`. Errors: `412` = step 4 not done; `422` = bad phone;
+Expected: a job id (uuid) is printed (the API answered 202). If it fails with a KeyError, rerun the curl alone with `-i` to see the status. Errors: `412` = step 4 not done; `422` = bad phone;
 `409` = a connect job is already active (finish or wait for it, see Troubleshooting).
 
 ### Watch the job
 
-Re-run this every few seconds (or wrap it in `watch`-style loop `while true; do ...; sleep 3; done`, stop with Ctrl-C):
+Poll every 3 seconds (stop with Ctrl+C):
 
 ```bash
-docker compose exec db psql -U postgres -c "select status, progress, error from jobs where id='$JOB_ID'"
+while true; do docker compose exec -T db psql -U postgres -c "select status, progress, error from jobs where id='$JOB_ID'"; sleep 3; done
 ```
 
 Sequence you should see: `queued`, then `running` with progress `{}` or earlier stages, then
@@ -193,8 +200,8 @@ Expected: at least one file.
 This is the main check: the worker restores the saved profile into a fresh directory, so no login is needed.
 
 ```bash
-curl -s -X POST $API/connections/zepto/refresh -H "Authorization: Bearer $TOKEN" | tee /tmp/refresh.json
-export JOB2=$(python -c "import json; print(json.load(open('/tmp/refresh.json'))['job_id'])")
+export JOB2=$(curl -s -X POST $API/connections/zepto/refresh -H "Authorization: Bearer $TOKEN"   | python -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+echo "$JOB2"
 ```
 
 Expected: 202 with a new `job_id`.
@@ -247,9 +254,7 @@ fresh login.
 docker compose down -v       # stops everything and deletes the database AND the vault volume
 ```
 
-Use `docker compose down` (no `-v`) to keep the data. After `down -v`, redo step 1 (recipe) and step 4 (consent).
-Also delete `/tmp/connect.json` and `/tmp/refresh.json`; they hold only job ids, never the phone or OTP.
-
+Use `docker compose down` (no `-v`) to keep the data. After `down -v`, redo step 1 (start), step 2 (recipe) and step 4 (consent).
 ## Troubleshooting
 
 The failure reason is in `jobs.error`:
@@ -260,10 +265,10 @@ docker compose exec db psql -U postgres -c "select error from jobs where id='$JO
 
 | `jobs.error` | Meaning | Fix |
 |---|---|---|
-| `no_recipe: ...` | No zepto recipe in the database | Do step 1 (`python cli.py publish-recipe zepto` with `DATABASE_URL` pointing at the compose DB, port 54330), then POST connect again. |
+| `no_recipe: ...` | No zepto recipe in the database | Do step 2 (`python cli.py publish-recipe zepto` with `DATABASE_URL` pointing at the compose DB, port 54330), then POST connect again. |
 | `otp_timeout` (or `question_timeout`) | No answer arrived within 180 s | POST `/connections/zepto/connect` again, then send the OTP within 180 s of `otp_needed`. The connection is left in `error`; a new connect clears it. |
 | `needs_login` | A sync found the session expired, or no usable profile in the vault (connection becomes `needs_login`) | POST `/connections/zepto/connect` again (new OTP). |
-| `proxy_unavailable` | `PROXY_URL_TEMPLATE` is set but the proxy did not answer | Check the template (it must contain the session placeholder) and the proxy credentials; or unset `PROXY_URL_TEMPLATE` for a local run. The worker log shows only the proxy host. |
+| `proxy_unavailable` | `PROXY_URL_TEMPLATE` is set but the proxy did not answer | Check the template (it must contain the literal `{session}` and no other braces; see below) and the proxy credentials; or unset `PROXY_URL_TEMPLATE` for a local run. The worker log shows only the proxy host. |
 | `login_failed` | The login agent did not reach the orders page (wrong OTP, site changed) | Retry with a fresh OTP; if it repeats, re-learn the recipe and republish. |
 | `worker_lost` | Worker died mid-connect | Re-POST connect. |
 
@@ -291,17 +296,18 @@ Requirements before starting:
 
 - Supabase migrations applied (`supabase/migrations/*.sql`, all three in order).
 - `deploy/azure/.env.deploy` filled in (copied from `env.deploy.example`) with a real `PROFILE_MASTER_KEY` and
-  **`PROXY_URL_TEMPLATE` set**. Do not run the Azure flow without a proxy: a datacenter IP will be blocked by the
+  **`PROXY_URL_TEMPLATE` set** (with `{session}`, see step 0). Do not run the Azure flow without a proxy: a datacenter IP will be blocked by the
   site and the job fails with `proxy_unavailable` or a login failure. There is no dev key on Azure
   (`PROFILE_MASTER_KEY` is mandatory outside a `file://` vault).
-- The zepto recipe published to the Supabase database (same as step 1, with the Supabase `DATABASE_URL`).
+- The zepto recipe published to the Supabase database (step 2, with the Supabase `DATABASE_URL`).
 
 ```bash
 bash deploy/azure/deploy.sh <resource-group>
 ```
 
-It prints the API URL. Then use these variables and repeat steps 1 and 3 to 8 unchanged, changing only the
-endpoint, the secret and the way you run SQL:
+It prints the API URL. There is no `docker compose` here: skip step 1, and repeat step 2 (publish-recipe, with
+`DATABASE_URL` = the Supabase direct connection string) and steps 3 to 8 with these changes: `API` is the deployed
+URL, the JWT secret is Supabase's, and SQL runs with psql:
 
 ```bash
 export API='https://<api-url-printed-by-deploy.sh>'
@@ -309,7 +315,7 @@ export DATABASE_URL='<supabase session/direct connection string>'     # port 543
 export SUPABASE_JWT_SECRET='<your Supabase JWT secret>'
 export USER_ID='<a test user uuid>'
 # mint TOKEN as in step 3 with this secret
-alias q='psql "$DATABASE_URL" -c'   # replaces: docker compose exec db psql -U postgres -c
+# DATABASE_URL is used only by the host-side CLI and psql; it is not sent to the API
 ```
 
 Differences from local:
