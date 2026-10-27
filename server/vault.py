@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import hmac
 import io
 import json
@@ -75,6 +74,13 @@ class LocalStore:
         p = self._path(key)
         return p.read_bytes() if p.is_file() else None
 
+    def delete(self, key: str) -> int:
+        p = self._path(key)
+        if p.is_file():
+            p.unlink()
+            return 1
+        return 0
+
     def delete_prefix(self, prefix: str) -> int:
         root = self.root.resolve()
         if not root.is_dir():
@@ -107,6 +113,14 @@ class BlobStore:
             return self._container.download_blob(key).readall()
         except ResourceNotFoundError:
             return None
+
+    def delete(self, key: str) -> int:
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            self._container.delete_blob(key)
+            return 1
+        except ResourceNotFoundError:
+            return 0
 
     def delete_prefix(self, prefix: str) -> int:
         n = 0
@@ -149,38 +163,57 @@ def _aad(user_id: str, profile: str) -> bytes:
     return f"{user_id}/{profile}".encode()
 
 
-def _key_check(user_key: bytes) -> bytes:
-    return hmac.new(user_key, b"ea-vault-key-check", hashlib.sha256).digest()[:KEY_CHECK_LEN]
+def _key_check(master_key: bytes, user_id: str) -> bytes:
+    """Key-check value from its own HKDF subkey, so it reveals nothing about the AES key."""
+    return HKDF(algorithm=hashes.SHA256(), length=KEY_CHECK_LEN, salt=None,
+                info=b"profile-check:" + user_id.encode()).derive(master_key)
 
 
 def _seal(master_key: bytes, user_id: str, profile: str, plaintext: bytes) -> bytes:
-    user_key = _user_key(master_key, user_id)
-    header = MAGIC + bytes([FORMAT_VERSION]) + _key_check(user_key)
+    header = MAGIC + bytes([FORMAT_VERSION]) + _key_check(master_key, user_id)
     nonce = os.urandom(NONCE_LEN)
-    ct = AESGCM(user_key).encrypt(nonce, plaintext, header + _aad(user_id, profile))
+    ct = AESGCM(_user_key(master_key, user_id)).encrypt(nonce, plaintext, header + _aad(user_id, profile))
     return header + nonce + ct
 
 
-def _open(master_key: bytes, user_id: str, profile: str, blob: bytes) -> bytes:
-    user_key = _user_key(master_key, user_id)
-    if blob.startswith(MAGIC):
-        hlen = len(MAGIC) + 1 + KEY_CHECK_LEN
-        if len(blob) < hlen + NONCE_LEN + 16:
-            raise VaultError("profile blob is too short")
-        if blob[len(MAGIC)] != FORMAT_VERSION:
-            raise VaultError("unsupported vault format")
-        header = blob[:hlen]
-        if not hmac.compare_digest(header[len(MAGIC) + 1:], _key_check(user_key)):
-            raise VaultKeyMismatch("profile blob was sealed with a different key")
-        nonce, body, aad = blob[hlen:hlen + NONCE_LEN], blob[hlen + NONCE_LEN:], header + _aad(user_id, profile)
-    else:  # legacy: nonce || ciphertext+tag
-        if len(blob) < NONCE_LEN + 16:
-            raise VaultError("profile blob is too short")
-        nonce, body, aad = blob[:NONCE_LEN], blob[NONCE_LEN:], _aad(user_id, profile)
+def _open_v1(master_key: bytes, user_id: str, profile: str, blob: bytes) -> bytes:
+    hlen = len(MAGIC) + 1 + KEY_CHECK_LEN
+    if len(blob) < hlen + NONCE_LEN + 16:
+        raise VaultError("profile blob is too short")
+    if blob[len(MAGIC)] != FORMAT_VERSION:
+        raise VaultError("unsupported vault format")
+    header = blob[:hlen]
+    if not hmac.compare_digest(header[len(MAGIC) + 1:], _key_check(master_key, user_id)):
+        raise VaultKeyMismatch("profile blob was sealed with a different key")
     try:
-        return AESGCM(user_key).decrypt(nonce, body, aad)
+        return AESGCM(_user_key(master_key, user_id)).decrypt(
+            blob[hlen:hlen + NONCE_LEN], blob[hlen + NONCE_LEN:], header + _aad(user_id, profile))
     except InvalidTag as e:
         raise VaultError("profile blob failed authentication") from e
+
+
+def _open_legacy(master_key: bytes, user_id: str, profile: str, blob: bytes) -> bytes:
+    if len(blob) < NONCE_LEN + 16:
+        raise VaultError("profile blob is too short")
+    try:
+        return AESGCM(_user_key(master_key, user_id)).decrypt(
+            blob[:NONCE_LEN], blob[NONCE_LEN:], _aad(user_id, profile))
+    except InvalidTag as e:
+        raise VaultError("profile blob failed authentication") from e
+
+
+def _open(master_key: bytes, user_id: str, profile: str, blob: bytes) -> tuple[bytes, bool]:
+    """Return (plaintext, is_legacy). A legacy blob can begin with the magic by chance, so a
+    failed v1 parse falls back to a legacy decrypt; GCM authentication keeps that safe."""
+    if not blob.startswith(MAGIC):
+        return _open_legacy(master_key, user_id, profile, blob), True
+    try:
+        return _open_v1(master_key, user_id, profile, blob), False
+    except VaultError as v1_error:
+        try:
+            return _open_legacy(master_key, user_id, profile, blob), True
+        except VaultError:
+            raise v1_error from None
 
 
 # ---------------------------------------------------------------- archive
@@ -273,8 +306,8 @@ def restore_profile(store, master_key: bytes, user_id: str, profile: str, dest_d
     blob = store.get(blob_key(user_id, profile))
     if blob is None:
         return False
-    legacy = not blob.startswith(MAGIC)
-    _unpack(_open(master_key, user_id, profile, blob), dest_dir)
+    plaintext, legacy = _open(master_key, user_id, profile, blob)
+    _unpack(plaintext, dest_dir)
     if legacy and not (Path(dest_dir) / CANARY_NAME).exists():
         stamp(dest_dir, user_id, profile)
     try:
@@ -286,9 +319,7 @@ def restore_profile(store, master_key: bytes, user_id: str, profile: str, dest_d
 
 
 def delete_profile(store, user_id: str, profile: str) -> int:
-    key = blob_key(user_id, profile)
-    n = store.delete_prefix(key)
-    return n
+    return store.delete(blob_key(user_id, profile))
 
 
 def delete_user_profiles(store, user_id: str) -> int:

@@ -87,7 +87,10 @@ def test_v1_blob_layout(tmp_path):
     src, store, key = _setup(tmp_path)
     save(store, key, A, "zepto", src)
     raw = store.get(vault.blob_key(A, "zepto"))
-    assert raw.startswith(b"EAPV")
+    assert raw[:5] == b"EAPV"
+    assert len(vault.MAGIC) + 1 + vault.KEY_CHECK_LEN == 21
+    # header(21) + nonce(12) + ciphertext(>= tag 16)
+    assert len(raw) > 21 + 12 + 16
     assert vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
     assert (tmp_path / "dst/Default/Cookies").read_bytes() == b"cookie-db"
 
@@ -100,6 +103,17 @@ def test_legacy_blob_still_restores_and_is_stamped(tmp_path):
     assert (dst / "Default/Cookies").read_bytes() == b"cookie-db"
     vault.check_owner(dst, A, "zepto")  # stamped, does not raise
     assert json.loads((dst / vault.CANARY_NAME).read_text())["user_id"] == A
+
+
+def test_legacy_blob_whose_nonce_starts_with_magic_restores(tmp_path):
+    src, store, key = _setup(tmp_path)
+    nonce = vault.MAGIC + os.urandom(8)
+    ct = AESGCM(vault._user_key(key, A)).encrypt(nonce, vault._pack(src), f"{A}/zepto".encode())
+    store.put(vault.blob_key(A, "zepto"), nonce + ct)
+    dst = tmp_path / "dst"
+    assert vault.restore_profile(store, key, A, "zepto", dst)
+    assert (dst / "Default/Cookies").read_bytes() == b"cookie-db"
+    vault.check_owner(dst, A, "zepto")
 
 
 def test_wrong_master_key_is_key_mismatch(tmp_path):
@@ -173,6 +187,16 @@ def test_delete_profile_removes_only_that_profile(tmp_path):
     assert vault.delete_profile(store, A, "swiggy") == 1
     assert store.get(vault.blob_key(A, "swiggy")) is None
     assert store.get(vault.blob_key(A, "zomato")) is not None
+    assert vault.delete_profile(store, A, "swiggy") == 0
+
+
+def test_delete_profile_keeps_sibling_keys(tmp_path):
+    src, store, key = _setup(tmp_path)
+    save(store, key, A, "swiggy", src)
+    sibling = vault.blob_key(A, "swiggy") + ".bak"
+    store.put(sibling, b"keep")
+    assert vault.delete_profile(store, A, "swiggy") == 1
+    assert store.get(sibling) == b"keep"
 
 
 def _evil_blob(key, member_setup):
