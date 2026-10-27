@@ -189,9 +189,15 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
     return list(orders.values())
 
 
-def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None) -> list[dict]:
-    """Fast path -> nav_trace replay -> re-learn; returns the orders (no database)."""
-    recipe = recipes.load(site) or learn(site)
+def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None,
+                 allow_learn: bool = True) -> list[dict]:
+    """Fast path -> nav_trace replay -> re-learn; returns the orders (no database).
+    allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead."""
+    recipe = recipes.load(site)
+    if not recipe:
+        if not allow_learn:
+            raise RecipeError(f"no recipe for {site}; an admin must learn it")
+        recipe = learn(site)
     with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
                    location=location) as (_, page, guard, capture):
         orders = None
@@ -210,6 +216,8 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
                 raise
             except Exception as e:
                 log.warning("%s nav_trace replay failed: %s", site, e)
+        if not orders and not allow_learn:
+            raise RecipeError(f"recipe drift for {site}: fast path and replay both failed; an admin must re-learn it")
         if not orders:
             log.warning("DRIFT: %s recipe no longer works; re-running discovery", site)
             capture.clear()
