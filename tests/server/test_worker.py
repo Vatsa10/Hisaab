@@ -624,3 +624,65 @@ def test_startup_refuses_cwd_parent_and_vault(pg, monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="PROFILE_ROOT"):
         _start(monkeypatch)
     assert (vault_dir / "6f1c3d52-8a0e-4c57-9b1a-0d2f4e6a8b10").is_dir()
+
+
+# ---------------------------------------------------------------- proxy credentials never leak (final review)
+
+LEAKY_PASSWORD = "s3cr/et#pw"  # unencoded "/" and "#" make urlsplit fail with a message quoting the password
+LEAKY_TEMPLATE = "http://user-{session}:" + LEAKY_PASSWORD + "@gw.example.com:7000"
+
+
+def _leaks(text: str) -> bool:
+    return any(part in text for part in (LEAKY_PASSWORD, "s3cr", "et#pw"))
+
+
+def test_worker_start_refuses_bad_proxy_template_without_echoing_it(monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("PROXY_URL_TEMPLATE", LEAKY_TEMPLATE)
+    monkeypatch.setenv("ALLOW_DEV_PROFILE_KEY", "1")
+    monkeypatch.delenv("PROFILE_MASTER_KEY", raising=False)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ValueError) as e:
+        worker.main("w1", poll_s=0.01, max_loops=1)
+    from server.config import PROXY_TEMPLATE_INVALID
+    assert str(e.value) == PROXY_TEMPLATE_INVALID
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert not _leaks(str(e.value)) and not _leaks(caplog.text)
+
+
+def test_relay_construction_error_is_proxy_unavailable_without_credentials(pg, monkeypatch, caplog):
+    import json
+    import logging
+    caplog.set_level(logging.DEBUG)
+    s = dataclasses.replace(settings_for_tests(), proxy_url_template=LEAKY_TEMPLATE)
+    store.set_connection(pg, A, "zepto", status="connected")
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: pytest.fail("must not sync"))
+    worker.run_job(_sync_job(pg), pg, s)
+    error, progress = pg.execute("select error, progress from jobs").fetchone()
+    assert error == "proxy_unavailable"
+    assert not _leaks(error) and not _leaks(json.dumps(progress)) and not _leaks(caplog.text)
+    assert pg.execute("select status from connections").fetchone() == ("connected",)
+
+
+def test_relay_check_crash_is_proxy_unavailable(pg, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.DEBUG)
+
+    class CrashingRelay:
+        def __init__(self, upstream):
+            self.url = "http://127.0.0.1:5555"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+        def check(self, *a, **k):
+            raise OSError(f"boom talking to {LEAKY_TEMPLATE}")
+    monkeypatch.setattr(worker, "Relay", CrashingRelay)
+    s = dataclasses.replace(settings_for_tests(), proxy_url_template="http://u-{session}:pw@gw.example.com:7000")
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: pytest.fail("must not sync"))
+    worker.run_job(_sync_job(pg), pg, s)
+    assert pg.execute("select error from jobs").fetchone() == ("proxy_unavailable",)
+    assert not _leaks(caplog.text)

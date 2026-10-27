@@ -142,6 +142,16 @@ def _heartbeat_loop(database_url: str, job_id: str, worker_id: str | None, every
         _close(conn)
 
 
+def _proxy_host(upstream: str | None) -> str:
+    """The upstream proxy's host for a log line (never the user/password), or "?" if it does not parse."""
+    try:
+        parts = urlsplit(upstream or "")
+        host = parts.hostname or "?"
+        return host if "@" in parts.netloc else "?"  # no "@": what looks like a host may be the credentials
+    except Exception:
+        return "?"
+
+
 def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
     """The user's sticky proxy session for this site: created once (12 hex chars), then reused."""
     return conn.execute(
@@ -208,13 +218,17 @@ def run_job(job: jobs.Job, conn, s: Settings) -> None:
         with contextlib.ExitStack() as stack:
             proxy_server = None
             if s.proxy_url_template:
-                upstream = proxy_url_for(s.proxy_url_template, session_id)
-                relay = stack.enter_context(Relay(upstream))
+                # Any failure here (a template that does not parse, a relay that will not start, an unreachable
+                # or refusing upstream) is "proxy_unavailable". Exception text is never used: it can quote the
+                # upstream URL, which carries the proxy credentials.
+                upstream = None
                 try:
+                    upstream = proxy_url_for(s.proxy_url_template, session_id)
+                    relay = stack.enter_context(Relay(upstream))
                     relay.check()
-                except ProxyUnavailable as e:
-                    # log the upstream host only: the URL carries the proxy credentials
-                    log.warning("job %s: proxy %s unavailable (%s)", job.id, urlsplit(upstream).hostname, e)
+                except Exception as e:
+                    reason = str(e) if isinstance(e, ProxyUnavailable) else type(e).__name__
+                    log.warning("job %s: proxy %s unavailable (%s)", job.id, _proxy_host(upstream), reason)
                     return fail("proxy_unavailable")
                 proxy_server = relay.url
 

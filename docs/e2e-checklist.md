@@ -287,6 +287,8 @@ Other:
   `docker compose logs worker`.
 - `PROFILE_MASTER_KEY is not set` in the worker log: use the compose file as shipped (it sets `ALLOW_DEV_PROFILE_KEY=1`).
   Outside a `file://` vault a real `PROFILE_MASTER_KEY` is mandatory.
+- `PROXY_URL_TEMPLATE is invalid` in the worker log (the worker exits at start-up): the template did not parse as
+  `http://<user>:<password>@<host>:<port>` with `{session}`; percent-encode `/ # ? @ :` inside the user or password.
 - Chrome crashes on start: `shm_size: 1gb` and `--no-sandbox` are already set in compose; check
   `docker compose logs worker` for Xvfb errors.
 - `401 invalid token`: wrong secret or expired token; redo step 3 and make sure the secret equals the one the `api`

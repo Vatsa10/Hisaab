@@ -37,10 +37,32 @@ def _master_key(env, store_url: str, for_worker: bool) -> bytes | None:
                      "to use the fixed development key")
 
 
+# Fixed text: the template carries the proxy password, so no part of it may reach an error or a log.
+PROXY_TEMPLATE_INVALID = ("PROXY_URL_TEMPLATE is invalid: expected http://<user>:<password>@<host>:<port> with the "
+                          "literal {session} placeholder and no other braces; percent-encode any / # ? @ : in the "
+                          "user or password")
+
+
+def _check_proxy_template(template: str) -> str:
+    """Build one upstream URL from the template exactly as a job would, and parse it like the relay does."""
+    if not template:
+        return template
+    from server.proxy_relay import _parse_upstream, proxy_url_for
+    try:
+        _parse_upstream(proxy_url_for(template, "0" * 12))
+    except Exception:
+        raise ValueError(PROXY_TEMPLATE_INVALID) from None
+    return template
+
+
 def settings(for_worker: bool = False) -> Settings:
-    """for_worker=True also validates the vault configuration (the API never needs the profile key)."""
+    """for_worker=True also validates the vault configuration (the API never needs the profile key) and the
+    proxy template, so a bad one stops the worker at start-up instead of failing every job."""
     env = os.environ.get
     store_url = env("PROFILE_STORE_URL", "") or "file://vault_local"
+    proxy_template = env("PROXY_URL_TEMPLATE", "")
+    if for_worker:
+        _check_proxy_template(proxy_template)
     return Settings(
         database_url=env("DATABASE_URL", ""),
         jwt_secret=env("SUPABASE_JWT_SECRET", ""),
@@ -48,6 +70,6 @@ def settings(for_worker: bool = False) -> Settings:
         stale_job_s=int(env("STALE_JOB_S", "2400")),
         profile_store_url=store_url,
         profile_master_key=_master_key(env, store_url, for_worker),
-        proxy_url_template=env("PROXY_URL_TEMPLATE", ""),
+        proxy_url_template=proxy_template,
         heartbeat_s=int(env("HEARTBEAT_S", "30")),
     )
