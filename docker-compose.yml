@@ -5,6 +5,12 @@ x-app-env: &app-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
   TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+  SMTP_HOST: ${SMTP_HOST:-mailpit}
+  SMTP_PORT: "${SMTP_PORT:-1025}"
+  APP_URL: ${APP_URL:-http://localhost:3000}
+  VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+  VAPID_SUBJECT: ${VAPID_SUBJECT:-}
+  VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
 
 services:
   db:
@@ -81,6 +87,12 @@ services:
     shm_size: 1gb
     volumes:
       - vault:/data/vault
+
+  mailpit:  # local SMTP sink: the UI at http://localhost:8025 shows every email the app sends
+    image: axllent/mailpit:v1.21
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
 
 volumes:
   pgdata:

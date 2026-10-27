@@ -34,6 +34,11 @@ Compose reads these from your shell or a `.env` file next to `docker-compose.yml
 - `ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY` (optional), `PROFILE_MASTER_KEY`, `PROXY_URL_TEMPLATE` - default to empty.
 - `ANTHROPIC_MODEL` - defaults to `claude-haiku-5-5`, the only model the cost policy allows (under $1 / MTok).
 
+Notifications: compose adds a `mailpit` service, a local SMTP sink. The app sends mail to `mailpit:1025`
+(`SMTP_HOST`, `SMTP_PORT`) and you read it in the Mailpit UI at http://localhost:8025. Nothing leaves your machine.
+Web Push needs `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (a `mailto:` address) and `VAPID_PUBLIC_KEY`; with the key
+empty, push is skipped and users get email. `APP_URL` is the base for links inside emails.
+
 `PROFILE_STORE_URL` is `file:///data/vault` in compose; the vault and proxy settings are consumed by worker code
 that lands in a later task.
 

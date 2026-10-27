@@ -12,3 +12,4 @@ PyJWT[crypto]>=2.8
 httpx>=0.27
 azure-storage-blob>=12.19
 cryptography>=42
+pywebpush==2.3.0

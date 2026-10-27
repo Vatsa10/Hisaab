@@ -51,7 +51,7 @@ class Settings:
     smtp_user: str = ""
     smtp_password: str = field(default="", repr=False)
     smtp_starttls: bool = False
-    email_from: str = "Expense Agent <no-reply@localhost>"
+    smtp_from: str = "Hisaab <no-reply@localhost>"
 
 
 SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "instamart": "Instamart",
@@ -127,7 +127,7 @@ def settings(for_worker: bool = False) -> Settings:
         max_learn_job_s=int(env("MAX_LEARN_JOB_S", "2400")),
         sync_block_media=env("SYNC_BLOCK_MEDIA", "1") != "0",
         scheduler_tick_s=int(env("SCHEDULER_TICK_S", "900")),
-        app_url=env("APP_URL", "") or "http://localhost:3000",
+        app_url=(env("APP_URL", "") or "http://localhost:3000").rstrip("/"),
         vapid_public_key=env("VAPID_PUBLIC_KEY", ""),
         vapid_private_key=env("VAPID_PRIVATE_KEY", ""),
         vapid_subject=env("VAPID_SUBJECT", "") or "mailto:admin@localhost",
@@ -136,5 +136,5 @@ def settings(for_worker: bool = False) -> Settings:
         smtp_user=env("SMTP_USER", ""),
         smtp_password=env("SMTP_PASSWORD", ""),
         smtp_starttls=env("SMTP_STARTTLS", "0") == "1",
-        email_from=env("EMAIL_FROM", "") or "Expense Agent <no-reply@localhost>",
+        smtp_from=env("SMTP_FROM", "") or "Hisaab <no-reply@localhost>",
     )
