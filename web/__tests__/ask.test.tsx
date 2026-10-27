@@ -9,16 +9,50 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   apiFetch: api.apiFetch,
 }));
 
+// monthly_spend through the Supabase client: from().select().eq() resolves to db.result.
+const db = vi.hoisted(() => ({
+  result: { data: [] as unknown[] | null, error: null as unknown },
+  from: vi.fn(),
+  eq: vi.fn(),
+}));
+vi.mock("@/lib/supabase/client", () => ({
+  getSupabaseBrowserClient: () => ({
+    from: (table: string) => {
+      db.from(table);
+      return {
+        select: () => ({
+          eq: (col: string, value: string) => {
+            db.eq(col, value);
+            return Promise.resolve(db.result);
+          },
+        }),
+      };
+    },
+  }),
+}));
+
+vi.mock("next/navigation", () => ({ usePathname: () => "/ask" }));
+
 import { ApiError } from "@/lib/api";
-import { AskChat, SUGGESTIONS } from "@/components/ask/AskChat";
+import { AskChat, SLOW_AFTER_MS, SUGGESTIONS } from "@/components/ask/AskChat";
+import { currentMonth } from "@/components/ask/useMonthSpend";
+import { TabBar } from "@/components/ui/TabBar";
+import { monthLabel } from "@/lib/format";
 
 const TABLE_ANSWER = [
   "Here is the split:",
   "",
-  "| App | Orders | Spend |",
-  "|---|---|---|",
-  "| Swiggy | 9 | ₹2,363 |",
-  "| Zomato | 7 | ₹1,930 |",
+  "| App | Orders | Spend | vs Sep |",
+  "|---|---|---|---|",
+  "| Swiggy | 9 | ₹2,363 | +12% |",
+  "| Zomato | 7 | ₹1,930 | -4% |",
+].join("\n");
+
+const RANK_ANSWER = [
+  "| # | Restaurant | App | Spend |",
+  "|---|---|---|---|",
+  "| 1 | Meghana Foods | Swiggy | ₹5,113 |",
+  "| 2 | Truffles | Zomato | ₹3,872 |",
 ].join("\n");
 
 /** A promise the test resolves or rejects by hand. */
@@ -33,13 +67,28 @@ function deferred<T>() {
 }
 
 const composer = () => screen.getByRole("textbox", { name: /ask a question/i });
+const askCall = (question: string) => [
+  "/ask",
+  expect.objectContaining({ method: "POST", body: JSON.stringify({ question }) }),
+];
+
+async function answerWith(answer: string, chip = "Top restaurants") {
+  api.apiFetch.mockResolvedValue({ answer });
+  const view = render(<AskChat />);
+  await userEvent.click(screen.getByRole("button", { name: chip }));
+  return view;
+}
 
 describe("AskChat", () => {
   beforeEach(() => {
     api.apiFetch.mockReset();
+    db.result = { data: [], error: null };
+    db.from.mockReset();
+    db.eq.mockReset();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -56,14 +105,9 @@ describe("AskChat", () => {
   });
 
   it("sends a chip's question to POST /ask and shows the question and the answer", async () => {
-    api.apiFetch.mockResolvedValue({ answer: "You spent **₹4,293** on food." });
-    render(<AskChat />);
-    await userEvent.click(screen.getByRole("button", { name: "Food vs groceries" }));
+    await answerWith("You spent **₹4,293** on food.", "Food vs groceries");
 
-    expect(api.apiFetch).toHaveBeenCalledWith("/ask", {
-      method: "POST",
-      body: JSON.stringify({ question: "Food vs groceries" }),
-    });
+    expect(api.apiFetch).toHaveBeenCalledWith(...askCall("Food vs groceries"));
     const log = screen.getByRole("log", { name: "Conversation" });
     expect(within(log).getByText("Food vs groceries")).toBeInTheDocument();
     expect(await within(log).findByText("₹4,293")).toBeInTheDocument();
@@ -78,55 +122,119 @@ describe("AskChat", () => {
     render(<AskChat />);
     await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
 
-    const status = screen.getByRole("status");
-    expect(status).toHaveTextContent("Thinking…");
+    const log = screen.getByRole("log", { name: "Conversation" });
+    expect(within(log).getByText("Thinking…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
 
     await act(async () => reply.resolve({ answer: "Meghana Foods, 6 orders." }));
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("Thinking…")).toBeNull();
     expect(screen.getByText("Meghana Foods, 6 orders.")).toBeInTheDocument();
   });
 
-  it("renders a markdown table inside a horizontally scrollable card", async () => {
-    api.apiFetch.mockResolvedValue({ answer: TABLE_ANSWER });
+  it("says it is still working after 8 seconds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    api.apiFetch.mockReturnValue(new Promise(() => {}));
     render(<AskChat />);
-    await userEvent.click(screen.getByRole("button", { name: "Biggest month this year" }));
+    fireEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(SLOW_AFTER_MS - 100));
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(100));
+    expect(screen.getByText("Still working on it…")).toBeInTheDocument();
+  });
+
+  it("announces through the one polite log only: no status or alert roles inside it", async () => {
+    api.apiFetch.mockRejectedValueOnce(new ApiError(502, "x")).mockReturnValueOnce(new Promise(() => {}));
+    render(<AskChat />);
+    await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+    await screen.findByText("The analyst is busy — try again");
+    expect(screen.queryByRole("alert")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("log", { name: "Conversation" })).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("renders a markdown table inside a horizontally scrollable card", async () => {
+    await answerWith(TABLE_ANSWER, "Biggest month this year");
 
     const table = await screen.findByRole("table");
     expect(within(table).getAllByRole("columnheader").map((th) => th.textContent)).toEqual([
       "App",
       "Orders",
       "Spend",
+      "vs Sep",
     ]);
     expect(within(table).getByRole("cell", { name: "₹2,363" })).toBeInTheDocument();
     // Number columns line up on the right; the label column stays left.
     expect(within(table).getByRole("cell", { name: "₹2,363" })).toHaveStyle({ textAlign: "right" });
     expect(within(table).getByRole("cell", { name: "Swiggy" })).not.toHaveStyle({ textAlign: "right" });
 
-    const scroller = table.parentElement!;
+    const scroller = screen.getByRole("region", { name: "Table, scrolls sideways" });
+    expect(scroller).toContainElement(table);
     expect(scroller.className).toContain("overflow-x-auto");
     expect(scroller).toHaveAttribute("tabindex", "0");
   });
 
-  it("never renders raw HTML from an answer", async () => {
-    api.apiFetch.mockResolvedValue({
-      answer:
-        'Safe <img src="x" onerror="alert(1)"> text <script>alert(2)</script> and <b>bold</b>\n\n<iframe src="https://evil.example"></iframe>',
-    });
-    const { container } = render(<AskChat />);
-    await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+  it("pins the first column so a scrolled row keeps its label", async () => {
+    await answerWith(TABLE_ANSWER);
+    const table = await screen.findByRole("table");
+    for (const cls of ["first:sticky", "first:left-0", "first:z-[1]", "first:bg-surface"]) {
+      expect(within(table).getByRole("cell", { name: "Swiggy" }).className).toContain(cls);
+    }
+    expect(within(table).getByRole("columnheader", { name: "App" }).className).toContain("first:bg-canvas");
+    expect(within(table).getByRole("columnheader", { name: "App" })).toHaveAttribute("data-pin-edge");
+  });
 
+  it("also pins the name column when the first column is only a rank", async () => {
+    await answerWith(RANK_ANSWER);
+    const table = await screen.findByRole("table");
+    const name = within(table).getByRole("cell", { name: "Meghana Foods" });
+    expect(name.className).toContain("sticky");
+    expect(name.className).toContain("left-11");
+    expect(name).toHaveAttribute("data-pin-edge");
+    expect(within(table).getByRole("cell", { name: "1" }).className).toContain("w-11");
+    expect(within(table).getByRole("cell", { name: "1" })).not.toHaveAttribute("data-pin-edge");
+    expect(within(table).getByRole("columnheader", { name: "Restaurant" }).className).toContain("bg-canvas");
+  });
+
+  it("writes negative numbers with a true minus sign", async () => {
+    await answerWith(TABLE_ANSWER);
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("cell", { name: "−4%" })).toBeInTheDocument();
+    expect(within(table).queryByRole("cell", { name: "-4%" })).toBeNull();
+    expect(within(table).getByRole("cell", { name: "+12%" })).toBeInTheDocument();
+  });
+
+  it("styles answer headings by level, with room above them", async () => {
+    await answerWith("Intro.\n\n# Big picture\n\nText.\n\n### Detail\n\nMore.");
+    const big = await screen.findByText("Big picture");
+    const detail = screen.getByText("Detail");
+    expect(big.className).toContain("text-headline");
+    expect(detail.className).toContain("font-semibold");
+    expect(detail.className).not.toContain("text-headline");
+    expect(big.className).toContain("[&:not(:first-child)]:mt-4");
+  });
+
+  it("never renders raw HTML from an answer", async () => {
+    const { container } = await answerWith(
+      'Safe <img src="x" onerror="alert(1)"> text <script>alert(2)</script> and <b>bold</b>\n\n<iframe src="https://evil.example"></iframe>',
+    );
     await screen.findByText(/Safe/);
     expect(container.querySelector("img, script, b, iframe")).toBeNull();
     expect(container.innerHTML).not.toContain("onerror");
   });
 
+  it("shows a markdown image's alt text instead of loading it", async () => {
+    const { container } = await answerWith("Look: ![x](https://evil.example/p.png)");
+    await screen.findByText(/Look:/);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.innerHTML).not.toContain("evil.example");
+    expect(screen.getByText("x")).toBeInTheDocument();
+  });
+
   it("opens only http(s) links, in a new tab with noopener noreferrer", async () => {
-    api.apiFetch.mockResolvedValue({
-      answer: "[Swiggy](https://www.swiggy.com/) and [bad](javascript:alert(1)) and [local](/spend)",
-    });
-    render(<AskChat />);
-    await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+    await answerWith("[Swiggy](https://www.swiggy.com/) and [bad](javascript:alert(1)) and [local](/spend)");
 
     const link = await screen.findByRole("link", { name: "Swiggy" });
     expect(link).toHaveAttribute("href", "https://www.swiggy.com/");
@@ -144,15 +252,15 @@ describe("AskChat", () => {
     render(<AskChat />);
     await userEvent.click(screen.getByRole("button", { name: "Food vs groceries" }));
 
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The analyst is busy — try again");
-    expect(alert).not.toHaveTextContent("llm failed");
+    const message = await screen.findByText("The analyst is busy — try again");
+    const error = message.closest<HTMLElement>("[data-ask-error]")!;
+    expect(error).not.toHaveTextContent("llm failed");
 
-    await userEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await userEvent.click(within(error).getByRole("button", { name: "Try again" }));
     expect(api.apiFetch).toHaveBeenCalledTimes(2);
-    expect(api.apiFetch.mock.calls[1]).toEqual(api.apiFetch.mock.calls[0]);
+    expect(api.apiFetch.mock.calls[1]![1].body).toBe(api.apiFetch.mock.calls[0]![1].body);
     expect(await screen.findByText("Groceries ₹3,120, food ₹4,293.")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("The analyst is busy — try again")).toBeNull();
     // The question is asked once in the conversation, not repeated by the retry.
     expect(screen.getAllByText("Food vs groceries")).toHaveLength(1);
   });
@@ -161,9 +269,20 @@ describe("AskChat", () => {
     api.apiFetch.mockRejectedValue(new ApiError(503, "ask not configured"));
     render(<AskChat />);
     await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Ask isn't set up yet");
-    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    const message = await screen.findByText("Ask isn't set up yet");
+    const error = message.closest<HTMLElement>("[data-ask-error]")!;
+    expect(within(error).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("aborts the request in flight when the screen is left", async () => {
+    api.apiFetch.mockReturnValue(new Promise(() => {}));
+    const { unmount } = render(<AskChat />);
+    await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+    const signal = api.apiFetch.mock.calls[0]![1].signal as AbortSignal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+    unmount();
+    expect(signal.aborted).toBe(true);
   });
 
   it("sends on Enter and adds a new line on Shift+Enter", async () => {
@@ -175,10 +294,7 @@ describe("AskChat", () => {
     expect(api.apiFetch).not.toHaveBeenCalled();
 
     await userEvent.type(box, "{Enter}");
-    expect(api.apiFetch).toHaveBeenCalledWith("/ask", {
-      method: "POST",
-      body: JSON.stringify({ question: "Spend in July\nby app" }),
-    });
+    expect(api.apiFetch).toHaveBeenCalledWith(...askCall("Spend in July\nby app"));
     expect(box).toHaveValue("");
   });
 
@@ -189,24 +305,31 @@ describe("AskChat", () => {
     expect(api.apiFetch).not.toHaveBeenCalled();
   });
 
-  it("caps questions at 1000 characters and counts them", async () => {
+  it("caps questions at 1000 characters, counting only from 800", () => {
     render(<AskChat />);
     const box = composer();
     expect(box).toHaveAttribute("maxlength", "1000");
-    fireEvent.change(box, { target: { value: "a".repeat(12) } });
-    expect(screen.getByText("12/1000")).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "a".repeat(799) } });
+    expect(screen.queryByText(/\/1000$/)).toBeNull();
+    fireEvent.change(box, { target: { value: "a".repeat(800) } });
+    expect(screen.getByText("800/1000").className).not.toContain("text-danger");
     fireEvent.change(box, { target: { value: "a".repeat(1000) } });
     expect(screen.getByText("1000/1000").className).toContain("text-danger");
   });
 
-  it("hides the tab bar while typing and brings it back on blur", () => {
-    render(<AskChat />);
-    const hidden = () => Array.from(document.querySelectorAll("style")).some((s) => s.textContent?.includes('nav[aria-label="Main"]'));
-    expect(hidden()).toBe(false);
+  it("hides the real tab bar while typing and brings it back on blur", () => {
+    render(
+      <>
+        <AskChat />
+        <TabBar />
+      </>,
+    );
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    expect(nav).toBeVisible();
     fireEvent.focus(composer());
-    expect(hidden()).toBe(true);
+    expect(nav).not.toBeVisible();
     fireEvent.blur(composer());
-    expect(hidden()).toBe(false);
+    expect(nav).toBeVisible();
   });
 
   it("lifts the composer above the on-screen keyboard (visualViewport)", () => {
@@ -231,11 +354,32 @@ describe("AskChat", () => {
     expect(bar.style.transform).toBe("translateY(-336px)");
   });
 
+  it("shows this month's spend and orders under the title, from monthly_spend", async () => {
+    db.result = {
+      data: [
+        { orders: 3, amount: 702.5 },
+        { orders: 2, amount: "399.50" },
+      ],
+      error: null,
+    };
+    render(<AskChat />);
+    const month = currentMonth();
+    const name = monthLabel(month).split(" ")[0];
+    expect(await screen.findByText(`₹1,102 spent in ${name} · 5 orders`)).toBeInTheDocument();
+    expect(db.from).toHaveBeenCalledWith("monthly_spend");
+    expect(db.eq).toHaveBeenCalledWith("month", month);
+  });
+
+  it("leaves the context line out when the month has no orders or the query fails", async () => {
+    db.result = { data: null, error: { message: "nope" } };
+    render(<AskChat />);
+    await act(async () => {});
+    expect(screen.queryByText(/spent in/)).toBeNull();
+  });
+
   it("keeps the conversation out of browser storage", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
-    api.apiFetch.mockResolvedValue({ answer: "ok" });
-    render(<AskChat />);
-    await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
+    await answerWith("ok");
     await screen.findByText("ok");
     expect(setItem).not.toHaveBeenCalled();
   });

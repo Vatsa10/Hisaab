@@ -1,10 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { ApiError, apiFetch } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { formatINR, monthLabel } from "@/lib/format";
+import styles from "./ask.module.css";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
+import { useMonthSpend, type MonthSpend } from "./useMonthSpend";
 
 /** Suggested first questions, sent exactly as shown. */
 export const SUGGESTIONS = [
@@ -13,6 +17,9 @@ export const SUGGESTIONS = [
   "Biggest month this year",
   "Top restaurants",
 ] as const;
+
+/** After this long, "Thinking…" admits the answer is taking a while. */
+export const SLOW_AFTER_MS = 8000;
 
 type Turn =
   | { id: number; question: string; state: "pending" }
@@ -42,6 +49,12 @@ export function askErrorMessage(err: unknown): string {
 
 const NO_ANSWER = "I couldn't find an answer to that. Try asking it another way.";
 
+/** "₹1,102 spent in October · 5 orders" (mockup C's context line). */
+export function monthSpendLine({ month, amount, orders }: MonthSpend): string {
+  const name = monthLabel(month).split(" ")[0];
+  return `${formatINR(amount)} spent in ${name} · ${orders} ${orders === 1 ? "order" : "orders"}`;
+}
+
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -51,31 +64,49 @@ const THEIRS = cn(BUBBLE, "min-w-0 max-w-full self-start rounded-bl bg-surface t
 const MINE = cn(BUBBLE, "ml-10 self-end whitespace-pre-wrap break-words rounded-br bg-accent text-white");
 
 /**
- * Chat with the spending analyst. Each question goes to POST /ask and the markdown answer is
- * shown under it. The conversation lives in this component's state only: it is never written
- * to browser storage and is gone when the screen is left.
+ * The Ask screen: chat with the spending analyst. Each question goes to POST /ask and the
+ * markdown answer is shown under it. The conversation lives in this component's state only: it
+ * is never written to browser storage, and an unanswered request is aborted when the screen is
+ * left. The column is at least one screen tall (less the shell's padding and the bars), so the
+ * empty state's intro and chips sit just above the composer, where the thumb is.
  */
 export function AskChat() {
   const [turns, setTurns] = useState<Turn[]>([]);
+  const spend = useMonthSpend();
   const nextId = useRef(0);
   const busyRef = useRef(false);
   const turnRefs = useRef(new Map<number, HTMLLIElement>());
   const scrollTo = useRef<number | null>(null);
+  const controllers = useRef(new Set<AbortController>());
   const busy = turns.some((t) => t.state === "pending");
 
+  useEffect(() => {
+    const inFlight = controllers.current;
+    return () => {
+      for (const c of inFlight) c.abort();
+      inFlight.clear();
+    };
+  }, []);
+
   const run = useCallback(async (id: number, question: string) => {
+    const controller = new AbortController();
+    controllers.current.add(controller);
     busyRef.current = true;
     let next: Turn;
     try {
       const res = await apiFetch<{ answer?: unknown } | undefined>("/ask", {
         method: "POST",
         body: JSON.stringify({ question }),
+        signal: controller.signal,
       });
       const answer = typeof res?.answer === "string" && res.answer.trim() ? res.answer : NO_ANSWER;
       next = { id, question, state: "answered", answer };
     } catch (err) {
       next = { id, question, state: "failed", error: askErrorMessage(err) };
+    } finally {
+      controllers.current.delete(controller);
     }
+    if (controller.signal.aborted) return; // the screen is gone
     busyRef.current = false;
     scrollTo.current = id; // the turn just grew: bring it (or the end of the page) into view
     setTurns((ts) => ts.map((t) => (t.id === id ? next : t)));
@@ -117,9 +148,15 @@ export function AskChat() {
   }, [turns]);
 
   return (
-    <>
+    <div className="flex min-h-[calc(100dvh_-_env(safe-area-inset-top)_-_1rem_-_theme(spacing.tabbar)_-_env(safe-area-inset-bottom)_-_1.5rem)] flex-col">
+      <PageHeader
+        eyebrow="Spending analyst"
+        title="Ask"
+        subtitle={spend ? <span className="animate-fade-in tabular-nums">{monthSpendLine(spend)}</span> : undefined}
+      />
+
       {turns.length === 0 ? (
-        <section aria-labelledby="ask-intro" className="flex flex-col">
+        <section aria-labelledby="ask-intro" className="mt-auto flex flex-col pt-6">
           <p id="ask-intro" className={cn(THEIRS, "mr-8")}>
             Ask me about your orders: what you spent, where and when. I answer from your own synced
             orders and nothing else.
@@ -145,6 +182,8 @@ export function AskChat() {
         </section>
       ) : null}
 
+      {/* The one live region: new questions, "Thinking…", answers and errors are announced
+          politely from here, so nothing inside carries its own status/alert role. */}
       <ol
         role="log"
         aria-label="Conversation"
@@ -175,29 +214,32 @@ export function AskChat() {
       </ol>
 
       <Composer onSend={ask} busy={busy} />
-    </>
+    </div>
   );
 }
 
 function Thinking() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), SLOW_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
   return (
-    <div role="status" className={cn(THEIRS, "flex items-center gap-2.5 text-ink-muted")}>
-      <span aria-hidden="true" className="flex gap-1">
-        {["[animation-delay:-320ms]", "[animation-delay:-160ms]", ""].map((delay) => (
-          <span
-            key={delay}
-            className={cn("size-1.5 animate-pulse rounded-full bg-accent motion-reduce:animate-none", delay)}
-          />
+    <div data-ask-thinking="" className={cn(THEIRS, "flex items-center gap-2.5 text-ink-muted")}>
+      <span aria-hidden="true" className="flex items-center gap-1">
+        {[0, 1, 2].map((i) => (
+          <span key={i} className={cn("size-1.5 rounded-full bg-accent", styles.dot)} />
         ))}
       </span>
-      <span>Thinking…</span>
+      <span>{slow ? "Still working on it…" : "Thinking…"}</span>
     </div>
   );
 }
 
 function AskError({ message, disabled, onRetry }: { message: string; disabled: boolean; onRetry: () => void }) {
   return (
-    <div role="alert" className={cn(THEIRS, "flex flex-col items-start gap-3")}>
+    <div data-ask-error="" className={cn(THEIRS, "flex flex-col items-start gap-3")}>
       <p className="flex items-start gap-2">
         <svg
           className="mt-0.5 shrink-0 text-danger"

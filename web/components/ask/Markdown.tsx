@@ -1,6 +1,9 @@
-import type { ReactNode } from "react";
+"use client";
+
+import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { cn } from "@/lib/cn";
 
 /** Only absolute http(s) links are followed; anything else renders as plain text. */
 export function safeHref(href: string | undefined): string | null {
@@ -13,8 +16,8 @@ export function safeHref(href: string | undefined): string | null {
   }
 }
 
-// --- number columns ------------------------------------------------------------------------
-// Minimal hast shape: the plugin only walks elements and reads text.
+// --- table shaping ---------------------------------------------------------------------------
+// Minimal hast shape: the plugin only walks elements and reads or rewrites text.
 interface HastNode {
   type: string;
   tagName?: string;
@@ -24,66 +27,193 @@ interface HastNode {
 }
 
 const NUMERIC = /^[+\-−]?\s*₹?\s*[+\-−]?\d[\d,]*(\.\d+)?\s*(%|x|×)?$/i;
+/** A rank column: "#", "No.", "Rank", "Sr. No." over 1, 2, 3… */
+const RANK_HEADER = /^(#|no\.?|rank|sr\.?(\s*no\.?)?|s\.?\s*no\.?)$/i;
+const RANK_VALUE = /^\d{1,3}\.?$/;
 
 function textOf(node: HastNode): string {
   if (node.type === "text") return node.value ?? "";
   return (node.children ?? []).map(textOf).join("");
 }
 
+function firstText(node: HastNode): HastNode | undefined {
+  if (node.type === "text") return node;
+  for (const child of node.children ?? []) {
+    const found = firstText(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 function childElements(node: HastNode, tag: string): HastNode[] {
   return (node.children ?? []).filter((c) => c.type === "element" && c.tagName === tag);
 }
 
-function alignNumberColumns(table: HastNode): void {
+function setProps(cell: HastNode, props: Record<string, unknown>, classes: string[] = []): void {
+  const current = cell.properties?.className;
+  const list = Array.isArray(current) ? current : typeof current === "string" ? current.split(" ") : [];
+  cell.properties = { ...cell.properties, ...props, className: [...list, ...classes] };
+}
+
+function shapeTable(table: HastNode): void {
   const sections = (table.children ?? []).filter((c) => c.type === "element");
   const rows = sections.flatMap((s) => (s.tagName === "tr" ? [s] : childElements(s, "tr")));
   const cellsOf = (row: HastNode) =>
     (row.children ?? []).filter((c) => c.type === "element" && (c.tagName === "td" || c.tagName === "th"));
   const bodyRows = rows.filter((r) => cellsOf(r).some((c) => c.tagName === "td"));
+  const headRow = rows.find((r) => cellsOf(r).every((c) => c.tagName === "th"));
   const width = Math.max(0, ...rows.map((r) => cellsOf(r).length));
+  const column = (col: number) =>
+    bodyRows.map((r) => textOf(cellsOf(r)[col] ?? { type: "text" }).trim()).filter(Boolean);
 
+  // Number columns line up on the right. An explicit alignment from the markdown (|---:|) wins.
   for (let col = 0; col < width; col++) {
-    const values = bodyRows.map((r) => textOf(cellsOf(r)[col] ?? { type: "text" }).trim()).filter(Boolean);
+    const values = column(col);
     if (!values.length || !values.every((v) => NUMERIC.test(v))) continue;
     for (const row of rows) {
       const cell = cellsOf(row)[col];
-      // An explicit alignment from the markdown (|---:|) wins.
-      if (cell && !cell.properties?.align) cell.properties = { ...cell.properties, align: "right" };
+      if (cell && !cell.properties?.align) setProps(cell, { align: "right" });
+    }
+  }
+
+  // A true minus sign (U+2212) in front of negative numbers: same width as "+", easier to read.
+  for (const row of bodyRows) {
+    for (const cell of cellsOf(row)) {
+      if (!NUMERIC.test(textOf(cell).trim())) continue;
+      const text = firstText(cell);
+      if (text?.value) text.value = text.value.replace(/^(\s*)-/, "$1−");
+    }
+  }
+
+  // The first column stays put while the rest scrolls (td/th `first:` classes). When it is only a
+  // rank, the name column after it is pinned too, so a scrolled row still says what it is.
+  const rankFirst =
+    width > 2 &&
+    headRow !== undefined &&
+    RANK_HEADER.test(textOf(cellsOf(headRow)[0] ?? { type: "text" }).trim()) &&
+    column(0).length > 0 &&
+    column(0).every((v) => RANK_VALUE.test(v));
+  for (const row of rows) {
+    const cells = cellsOf(row);
+    const [first, second] = cells;
+    if (!first) continue;
+    if (rankFirst && second) {
+      setProps(first, {}, ["w-11", "min-w-11", "max-w-11"]);
+      setProps(second, { dataPinEdge: "" }, [
+        "sticky",
+        "left-11",
+        "z-[1]",
+        second.tagName === "th" ? "bg-canvas" : "bg-surface",
+      ]);
+    } else {
+      setProps(first, { dataPinEdge: "" });
     }
   }
 }
 
-/** Right-aligns table columns whose body cells are all amounts or counts. */
-function rehypeAlignNumbers() {
+/** Shapes every table in the answer (see shapeTable). */
+function rehypeShapeTables() {
   return (tree: HastNode) => {
     const walk = (node: HastNode) => {
-      if (node.type === "element" && node.tagName === "table") alignNumberColumns(node);
+      if (node.type === "element" && node.tagName === "table") shapeTable(node);
       node.children?.forEach(walk);
     };
     walk(tree);
   };
 }
 
-const REHYPE_PLUGINS = [rehypeAlignNumbers] as unknown as NonNullable<Options["rehypePlugins"]>;
+const REHYPE_PLUGINS = [rehypeShapeTables] as unknown as NonNullable<Options["rehypePlugins"]>;
 const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm];
+
+// --- table card --------------------------------------------------------------------------------
+
+const EDGE =
+  "pointer-events-none absolute inset-y-px w-3 from-ink/[0.08] to-transparent transition-opacity duration-150 ease-out-quart";
+
+/**
+ * A table in its own bordered card that scrolls sideways inside the bubble, so the page never
+ * does. Soft 12px shadows mark the edges where columns are hidden: at the right while more is to
+ * come, and just past the pinned column once scrolled. (They are overlays, not the classic
+ * local/scroll background trick, because the opaque pinned column and header row would paint
+ * over a background shadow.)
+ */
+function TableCard({ children }: { children?: ReactNode }) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ start: false, end: false, pin: 0 });
+
+  const measure = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    const pinEdge = el.querySelector<HTMLElement>("[data-pin-edge]");
+    const pin = pinEdge
+      ? Math.round(pinEdge.getBoundingClientRect().right - el.getBoundingClientRect().left)
+      : 1;
+    const next = { start: el.scrollLeft > 1, end: el.scrollLeft < max - 1, pin };
+    setEdges((prev) =>
+      prev.start === next.start && prev.end === next.end && prev.pin === next.pin ? prev : next,
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    measure();
+    const el = scrollerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure]);
+
+  return (
+    <div className="relative">
+      <div
+        ref={scrollerRef}
+        onScroll={measure}
+        role="region"
+        aria-label="Table, scrolls sideways"
+        tabIndex={0}
+        className="max-w-full overflow-x-auto overscroll-x-contain rounded-tile border border-line bg-surface"
+      >
+        <table className="w-full border-separate border-spacing-0 text-label tabular-nums">{children}</table>
+      </div>
+      <span
+        aria-hidden="true"
+        data-edge="start"
+        style={{ left: edges.pin }}
+        className={cn(EDGE, "bg-gradient-to-r", edges.start ? "opacity-100" : "opacity-0")}
+      />
+      <span
+        aria-hidden="true"
+        data-edge="end"
+        className={cn(EDGE, "right-px rounded-r-tile bg-gradient-to-l", edges.end ? "opacity-100" : "opacity-0")}
+      />
+    </div>
+  );
+}
 
 // --- elements --------------------------------------------------------------------------------
 // Answers live inside a chat bubble: headings become bold lines (no h1 inside a bubble), images
-// show their alt text only (no remote loads), and tables scroll sideways inside their own card so
-// the page itself never does.
+// show their alt text only (no remote loads), and tables scroll sideways inside their own card.
 
-function Strong({ children }: { children?: ReactNode }) {
-  return <p className="font-semibold text-ink">{children}</p>;
+/** Headings get 16px above them (more than the 10px between paragraphs) to start a section. */
+const HEADING_GAP = "[&:not(:first-child)]:mt-4";
+
+function MajorHeading({ children }: { children?: ReactNode }) {
+  return <p className={cn("text-headline text-ink", HEADING_GAP)}>{children}</p>;
+}
+
+function MinorHeading({ children }: { children?: ReactNode }) {
+  return <p className={cn("font-semibold text-ink", HEADING_GAP)}>{children}</p>;
 }
 
 const COMPONENTS: Components = {
   p: ({ children }) => <p>{children}</p>,
-  h1: Strong,
-  h2: Strong,
-  h3: Strong,
-  h4: Strong,
-  h5: Strong,
-  h6: Strong,
+  h1: MajorHeading,
+  h2: MajorHeading,
+  h3: MinorHeading,
+  h4: MinorHeading,
+  h5: MinorHeading,
+  h6: MinorHeading,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   a: ({ href, children }) => {
     const safe = safeHref(href);
@@ -117,27 +247,31 @@ const COMPONENTS: Components = {
     </pre>
   ),
   code: ({ children }) => <code className="rounded bg-canvas px-1 py-0.5 font-mono text-label">{children}</code>,
-  table: ({ children }) => (
-    <div
-      role="region"
-      aria-label="Table, scrolls sideways"
-      tabIndex={0}
-      className="max-w-full overflow-x-auto overscroll-x-contain rounded-tile border border-line bg-surface"
-    >
-      <table className="w-full border-collapse text-label tabular-nums">{children}</table>
-    </div>
-  ),
-  th: ({ children, style }) => (
+  table: ({ children }) => <TableCard>{children}</TableCard>,
+  th: ({ children, style, className, ...rest }) => (
     <th
       scope="col"
       style={style}
-      className="whitespace-nowrap bg-canvas px-3 py-2 text-left font-medium text-ink-muted"
+      data-pin-edge={(rest as Record<string, unknown>)["data-pin-edge"] as string | undefined}
+      className={cn(
+        "whitespace-nowrap bg-canvas px-3 py-2 text-left font-medium text-ink-muted",
+        "first:sticky first:left-0 first:z-[1] first:bg-canvas",
+        className,
+      )}
     >
       {children}
     </th>
   ),
-  td: ({ children, style }) => (
-    <td style={style} className="whitespace-nowrap border-t border-line-soft px-3 py-2 text-ink">
+  td: ({ children, style, className, ...rest }) => (
+    <td
+      style={style}
+      data-pin-edge={(rest as Record<string, unknown>)["data-pin-edge"] as string | undefined}
+      className={cn(
+        "whitespace-nowrap border-t border-line-soft px-3 py-2 text-ink",
+        "first:sticky first:left-0 first:z-[1] first:bg-surface",
+        className,
+      )}
+    >
       {children}
     </td>
   ),

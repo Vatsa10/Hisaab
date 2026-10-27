@@ -5,6 +5,8 @@ import { cn } from "@/lib/cn";
 import { useKeyboardInset } from "./useKeyboardInset";
 
 export const MAX_QUESTION_LENGTH = 1000;
+/** The counter stays out of the way until a question gets long. */
+export const COUNTER_FROM = 800;
 
 /** Injected only while typing: the tab bar would otherwise float over the keyboard. */
 const HIDE_TAB_BAR_CSS = 'nav[aria-label="Main"]{display:none}';
@@ -149,7 +151,7 @@ export function Composer({ onSend, busy }: ComposerProps) {
           </button>
         </form>
         <p id={counterId} className="h-5 px-1 pt-1 text-right text-caption tabular-nums text-ink-muted">
-          {length > 0 ? (
+          {length >= COUNTER_FROM ? (
             <span className={length >= MAX_QUESTION_LENGTH ? "text-danger" : undefined}>
               {length}/{MAX_QUESTION_LENGTH}
             </span>
