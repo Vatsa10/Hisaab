@@ -117,3 +117,37 @@ def test_main_survives_a_crashing_job(pg, monkeypatch):
     worker.main("w1", poll_s=0.01)
     assert len(calls) == 1
     assert pg.execute("select status, error from jobs").fetchone() == ("failed", "RuntimeError: kaboom")
+
+
+def test_main_reconnects_after_a_db_error(pg, monkeypatch):
+    import psycopg
+    jobs.enqueue(pg, A, "sync", "zepto")
+    opened, ran = [], []
+    real_connect, real_claim = worker._connect, jobs.claim
+    monkeypatch.setattr(worker, "_connect", lambda url: opened.append(1) or real_connect(url))
+    state = {"n": 0}
+
+    def flaky_claim(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise psycopg.OperationalError("server closed the connection")
+        return real_claim(*a, **k)
+    monkeypatch.setattr(worker.jobs, "claim", flaky_claim)
+    monkeypatch.setattr(worker, "run_job", lambda job, conn, s, **k: (ran.append(job.id), jobs.finish(conn, job.id)))
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=3)
+    assert len(opened) == 4  # two connections, then both reopened after the error
+    assert len(ran) == 1
+    assert pg.execute("select status from jobs").fetchone() == ("done",)
+
+
+def test_main_uses_stale_job_setting(pg, monkeypatch):
+    jid = jobs.enqueue(pg, A, "sync", "zepto")
+    jobs.claim(pg, "other", ("sync",))
+    pg.execute("update jobs set started_at = now() - interval '20 minutes' where id=%s", (jid,))
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=1)
+    assert pg.execute("select status from jobs").fetchone() == ("running",)
+    assert settings_for_tests().stale_job_s == 2400

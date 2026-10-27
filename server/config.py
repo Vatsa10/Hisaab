@@ -10,6 +10,7 @@ class Settings:
     jwks_url: str = ""
     consent_version: str = "2026-10-27"
     otp_timeout_s: int = 180
+    stale_job_s: int = 2400
 
 
 def settings() -> Settings:
@@ -18,4 +19,5 @@ def settings() -> Settings:
         database_url=env("DATABASE_URL", ""),
         jwt_secret=env("SUPABASE_JWT_SECRET", ""),
         jwks_url=env("SUPABASE_JWKS_URL", ""),
+        stale_job_s=int(env("STALE_JOB_S", "2400")),
     )

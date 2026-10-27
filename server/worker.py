@@ -109,33 +109,66 @@ def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
     except sync.RecipeError as e:
         fail(f"no_recipe: {(str(e).splitlines() or [''])[0]}"[:MAX_ERROR_LEN])
     except Exception as e:
-        log.exception("job %s failed", job.id)
-        fail(_clean_error(e, phone))
+        msg = _clean_error(e, phone)
+        log.error("job %s failed: %s", job.id, msg)
+        fail(msg)
     finally:
         if own_listen is not None:
             own_listen.close()
 
 
-def main(worker_id: str | None = None, poll_s: float = 2.0) -> None:
+def _connect(url: str):
+    return psycopg.connect(url, autocommit=True)
+
+
+def _close(*conns) -> None:
+    for c in conns:
+        try:
+            if c is not None:
+                c.close()
+        except Exception:
+            pass
+
+
+def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | None = None) -> None:
+    """Poll for jobs forever. Any error outside run_job (e.g. a dropped DB connection) is logged,
+    both connections are reopened after a backoff, and the loop continues. max_loops is for tests."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     s = settings()
     log.info("worker %s started", worker_id)
-    with psycopg.connect(s.database_url, autocommit=True) as conn, \
-            psycopg.connect(s.database_url, autocommit=True) as listen_conn:
-        try:
-            while True:
-                jobs.requeue_stale(conn)
+    conn = listen_conn = None
+    failures = loops = 0
+    try:
+        while max_loops is None or loops < max_loops:
+            loops += 1
+            try:
+                if conn is None:
+                    conn, listen_conn = _connect(s.database_url), _connect(s.database_url)
+                jobs.requeue_stale(conn, s.stale_job_s)
                 job = jobs.claim(conn, worker_id, JOB_TYPES)
                 if job is None:
+                    failures = 0
                     time.sleep(poll_s)
                     continue
                 try:
                     run_job(job, conn, s, listen_conn=listen_conn)
                 except Exception as e:
-                    log.exception("job %s crashed", job.id)
-                    jobs.finish(conn, job.id, error=_clean_error(e, (job.payload or {}).get("phone")))
-        except KeyboardInterrupt:
-            log.info("worker %s stopping", worker_id)
+                    phone = (job.payload or {}).get("phone")
+                    log.error("job %s crashed: %s", job.id, _clean_error(e, phone))
+                    jobs.finish(conn, job.id, error=_clean_error(e, phone))
+                failures = 0
+            except Exception as e:
+                failures += 1
+                delay = min(30.0, poll_s * 2 ** failures)
+                log.error("worker loop error (%s), reconnecting in %.1fs: %s", type(e).__name__, delay,
+                          _clean_error(e, None))
+                _close(conn, listen_conn)
+                conn = listen_conn = None
+                time.sleep(delay)
+    except KeyboardInterrupt:
+        log.info("worker %s stopping", worker_id)
+    finally:
+        _close(conn, listen_conn)
 
 
 if __name__ == "__main__":
