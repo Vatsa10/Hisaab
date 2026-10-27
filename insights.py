@@ -78,16 +78,26 @@ item_categories(name_norm TEXT -- lower-cased item name with punctuation removed
 Rules: exclude status IN ('cancelled','refunded','failed') from spend. Zomato and Swiggy orders are food
 delivery. Join categories with item_categories.name_norm = norm(order_items.name) (norm() is available)."""
 
-ANALYST = f"""You are a personal-finance analyst for the user's own food and grocery delivery orders.
+
+def analyst_prompt(schema: str) -> str:
+    """The analyst's system prompt over a given schema description (SQLite here, Postgres in server.ask)."""
+    return f"""You are a personal-finance analyst for the user's own food and grocery delivery orders.
 Answer from the database only: call run_sql (read-only SELECT queries) as often as needed, then answer.
 Give month-wise splits as compact tables (month | amount | orders | change vs previous month), name the
 months, platforms, restaurants and categories that drive the spend, and end with 2-3 concrete, numeric
 observations or suggestions. Use ₹ and round to whole rupees. Never invent numbers.
-{SCHEMA}"""
+{schema}"""
 
-RUN_SQL = {"type": "function", "function": {
-    "name": "run_sql", "description": "Run one read-only SQLite SELECT query; returns up to 200 rows.",
-    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+
+def sql_tool(description: str) -> dict:
+    """The run_sql tool definition handed to the model."""
+    return {"type": "function", "function": {
+        "name": "run_sql", "description": description,
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+
+
+ANALYST = analyst_prompt(SCHEMA)
+RUN_SQL = sql_tool("Run one read-only SQLite SELECT query; returns up to 200 rows.")
 
 READ_ONLY = re.compile(r"^\s*(select|with)\b", re.I)
 
@@ -109,18 +119,22 @@ def run_sql(query: str) -> dict:
         con.close()
 
 
-def ask(question: str, max_calls: int = 12) -> str:
-    client, mdl = agent.llm(), agent.model()
-    messages = [{"role": "system", "content": ANALYST}, {"role": "user", "content": question}]
+def ask(question: str, max_calls: int = 12, *, sql_runner=None, system: str = ANALYST, tool: dict = RUN_SQL,
+        client=None) -> str:
+    """The analyst loop. By default it reads the local SQLite database (CLI); server.ask passes its own
+    sql_runner (query -> result dict), system prompt, tool definition and LLM client."""
+    sql_runner = sql_runner or run_sql
+    client, mdl = client or agent.llm(), agent.model()
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
     for _ in range(max_calls):
-        msg = client.chat.completions.create(model=mdl, messages=messages, tools=[RUN_SQL],
+        msg = client.chat.completions.create(model=mdl, messages=messages, tools=[tool],
                                              **agent.tool_opts()).choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
         if not msg.tool_calls:
             return msg.content or ""
         for tc in msg.tool_calls:
             query = json.loads(tc.function.arguments or "{}").get("query", "")
-            result = run_sql(query)
+            result = sql_runner(query)
             log.info("sql: %s -> %s", query[:120].replace("\n", " "), "error" if "error" in result else len(result["rows"]))
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": json.dumps(result, ensure_ascii=False, default=str)[:30000]})
