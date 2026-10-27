@@ -209,14 +209,34 @@ pytest tests/server -v
 ```
 
 The tests apply `tests/server/bootstrap.sql` (stand-ins for Supabase's `auth.uid()` and roles) and
-then the migrations. Without `TEST_DATABASE_URL` the server tests are skipped.
+then the migrations. Without `TEST_DATABASE_URL` the server tests are skipped. They **drop and
+recreate** the `public` and `auth` schemas, so they refuse to run unless the host is `localhost` /
+`127.0.0.1` (set `ALLOW_DESTRUCTIVE_TEST_DB=1` only for a database you are happy to wipe).
 
-Run the API and the worker (one process each; set `DATABASE_URL` and `SUPABASE_JWT_SECRET`):
+To run the API and the worker locally, first give them their own database (not the test one, which
+the tests wipe) with the bootstrap and every migration applied in order. `bootstrap.sql` is for a
+local plain Postgres only - never apply it to Supabase, which already has the `auth` schema and roles:
+
+```bash
+docker exec ea-pg psql -U postgres -c "create database ea_dev"
+for f in tests/server/bootstrap.sql supabase/migrations/*.sql; do
+  docker exec -i ea-pg psql -U postgres -d ea_dev -v ON_ERROR_STOP=1 < "$f"
+done
+export DATABASE_URL=postgresql://postgres:postgres@localhost:54329/ea_dev
+```
+
+On Supabase apply only `supabase/migrations/*.sql`, in order.
+
+Then run the API and the worker (one process each; set `DATABASE_URL` and `SUPABASE_JWT_SECRET`):
 
 ```bash
 uvicorn server.api:app
 python -m server.worker
 ```
+
+The worker's `DATABASE_URL` must be a direct or session-mode connection: it waits for OTPs with
+`LISTEN`, which Supabase's transaction pooler (port 6543) does not support. Use the direct
+connection (port 5432) or the session pooler.
 
 The worker claims `connect` and `sync` jobs, keeps each user's browser profile under `PROFILE_ROOT`
 (default `profiles_users/`), and relays OTPs sent to `POST /jobs/<id>/otp`.
