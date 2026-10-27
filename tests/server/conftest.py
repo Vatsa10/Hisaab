@@ -8,7 +8,8 @@ import pytest
 HERE = Path(__file__).parent
 MIGRATIONS = HERE.parent.parent / "supabase" / "migrations"
 TABLES = ("profiles", "connections", "orders", "order_items", "item_categories",
-          "recipes", "jobs", "consents")
+          "recipes", "jobs", "consents", "usage", "admins", "invites", "waitlist", "recipe_approvals",
+          "notifications", "push_subscriptions", "budget_state")
 
 
 def _url():
@@ -45,7 +46,7 @@ def _applied(_schema):
 @pytest.fixture
 def pg(_applied):
     with psycopg.connect(_applied, autocommit=True) as c:
-        c.execute("truncate " + ", ".join(TABLES) + " cascade")
+        c.execute("truncate " + ", ".join(TABLES + ("auth.users",)) + " cascade")
         yield c
 
 

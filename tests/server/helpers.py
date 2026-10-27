@@ -11,6 +11,11 @@ def order(oid, total=100.0, status="delivered", items=None):
             "status": status, "merchant": "Store", "items": items or [], "raw": {"id": oid}}
 
 
+def add_user(conn, user_id, email):
+    """Insert a row into the auth.users stand-in (Supabase's auth table) with this email."""
+    conn.execute("insert into auth.users(id, email) values (%s, %s)", (str(user_id), email))
+
+
 def settings_for_tests(**_):
     """Settings for worker tests; the autouse vault_env fixture points the vault at a fresh temp dir."""
     import os
