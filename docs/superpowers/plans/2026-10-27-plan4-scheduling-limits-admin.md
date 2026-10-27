@@ -35,6 +35,7 @@ locally, `zoneinfo` (Asia/Kolkata), Azure Container Apps Jobs (Bicep, build-only
 - Never log OTPs, phone numbers, JWTs, cookies, push endpoints/keys, VAPID/SMTP secrets or full email addresses (mask as `a***@example.com`). New secret `Settings` fields use `field(repr=False)`.
 - No real email or push in tests: senders are injected stubs; locally emails go to Mailpit only.
 - UI follows Plan 3's Global Constraints (mockup look, `#0a7c55` accent, cards radius 14px, ₹ with Indian grouping, no horizontal scroll at 375px). Frontend tasks invoke `impeccable:impeccable`, `ui-ux-pro-max:ui-ux-pro-max` and `design-taste-frontend-v1` before writing UI (Plan 3 ruling R3); mockups and these constraints win conflicts.
+- Every frontend task, after its code review, gets a separate design review (impeccable critique/audit + ui-ux-pro-max + design-taste-frontend-v1, Playwright screenshots at 390×844 compared with the approved mockups); its findings enter that task's fix loop (Plan 3 ruling R5).
 - The PWA never uses the service-role key; admin data comes only from `/admin/*` API routes guarded by `require_admin`.
 - New tables: RLS enabled; `anon`/`authenticated` get nothing except `select` on `usage` (own rows). Every new `security definer` function sets `search_path` and is executable only by the role that needs it.
 - Each parallel implementer uses its own test database `ea_tN` (Plan 3 ruling R4). Every existing test and Plan 3's e2e keep passing.
@@ -70,7 +71,7 @@ locally, `zoneinfo` (Asia/Kolkata), Azure Container Apps Jobs (Bicep, build-only
 ### Task 1: Schema, RLS and the invite-only sign-up hook
 
 **Files:**
-- Create: `supabase/migrations/0006_scheduling_limits_admin.sql`, `tests/server/test_schema_plan4.py`
+- Create: `supabase/migrations/0007_scheduling_limits_admin.sql`, `tests/server/test_schema_plan4.py`
 - Modify: `supabase/config.toml` (hook block), `tests/server/bootstrap.sql` (role `supabase_auth_admin`; `auth.users` gets `email text`), `tests/server/conftest.py` (`TABLES` += new tables; truncate `auth.users` too), `tests/server/helpers.py` (`add_user(conn, user_id, email)`)
 
 **Interfaces (Produces):**
@@ -102,9 +103,9 @@ def test_admin_tables_hidden_from_users(pg, as_user): ...           # select on 
 def test_recipes_have_paused_and_health_note(pg): ...
 ```
 
-- [ ] **Step 2: Run** `pytest tests/server/test_schema_plan4.py -v` → FAIL (no migration 0006).
+- [ ] **Step 2: Run** `pytest tests/server/test_schema_plan4.py -v` → FAIL (no migration 0007).
 - [ ] **Step 3: Implement** the migration, bootstrap/conftest/helpers changes and the `config.toml` block.
-- [ ] **Step 4: Verify on real local Supabase:** `npx supabase stop && npx supabase start` (config change needs a restart), `npx supabase db reset` → 0001–0006 apply. `POST <api>/auth/v1/signup` with an uninvited email → HTTP 403, message `invite_only`, email present in `waitlist`; insert it into `invites` and sign up again → 200 with a session. If the CLI rejects the hook key, apply the R1 fallback trigger and record it in the ledger. Then `pytest -q` (TEST_DATABASE_URL set and unset) → green.
+- [ ] **Step 4: Verify on real local Supabase:** `npx supabase stop && npx supabase start` (config change needs a restart), `npx supabase db reset` → 0001–0007 apply. `POST <api>/auth/v1/signup` with an uninvited email → HTTP 403, message `invite_only`, email present in `waitlist`; insert it into `invites` and sign up again → 200 with a session. If the CLI rejects the hook key, apply the R1 fallback trigger and record it in the ledger. Then `pytest -q` (TEST_DATABASE_URL set and unset) → green.
 - [ ] **Step 5: Commit** — `git commit -m "feat(db): usage, invites, approvals, notifications tables and invite-only sign-up hook"`
 
 ---
@@ -387,4 +388,4 @@ def test_relay_counts_bytes(fake_upstream, target): ...        # after one 10 kB
 
 - **Spec coverage:** daily sync + no duplicates + skip needs_login (T10); budget-paused 3-day syncs (T2 levels, T10 interval); 3 refreshes/app/day with 429 and UI remaining (T2, T9, T6); cart checks 10/day helper (T2, enforced in Plan 5); `usage` table written by worker (T8) and API (T9 `/ask`, T2 cart helper); unit costs and ₹5,000 in config (T2); 80 % email, 100 % pause of sign-ups/cart/auto-sync, manual refresh unaffected (T1 hook, T2, T9, T10); invites/waitlist and admin opening invites (T1, T9, T7); admin view with cost per user, site recipe health, invites, approvals and learn (T7, T9); `recipe_approvals` with diff, status, decided_at (T1, T5); learning only on admin accounts, POST additions approved, drift auto-update without new POSTs else unhealthy + paused + alert (T3, T5, T8); Web Push with VAPID from env + email fallback for first sync, needs_login and admin budget alerts (T4, T6, T8, T10); media blocking in sync (T3, T8); local-only testing with Mailpit and fake worker (T4, T11); RLS on `usage` (T1).
 - **Type consistency:** `limits.LimitExceeded/BudgetPaused/to_http`, `recipe_admin.is_admin/admin_learner/make_approver/apply_learned/decide/is_paused`, `notify.enqueue/alert_admins/dispatch/format_inr`, `usage.record/today`, `Relay.bytes_total`, `sync.RecipeDrift`, `sync.learn(..., approve, preapproved, save)` are named identically in producer and consumer tasks; API response shapes are defined once (Tasks 6/7 "Consumes") and implemented in Task 9.
-- **Ordering:** Task 1 alone first (all server tests need migration 0006); Wave A file sets are disjoint (`cli.py` only in T5, then T9 in Wave B; `docker-compose.yml`/`docs/deploy-local.md` T4 then T10); Wave B file sets are disjoint.
+- **Ordering:** Task 1 alone first (all server tests need migration 0007); Wave A file sets are disjoint (`cli.py` only in T5, then T9 in Wave B; `docker-compose.yml`/`docs/deploy-local.md` T4 then T10); Wave B file sets are disjoint.
