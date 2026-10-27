@@ -1286,9 +1286,85 @@ def test_fake_learn_asks_approval_for_post_recipes(): ...
 
 ---
 
+## Wave D2 (after Wave C; parallel with Task 9 only where files are disjoint)
+
+### Task 14: Saved delivery addresses fetched live from the apps (owner request 2026-10-27)
+
+**Why:** the owner wants delivery addresses taken from the user's own saved addresses on each app, fetched in
+real time and offered as options. No typing, and prices and fills use exactly the address the app knows. This is
+read-only: a GET of the app's saved-address list. Never create, edit or delete an address (spec anti-goal).
+
+**Files:**
+- Modify: `supabase/migrations/0008_cheapest_cart.sql` (Task 1). If Task 1 has already merged, create
+  `supabase/migrations/0008b_app_addresses.sql` instead and say so in the report. Add table
+  `app_addresses(user_id uuid, site text, address_id text, label text, line text, area text, city text, lat double
+  precision, lon double precision, is_default bool, fetched_at timestamptz, primary key (user_id, site, address_id))`
+  with RLS (own rows select only), revoke from anon, and Realtime publication (guarded block). Add a
+  `profiles.chosen` jsonb column holding `{site, address_id}` or null.
+- Create: `addresses.py` (engine), `server/addresses_store.py`, `tests/test_addresses.py`,
+  `tests/server/test_addresses_store.py`, `web/components/account/AddressPicker.tsx`, `web/lib/addresses.ts`,
+  `web/__tests__/addresses.test.tsx`.
+- Modify: `server/worker.py` (after a successful login or sync, fetch addresses; best effort, never fails the job),
+  `server/api.py` (`PUT /profile` also accepts `{choice: {site, address_id}}`), `web/components/connect/AddressRow.tsx`
+  (opens the picker), `server/fake_sites.py` (fake saved addresses per site).
+
+**Interfaces:**
+- **Recipe kind `addresses`.** Admin-learned like `search` (Plan 4 approvals). It holds a GET endpoint plus a
+  field_map to `{address_id, label, line, area, city, lat, lon, is_default}`. Learning is admin-only, and a user's job
+  only replays it.
+  - Seeds as data where known: e.g. Swiggy's saved-address list endpoint, if verifiable from the existing seed or recipe
+    work. Never guess an endpoint in code.
+  - Replay uses the fast path (in-page fetch) under the normal read-only guard. The guard's navigation blocklist
+    containing `address` is unchanged, because this is an XHR GET, not a navigation.
+- **`addresses.fetch_saved(site, page, recipe) -> list[dict]`** normalises and drops entries without coordinates
+  unless area/city is present. Address lines are never logged; logs show counts only.
+- **`addresses_store.replace(conn, user_id, site, rows)`** replaces that site's rows atomically.
+  `addresses_store.options(conn, user_id)` returns deduped options across sites: the same place on several apps
+  (within 150 m, or the same normalised line) becomes one option listing the sites that have it, with the default
+  first.
+- **API:**
+  - `PUT /profile {choice: {site, address_id}}` sets `profiles.chosen` and copies that option's lat/lon/address text
+    into profiles.
+  - Typing an address (existing behaviour) stays as the fallback when no app has saved addresses.
+- **Compare and fill.** Plan 5 Task 9 search jobs and Plan 6 fill jobs use, for each app, that app's own saved
+  address matching the chosen place: the same `address_id` if the choice came from that app, else that app's saved
+  address within 150 m.
+  - If an app has no saved address near the chosen place, its card says "Add this address in <App> to compare
+    here" and that app is not priced. We never create addresses.
+  - This replaces geolocation-only pricing wherever a saved address exists.
+- **PWA:**
+  - The Accounts "Delivery address" row opens `AddressPicker`: options as cards (label such as Home/Work, line,
+    area, and the app dots that have it), with the current choice checked, and "Type an address instead" at the
+    bottom.
+  - The list updates live through Realtime on `app_addresses`, so after a connect finishes, its addresses appear
+    without reload.
+  - Empty state: "Connect an app to use its saved addresses".
+  - Frontend rules: invoke impeccable + ui-ux-pro-max + design-taste-frontend-v1, match the mockup card look, then
+    a design review.
+- **Privacy.** Addresses are user data: RLS own rows only, never in logs, error text, analytics, or the Ask SQL
+  allowlist. Delete with the account (Plan 7 erase covers `app_addresses`).
+
+- [ ] **Steps:**
+  1. Write failing tests:
+     - `test_fetch_saved_normalises_and_drops_unplaceable`
+     - `test_replace_is_atomic_per_site`
+     - `test_options_dedupe_across_sites_within_150m`
+     - `test_choice_sets_profile_location`
+     - `test_worker_fetch_failure_never_fails_job`
+     - `test_compare_uses_matching_saved_address_per_app`
+     - `test_no_nearby_saved_address_skips_app`
+     - web `picker shows options with app dots`, `choice calls PUT /profile`, `new addresses appear live`,
+       `type instead fallback`
+     - fake mode emits two saved addresses per site
+  2. Implement.
+  3. Run `pytest -q` (DB set and unset) and `pnpm --dir web test`, `lint` and `build`.
+  4. Commit `feat: saved delivery addresses fetched live from the apps and offered as options`.
+
 ## Wave E
 
 ### Task 10: End-to-end — groceries and food locally on an iPhone viewport
+
+> Also covers Task 14: the address picker shows fake saved addresses live after a connect; choosing one prices each app at its own saved address; an app with no nearby saved address shows "Add this address in <App> to compare here".
 
 **Files:**
 - Create: `e2e/tests/plan5.spec.ts`
