@@ -13,7 +13,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "54330:5432"
+      - "127.0.0.1:54330:5432"  # loopback only: dev credentials
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -61,7 +61,7 @@ services:
     environment:
       <<: *app-env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   worker:
     build:
