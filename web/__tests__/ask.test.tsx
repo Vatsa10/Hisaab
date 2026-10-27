@@ -222,7 +222,7 @@ describe("AskChat", () => {
     expect((name.firstElementChild as HTMLElement).className).toContain("line-clamp-2");
   });
 
-  describe("second pin vs. card width", () => {
+  describe("rank + name pins vs. card width", () => {
     /** Cells: rank 44px, name 120px (164px pinned). The card is `card` px wide. */
     function layout(card: number) {
       vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
@@ -234,22 +234,46 @@ describe("AskChat", () => {
       });
     }
 
-    it("drops the second pin when both would cover more than 45% of the card", async () => {
+    it("pins the name alone, at the left edge, when both would cover more than 45% of the card", async () => {
       layout(313); // 164 > 0.45 × 313 = 140.85
       await answerWith(RANK_ANSWER);
-      await screen.findByRole("table");
+      const table = await screen.findByRole("table");
       const scroller = screen.getByRole("region", { name: "Table, scrolls sideways" });
-      expect(scroller).toHaveAttribute("data-unpin-second");
+      expect(scroller).toHaveAttribute("data-pin-name-only");
       expect(scroller.className).toContain("group/table");
-      const name = screen.getByRole("cell", { name: "Meghana Foods" });
-      expect(name.className).toContain("group-data-[unpin-second]/table:static");
+      // The name stays sticky and moves to the left edge…
+      const name = within(table).getByRole("cell", { name: "Meghana Foods" });
+      expect(name.className).toContain("sticky");
+      expect(name.className).toContain("group-data-[pin-name-only]/table:left-0");
+      expect(name.className).not.toMatch(/group-data-\[pin-name-only\]\/table:static/);
+      // …while the rank (header and body) scrolls with the other columns.
+      for (const rank of [
+        within(table).getByRole("cell", { name: "1" }),
+        within(table).getByRole("columnheader", { name: "#" }),
+      ]) {
+        expect(rank.className).toContain("group-data-[pin-name-only]/table:static");
+      }
     });
 
-    it("keeps the second pin when there is room", async () => {
+    it("pins both rank and name when there is room", async () => {
       layout(600); // 164 < 0.45 × 600 = 270
       await answerWith(RANK_ANSWER);
       await screen.findByRole("table");
-      expect(screen.getByRole("region", { name: "Table, scrolls sideways" })).not.toHaveAttribute("data-unpin-second");
+      expect(screen.getByRole("region", { name: "Table, scrolls sideways" })).not.toHaveAttribute("data-pin-name-only");
+    });
+
+    it("never pins the rank on its own", async () => {
+      for (const card of [313, 600]) {
+        layout(card);
+        const { unmount } = await answerWith(RANK_ANSWER);
+        const table = await screen.findByRole("table");
+        // Whatever the width, the name column is sticky: no class ever un-sticks it.
+        const name = within(table).getByRole("cell", { name: "Meghana Foods" });
+        expect(name.className).toContain("sticky");
+        expect(name.className).not.toContain(":static");
+        unmount();
+        vi.restoreAllMocks();
+      }
     });
   });
 

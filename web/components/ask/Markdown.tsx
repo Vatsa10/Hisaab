@@ -93,20 +93,21 @@ function shapeTable(table: HastNode): void {
     RANK_HEADER.test(textOf(cellsOf(headRow)[0] ?? { type: "text" }).trim()) &&
     column(0).length > 0 &&
     column(0).every((v) => RANK_VALUE.test(v));
-  // The pinned label column is capped (see PIN_CAP) and keeps its full text in `title`. The
-  // second pin is dropped at run time if it would eat too much of the card (TableCard).
+  // The pinned label column is capped (see PIN_CAP) and keeps its full text in `title`. When
+  // rank and name together would take too much of the card, TableCard pins the name alone (at
+  // the left edge) and lets the rank scroll away with the other columns.
   const capped = (cell: HastNode) => ({ dataPinCap: "", title: textOf(cell).trim() || undefined });
   for (const row of rows) {
     const cells = cellsOf(row);
     const [first, second] = cells;
     if (!first) continue;
     if (rankFirst && second) {
-      setProps(first, {}, ["w-11", "min-w-11", "max-w-11"]);
+      setProps(first, {}, ["w-11", "min-w-11", "max-w-11", "group-data-[pin-name-only]/table:static"]);
       setProps(second, { ...capped(second), dataPinSecond: "" }, [
         "sticky",
         "left-11",
         "z-[1]",
-        "group-data-[unpin-second]/table:static",
+        "group-data-[pin-name-only]/table:left-0",
         second.tagName === "th" ? "bg-canvas" : "bg-surface",
       ]);
     } else {
@@ -134,7 +135,7 @@ const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm];
 const EDGE =
   "pointer-events-none absolute inset-y-px w-3 from-ink/[0.08] to-transparent transition-opacity duration-150 ease-out-quart";
 
-/** Pinned columns may take at most this share of the card; past it the second pin is dropped. */
+/** Pinned columns may take at most this share of the card; past it only the name stays pinned. */
 export const MAX_PIN_SHARE = 0.45;
 
 /**
@@ -149,27 +150,29 @@ const PIN_CAP = "line-clamp-2 max-w-[6.5rem] whitespace-normal break-words";
  * does. Soft 12px shadows mark the edges where columns are hidden: at the right while more is to
  * come, and just past the pinned column(s) once scrolled. (They are overlays, not the classic
  * local/scroll background trick, because the opaque pinned column and header row would paint
- * over a background shadow.) When a rank column and the name after it are both pinned but would
- * cover more than MAX_PIN_SHARE of the card, only the rank stays pinned.
+ * over a background shadow.) When a rank column and the name after it would together cover more
+ * than MAX_PIN_SHARE of the card, the name alone is pinned (it is what identifies the row) and
+ * the rank scrolls with the rest.
  */
 function TableCard({ children }: { children?: ReactNode }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const [edges, setEdges] = useState({ start: false, end: false, pin: 0, unpinSecond: false });
+  const [edges, setEdges] = useState({ start: false, end: false, pin: 0, nameOnly: false });
 
   const measure = useCallback(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const max = el.scrollWidth - el.clientWidth;
     const first = el.querySelector<HTMLElement>("tr > :first-child");
-    const second = el.querySelector<HTMLElement>("[data-pin-second]");
+    const name = el.querySelector<HTMLElement>("[data-pin-second]");
     // Widths don't depend on stickiness, so this can't flip back and forth.
-    const unpinSecond =
-      first !== null && second !== null && first.offsetWidth + second.offsetWidth > MAX_PIN_SHARE * el.clientWidth;
-    const edge = second && !unpinSecond ? second : first;
+    const nameOnly =
+      first !== null && name !== null && first.offsetWidth + name.offsetWidth > MAX_PIN_SHARE * el.clientWidth;
+    // The last pinned column: the name when there is one, else the first column.
+    const edge = name ?? first;
     const pin = edge ? Math.round(edge.getBoundingClientRect().right - el.getBoundingClientRect().left) : 1;
-    const next = { start: el.scrollLeft > 1, end: el.scrollLeft < max - 1, pin, unpinSecond };
+    const next = { start: el.scrollLeft > 1, end: el.scrollLeft < max - 1, pin, nameOnly };
     setEdges((prev) =>
-      prev.start === next.start && prev.end === next.end && prev.pin === next.pin && prev.unpinSecond === next.unpinSecond
+      prev.start === next.start && prev.end === next.end && prev.pin === next.pin && prev.nameOnly === next.nameOnly
         ? prev
         : next,
     );
@@ -192,7 +195,7 @@ function TableCard({ children }: { children?: ReactNode }) {
         role="region"
         aria-label="Table, scrolls sideways"
         tabIndex={0}
-        data-unpin-second={edges.unpinSecond ? "" : undefined}
+        data-pin-name-only={edges.nameOnly ? "" : undefined}
         className="group/table max-w-full overflow-x-auto overscroll-x-contain rounded-tile border border-line bg-surface"
       >
         <table className="w-full border-separate border-spacing-0 text-label tabular-nums">{children}</table>
