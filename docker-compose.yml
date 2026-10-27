@@ -10,6 +10,8 @@ services:
     image: postgres:16
     environment:
       POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     ports:
       - "54330:5432"
     healthcheck:
@@ -32,9 +34,20 @@ services:
     command:
       - |
         set -e
-        run() { psql -v ON_ERROR_STOP=1 -q -h db -U postgres -d postgres -f "$$1"; }
-        run /migrations/bootstrap.sql
-        for f in $$(ls /migrations/supabase/*.sql | sort); do echo "applying $$f"; run "$$f"; done
+        P="psql -v ON_ERROR_STOP=1 -q -h db -U postgres -d postgres"
+        $$P -c "create table if not exists public._local_migrations (name text primary key, applied_at timestamptz not null default now())"
+        # Each file runs in its own transaction together with its tracking row; recorded files are skipped.
+        apply() {
+          name=$$(basename "$$1")
+          if [ "$$($$P -tA -c "select 1 from public._local_migrations where name = '$$name'")" = 1 ]; then
+            echo "skipping $$name (already applied)"
+          else
+            echo "applying $$name"
+            $$P --single-transaction -f "$$1" -c "insert into public._local_migrations (name) values ('$$name')"
+          fi
+        }
+        apply /migrations/bootstrap.sql
+        for f in $$(ls /migrations/supabase/*.sql | sort); do apply "$$f"; done
         echo "migrations done"
     restart: "no"
 
@@ -67,4 +80,5 @@ services:
       - vault:/data/vault
 
 volumes:
+  pgdata:
   vault:

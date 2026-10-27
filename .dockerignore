@@ -2,7 +2,6 @@
 .env
 .env.*
 !.env.example
-deploy/azure/.env.deploy
 settings.json
 expenses.db
 profiles/
@@ -12,10 +11,10 @@ reports/
 runs/
 recipes/*.json
 recipes/*.hint.txt
+!recipes/*.seed.json
 
 # not needed at runtime
 .git/
-.gitattributes
 .superpowers/
 .claude/
 tests/
@@ -25,3 +24,6 @@ docker-compose.yml
 .pytest_cache/
 .ruff_cache/
 *.pyc
+
+# MUST stay the last non-comment line: the Azure deploy guard fails if any "!" negation follows it
+deploy/azure/.env.deploy

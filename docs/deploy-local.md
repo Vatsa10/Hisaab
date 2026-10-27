@@ -36,8 +36,13 @@ Compose reads these from your shell or a `.env` file next to `docker-compose.yml
 `PROFILE_STORE_URL` is `file:///data/vault` in compose; the vault and proxy settings are consumed by worker code
 that lands in a later task.
 
+The database lives in the `pgdata` named volume, so data survives `docker compose stop`/`up`. `migrate` records each
+applied file in `public._local_migrations` and skips recorded ones, so re-running `up` is safe; `down -v` wipes
+everything.
+
 The `.dockerignore` keeps `.env`, browser profiles, `expenses.db`, logs, reports, runs, learned recipes, `.git`
-and `.superpowers` out of the images.
+and `.superpowers` out of the images. The generic `recipes/*.seed.json` files are re-included on purpose, so the
+worker image has the seed recipes.
 
 ## Pointing at a real Supabase
 
