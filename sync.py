@@ -21,6 +21,18 @@ class RecipeError(Exception):
     pass
 
 
+class OtpTimeout(TimeoutError):
+    """Nobody answered an unattended prompt in time. kind is "otp" or "question"."""
+
+    def __init__(self, kind: str = "otp", message: str | None = None):
+        super().__init__(message or f"no {kind} answer received in time")
+        self.kind = kind
+
+
+# LoginAgent notes for a prompt that timed out -> the OtpTimeout kind.
+_TIMEOUT_NOTES = {"otp_timeout": "otp", "ask_timeout": "question"}
+
+
 def ensure_logged_in(page) -> None:
     if LOGIN_URL.search(urlsplit(page.url).path):
         raise SessionExpired(f"redirected to {urlsplit(page.url).path}")
@@ -45,8 +57,11 @@ def normalize_phone(raw: str) -> str:
 def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=None,
           profile_dir=None, location: dict | None = None) -> bool:
     """With a phone number the LoginAgent fills the form and asks for the OTP; otherwise (or if it gets
-    stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input."""
-    prompt = prompt or input
+    stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input.
+
+    An injected prompt(text, kind) means an unattended run: there is no manual fallback. A prompt that timed
+    out raises OtpTimeout; any other failure returns False."""
+    unattended = prompt is not None
     recipe = recipes.load(site)
     with open_site(site, login_mode=True, profile_dir=profile_dir, location=location) as (_, page, guard, capture):
         try:
@@ -69,10 +84,14 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
             if not done["success"]:
                 print(f"\n[{site}] automatic login stopped: {agent.mask(done['note'], {'PHONE': phone})}")
         if not done or not done["success"]:
-            prompt(f"\nLog in to {site} in the browser window (phone + OTP).\n"
-                   "Then open your Orders / order history page and press Enter here... ")
+            if unattended:
+                if done and done["note"] in _TIMEOUT_NOTES:
+                    raise OtpTimeout(_TIMEOUT_NOTES[done["note"]])
+                return False
+            input(f"\nLog in to {site} in the browser window (phone + OTP).\n"
+                  "Then open your Orders / order history page and press Enter here... ")
             while not agent.site_allows_host(site, page.url):  # still on an error page / elsewhere
-                prompt(f"The browser is on {page.url[:60]}, not {site}. Open {site}'s Orders page, then press Enter... ")
+                input(f"The browser is on {page.url[:60]}, not {site}. Open {site}'s Orders page, then press Enter... ")
         orders_url = recipe["orders_page_url"] if recipe else page.url
         guard.login_mode = False
         capture.clear()

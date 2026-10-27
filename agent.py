@@ -357,7 +357,7 @@ class Discovery:
     }
     GOAL = "Open this site's order history page and load more past orders (scroll / show more) at least twice."
 
-    def __init__(self, site, page, guard, capture, prompt: Callable[[str], str] | None = None):
+    def __init__(self, site, page, guard, capture, prompt: Callable[[str, str], str] | None = None):
         self.site, self.page, self.guard, self.capture = site, page, guard, capture
         self._prompt = prompt
         self.refs: dict[str, dict] = {}
@@ -380,9 +380,12 @@ class Discovery:
 
     # --- actions (also exposed to GPT as tools) ---
 
-    def prompt(self, text: str) -> str:
-        """Every human-input point goes through here; builtins.input is looked up per call (patchable)."""
-        return (self._prompt or input)(text)
+    def prompt(self, text: str, kind: str = "question") -> str:
+        """Every human-input point goes through here. kind is "otp" or "question"; an injected prompt gets it,
+        the CLI default is builtins.input (looked up per call, so patchable)."""
+        if self._prompt is None:
+            return input(text)
+        return self._prompt(text, kind)
 
     def ask_user(self, question: str):
         """Friday's computer_ask: hand a question to the human instead of failing, then carry on."""
@@ -391,7 +394,8 @@ class Discovery:
             return {"error": "already asked the user 3 times; finish(success=false) if still stuck"}
         try:
             answer = self.prompt(f"\n[{self.site}] The agent needs help: {question}\n"
-                                 "Answer, or fix it in the browser and press Enter (type 'stop' to give up): ").strip()
+                                 "Answer, or fix it in the browser and press Enter (type 'stop' to give up): ",
+                                 "question").strip()
         except EOFError:  # non-interactive run
             answer = ""
         except TimeoutError:  # unattended run: nobody answered in time
@@ -401,7 +405,9 @@ class Discovery:
             self.done = {"success": False, "note": "user stopped the agent", "url": self.page.url}
             return {"ok": True}
         settle(self.page)
-        self.history.append(f"user answered: {answer or '(no answer; may have acted in the browser)'}")
+        # The answer may hold personal details: the models see only that the user answered, not what.
+        self.history.append(f"user answered ({len(answer)} chars)" if answer
+                            else "user answered: (no answer; may have acted in the browser)")
         return {"answer": answer}
 
     def follow_new_tab(self) -> None:
@@ -735,7 +741,7 @@ class LoginAgent(Discovery):
     }
 
     def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False,
-                 prompt: Callable[[str], str] | None = None):
+                 prompt: Callable[[str, str], str] | None = None):
         super().__init__(site, page, guard, capture, prompt)
         self.secrets["PHONE"] = phone
         self.location, self.dry_run = location, dry_run
@@ -778,7 +784,7 @@ class LoginAgent(Discovery):
     def enter_otp(self, frame=None) -> None:
         frame = frame or self.page.main_frame
         try:
-            otp = self.prompt(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ").strip()
+            otp = self.prompt(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ", "otp").strip()
         except TimeoutError:
             self.done = {"success": False, "note": "otp_timeout", "url": self.page.url}
             return
@@ -812,7 +818,7 @@ class LoginAgent(Discovery):
             return {"ok": True}
         if field == "OTP":
             try:
-                otp = self.prompt(f"\n[{self.site}] Enter the OTP you received (blank to skip): ").strip()
+                otp = self.prompt(f"\n[{self.site}] Enter the OTP you received (blank to skip): ", "otp").strip()
             except TimeoutError:
                 self.done = {"success": False, "note": "otp_timeout", "url": self.page.url}
                 return {"error": "timed out waiting for the OTP"}

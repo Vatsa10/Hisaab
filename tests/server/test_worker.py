@@ -1,24 +1,113 @@
+import dataclasses
 import threading
+import time
 
 import pytest
-from helpers import A, order, settings_for_tests
+from helpers import A, fake_login_env, order, settings_for_tests
 
+import sync
 from browser import SessionExpired
 from server import jobs, store, worker
 
 
+def _notify_later(conn, jid, payload, delay=0.5):
+    threading.Timer(delay, lambda: conn.execute("select pg_notify(%s, %s)",
+                                                (f"otp_{jid.replace('-', '')}", payload))).start()
+
+
 def test_prompt_otp_round_trip(pg, pg_listen, pg2):
     jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
-    ask = worker.make_otp_prompt(pg_listen, pg, jid, timeout_s=5)
-    threading.Timer(0.5, lambda: pg2.execute("select pg_notify(%s, %s)", (f"otp_{jid.replace('-', '')}", "4321"))).start()
-    assert ask("Enter OTP") == "4321"
+    ask = worker.make_prompt(pg_listen, pg, jid, timeout_s=5)
+    _notify_later(pg2, jid, "4321")
+    assert ask("Enter OTP", "otp") == "4321"
     assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("otp_received",)
 
 
 def test_prompt_otp_times_out(pg, pg_listen):
     jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
-    with pytest.raises(TimeoutError):
-        worker.make_otp_prompt(pg_listen, pg, jid, timeout_s=1)("Enter OTP")
+    with pytest.raises(sync.OtpTimeout) as e:
+        worker.make_prompt(pg_listen, pg, jid, timeout_s=1)("Enter OTP", "otp")
+    assert e.value.kind == "otp"
+    assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("otp_needed",)
+
+
+def test_prompt_question_publishes_question_needed(pg, pg_listen):
+    jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    with pytest.raises(sync.OtpTimeout) as e:
+        worker.make_prompt(pg_listen, pg, jid, timeout_s=1)("Solve the captcha?", "question")
+    assert e.value.kind == "question"
+    assert pg.execute("select progress->>'stage', progress->>'question' from jobs").fetchone() ==         ("question_needed", "Solve the captcha?")
+
+
+def test_prompt_question_round_trip(pg, pg_listen, pg2):
+    jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    _notify_later(pg2, jid, "done")
+    assert worker.make_prompt(pg_listen, pg, jid, timeout_s=5)("Solve the captcha?", "question") == "done"
+    assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("answer_received",)
+
+
+def _counting_prompts(monkeypatch):
+    waits = []
+    real = worker.make_prompt
+
+    def make(*a, **k):
+        inner = real(*a, **k)
+
+        def prompt(text, kind="otp"):
+            waits.append(kind)
+            return inner(text, kind)
+        return prompt
+    monkeypatch.setattr(worker, "make_prompt", make)
+    return waits
+
+
+def test_real_login_otp_timeout_waits_once(pg, monkeypatch):
+    def run(self):  # the real LoginAgent.enter_otp, as when the OTP field appears
+        self.enter_otp()
+        return self.done or {"success": False, "note": "stuck", "url": self.page.url}
+    fake_login_env(monkeypatch, run)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: pytest.fail("must not sync"))
+    waits = _counting_prompts(monkeypatch)
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    t0 = time.monotonic()
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, dataclasses.replace(settings_for_tests(), otp_timeout_s=1))
+    assert waits == ["otp"]
+    assert time.monotonic() - t0 < 3
+    assert pg.execute("select status, error, payload ? 'phone' from jobs").fetchone() == ("failed", "otp_timeout", False)
+    assert pg.execute("select status from connections").fetchone() == ("error",)
+
+
+def test_real_login_question_timeout(pg, monkeypatch):
+    def run(self):
+        self.ask_user("Is this your account?")
+        return self.done or {"success": False, "note": "stuck", "url": self.page.url}
+    fake_login_env(monkeypatch, run)
+    waits = _counting_prompts(monkeypatch)
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, dataclasses.replace(settings_for_tests(), otp_timeout_s=1))
+    assert waits == ["question"]
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "question_timeout")
+
+
+def test_real_login_agent_failure_is_login_failed(pg, monkeypatch):
+    fake_login_env(monkeypatch, lambda self: {"success": False, "note": "stuck", "url": self.page.url})
+    waits = _counting_prompts(monkeypatch)
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert waits == []
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "login_failed")
+    assert pg.execute("select status from connections").fetchone() == ("error",)
+
+
+def test_sync_socket_timeout_is_a_plain_error(pg, monkeypatch):
+    def slow(*a, **k):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(worker.sync, "fetch_orders", slow)
+    store.set_connection(pg, A, "zepto", status="connected")
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "TimeoutError: timed out")
+    assert pg.execute("select status from connections").fetchone() == ("connected",)
 
 
 def test_sync_job_stores_orders(pg, monkeypatch):
@@ -71,7 +160,7 @@ def test_connect_login_failed(pg, monkeypatch):
 
 def test_connect_otp_timeout(pg, monkeypatch):
     def login(*a, **k):
-        raise TimeoutError("no otp")
+        raise sync.OtpTimeout("otp")
     monkeypatch.setattr(worker.sync, "login", login)
     jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
     worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())

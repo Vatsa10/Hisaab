@@ -30,14 +30,15 @@ def otp_page():
 
 def test_otp_comes_from_prompt_not_input(monkeypatch, otp_page):
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() called"))
-    la = LoginAgent("zepto", otp_page, None, None, "9000000000", prompt=lambda q: "4321")
+    kinds = []
+    la = LoginAgent("zepto", otp_page, None, None, "9000000000", prompt=lambda q, kind: kinds.append(kind) or "4321")
     la.phone_typed = True
     la.on_observe()
-    assert la.otp_entered and la.secrets["OTP"] == "4321"
+    assert la.otp_entered and la.secrets["OTP"] == "4321" and kinds == ["otp"]
 
 
 def test_prompt_timeout_ends_run_cleanly(otp_page):
-    def slow(q):
+    def slow(q, kind):
         raise TimeoutError
 
     la = LoginAgent("zepto", otp_page, None, None, "9000000000", prompt=slow)
@@ -60,23 +61,49 @@ def test_open_site_uses_given_profile_dir(monkeypatch, tmp_path):
     assert f"--user-data-dir={(tmp_path / 'u1-zepto').resolve()}" in seen["args"]
 
 
-def _timeout(q):
+def _timeout(q, kind):
+    _timeout.kinds.append(kind)
     raise TimeoutError
+
+
+_timeout.kinds = []
 
 
 def test_ask_user_prompt_timeout_ends_run():
     from types import SimpleNamespace
     la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000", prompt=_timeout)
+    _timeout.kinds.clear()
     assert la.ask_user("captcha?") == {"ok": True}
     assert la.done == {"success": False, "note": "ask_timeout", "url": "https://www.zepto.com/"}
+    assert _timeout.kinds == ["question"]
+
+
+@pytest.mark.parametrize("injected", [True, False])
+def test_ask_user_answer_is_not_put_in_model_history(monkeypatch, injected):
+    from types import SimpleNamespace
+
+    import agent
+    monkeypatch.setattr(agent, "settle", lambda *a, **k: None)
+    answer = "my flat is 4B, code 7781"
+    if injected:
+        la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000",
+                        prompt=lambda q, kind: answer)
+    else:
+        monkeypatch.setattr("builtins.input", lambda *a: answer)
+        la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000")
+    assert la.ask_user("which flat?") == {"answer": answer}
+    assert la.history == [f"user answered ({len(answer)} chars)"]
+    assert answer not in " ".join(la.history)
 
 
 def test_type_value_otp_prompt_timeout_ends_run():
     from types import SimpleNamespace
     la = LoginAgent("zepto", SimpleNamespace(url="https://www.zepto.com/"), None, None, "9000000000", prompt=_timeout)
     la.refs = {"e1": {"tag": "input"}}
+    _timeout.kinds.clear()
     assert "error" in la.type_value("e1", "OTP")
     assert la.done == {"success": False, "note": "otp_timeout", "url": "https://www.zepto.com/"}
+    assert _timeout.kinds == ["otp"]
 
 
 def _no_learning(monkeypatch):

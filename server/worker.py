@@ -21,21 +21,28 @@ JOB_TYPES = ("connect", "sync")
 MAX_ERROR_LEN = 300
 
 
-def make_otp_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
-    """Return a prompt(question) callable that waits for the OTP relayed via NOTIFY otp_<job id>."""
+# prompt kind -> (stage while waiting, stage once answered)
+PROMPT_STAGES = {"otp": ("otp_needed", "otp_received"), "question": ("question_needed", "answer_received")}
+
+
+def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
+    """Return a prompt(text, kind="otp") callable that publishes the question on the job's progress and waits
+    for the answer relayed via NOTIFY otp_<job id>. kind is "otp" or "question"; both use the same channel.
+    Raises sync.OtpTimeout(kind) when nothing arrives within timeout_s."""
     channel = "otp_" + job_id.replace("-", "")
 
-    def prompt(question: str) -> str:
-        # LISTEN first so a NOTIFY sent right after the app sees "otp_needed" is not missed.
+    def prompt(text: str, kind: str = "otp") -> str:
+        waiting, answered = PROMPT_STAGES[kind]
+        # LISTEN first so a NOTIFY sent right after the app sees the question is not missed.
         listen_conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
         try:
-            jobs.set_progress(job_conn, job_id, stage="otp_needed", question=question)
+            jobs.set_progress(job_conn, job_id, stage=waiting, question=text)
             deadline = time.monotonic() + timeout_s
             while (remaining := deadline - time.monotonic()) > 0:
                 for note in listen_conn.notifies(timeout=remaining, stop_after=1):
-                    jobs.set_progress(job_conn, job_id, stage="otp_received")
+                    jobs.set_progress(job_conn, job_id, stage=answered)
                     return note.payload
-            raise TimeoutError("no OTP received in time")
+            raise sync.OtpTimeout(kind)
         finally:
             listen_conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
 
@@ -94,7 +101,7 @@ def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
             store.set_connection(conn, job.user_id, db_site, status="syncing")
             if listen_conn is None:
                 listen_conn = own_listen = psycopg.connect(s.database_url, autocommit=True)
-            prompt = make_otp_prompt(listen_conn, conn, job.id, s.otp_timeout_s)
+            prompt = make_prompt(listen_conn, conn, job.id, s.otp_timeout_s)
             ok = sync.login(job.site, phone, prompt=prompt, profile_dir=_profile_dir(job.user_id, job.site),
                             location=_location(conn, job.user_id))
             if not ok:
@@ -104,8 +111,8 @@ def run_job(job: jobs.Job, conn, s: Settings, listen_conn=None) -> None:
         jobs.finish(conn, job.id)
     except browser.SessionExpired:
         fail("needs_login", "needs_login")
-    except TimeoutError:
-        fail("otp_timeout", "error")
+    except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
+        fail(f"{e.kind}_timeout", "error")
     except sync.RecipeError as e:
         fail(f"no_recipe: {(str(e).splitlines() or [''])[0]}"[:MAX_ERROR_LEN])
     except Exception as e:
