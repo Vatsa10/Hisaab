@@ -24,3 +24,12 @@ def test_recipes_readable_by_any_user(pg, as_user):
     pg.execute("insert into recipes(site, kind, recipe, version) values ('zepto','orders','{}',1)")
     with as_user(pg, A):
         assert pg.execute("select count(*) from recipes").fetchone() == (1,)
+
+
+def test_one_running_job_per_user_site(pg):
+    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'connect','zepto','running')", (A,))
+    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'sync','zepto','queued')", (A,))
+    pg.execute("insert into jobs(user_id, type, site, status) values (%s,'sync','blinkit','running')", (A,))
+    with pytest.raises(psycopg.errors.UniqueViolation) as e:
+        pg.execute("update jobs set status='running' where type='sync' and site='zepto'")
+    assert e.value.diag.constraint_name == "one_running_job_per_profile"

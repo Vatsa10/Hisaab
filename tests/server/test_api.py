@@ -108,3 +108,14 @@ def test_rejects_missing_or_bad_token(client):
     assert client.post("/consents", json={"site": "zepto"}, headers=expired).status_code == 401
     wrong_aud = {"Authorization": f"Bearer {make_token(A, aud='other')}"}
     assert client.post("/consents", json={"site": "zepto"}, headers=wrong_aud).status_code == 401
+
+
+def test_refresh_conflicts_while_connect_is_active(client, token_a, pg):
+    client.post("/consents", json={"site": "zepto"}, headers=token_a)
+    pg.execute("insert into connections (user_id, site, status) values (%s,'zepto','syncing')", (A,))
+    jid = client.post("/connections/zepto/connect", json={"phone": "9876543210"}, headers=token_a).json()["job_id"]
+    assert client.post("/connections/zepto/refresh", headers=token_a).status_code == 409  # queued
+    pg.execute("update jobs set status='running' where id=%s", (jid,))
+    assert client.post("/connections/zepto/refresh", headers=token_a).status_code == 409  # running
+    pg.execute("update jobs set status='done' where id=%s", (jid,))
+    assert client.post("/connections/zepto/refresh", headers=token_a).status_code == 202

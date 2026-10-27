@@ -56,3 +56,34 @@ def test_claim_takes_next_unlocked_job(pg, pg2):
         pg2.execute("select id from jobs where site='zepto' for update")
         got = jobs.claim(pg, "w1", ("sync",))
     assert got is not None and got.id == newer
+
+
+def test_claim_skips_a_job_whose_profile_is_busy(pg):
+    from helpers import B
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    assert jobs.claim(pg, "w1", ("connect",)) is not None
+    jobs.enqueue(pg, A, "sync", "zepto")
+    other = jobs.enqueue(pg, B, "sync", "zepto")
+    got = jobs.claim(pg, "w2", ("sync",))
+    assert got is not None and got.id == other
+    assert jobs.claim(pg, "w2", ("sync",)) is None
+    assert pg.execute("select count(*) from jobs where status='running'").fetchone() == (2,)
+
+
+def test_claim_survives_a_unique_violation_race(pg, pg2):
+    import threading
+    import time
+    connect = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    jobs.enqueue(pg, A, "sync", "zepto")
+    result = {}
+    with pg2.transaction():
+        # Another worker has started the connect job but not committed yet: claim's NOT EXISTS check cannot
+        # see it, so its UPDATE waits on the unique index and then fails.
+        pg2.execute("update jobs set status='running', worker_id='w1' where id=%s", (connect,))
+        t = threading.Thread(target=lambda: result.update(job=jobs.claim(pg, "w2", ("sync",))))
+        t.start()
+        time.sleep(0.5)
+    t.join(10)
+    assert not t.is_alive() and result == {"job": None}
+    assert pg.execute("select type, status from jobs order by type").fetchall() == \
+        [("connect", "running"), ("sync", "queued")]

@@ -110,6 +110,12 @@ def refresh(site: str, user: str = Depends(current_user), conn=Depends(get_conn)
     row = conn.execute("SELECT 1 FROM connections WHERE user_id=%s AND site=%s", (user, site)).fetchone()
     if row is None:
         raise HTTPException(404, "no connection")
+    connecting = conn.execute(
+        "SELECT 1 FROM jobs WHERE user_id=%s AND site=%s AND type='connect' AND status IN ('queued','running')",
+        (user, site),
+    ).fetchone()
+    if connecting is not None:  # the connect job syncs when it finishes; never two browsers on one profile
+        raise HTTPException(409, "a connect job is active")
     try:
         job_id = jobs.enqueue(conn, user, "sync", site)
     except jobs.Conflict:
