@@ -34,14 +34,34 @@ done
 LOCATION="${LOCATION:-centralindia}"
 PREFIX="${PREFIX:-expagent}"
 
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+else
+  echo "python3 or python is required on PATH" >&2
+  exit 1
+fi
+
+# The whole repo is the build context; make sure the secrets file cannot be uploaded.
+if ! grep -Eq '^/?(\*\*/)?(deploy/azure/\.env\.deploy|deploy/azure/\.env\*|deploy/azure|deploy|\*\*/\.env\.deploy|\.env\.deploy|\*\*/\.env\*|\.env\*)/?\s*$' "$ROOT/.dockerignore" 2>/dev/null; then
+  echo "refusing to build: $ROOT/.dockerignore must exclude deploy/azure/.env.deploy" >&2
+  exit 1
+fi
+
 SHA="$(git -C "$ROOT" rev-parse --short HEAD)"
 
 # Secrets go through a temp parameters file (not argv, which is visible in ps).
 PARAMS="$(mktemp)"
 trap 'rm -f "$PARAMS"' EXIT
 chmod 600 "$PARAMS"
+# Native Windows az/python cannot open Git Bash /tmp paths; convert when cygpath exists.
+PARAMS_NATIVE="$PARAMS"
+if command -v cygpath >/dev/null 2>&1; then
+  PARAMS_NATIVE="$(cygpath -w "$PARAMS")"
+fi
 export DATABASE_URL SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE
-python - "$PARAMS" <<'PY'
+"$PY" - "$PARAMS_NATIVE" <<'PY'
 import json, os, sys
 names = {
     "databaseUrl": "DATABASE_URL",
@@ -65,7 +85,7 @@ az group create --name "$RG" --location "$LOCATION" --output none
 # Phase 1: registry, storage, identity, environment (no apps yet, so there is somewhere to push images).
 az deployment group create --resource-group "$RG" \
   --template-file "$HERE/main.bicep" \
-  --parameters "@$PARAMS" location="$LOCATION" prefix="$PREFIX" deployApps=false \
+  --parameters "@$PARAMS_NATIVE" location="$LOCATION" prefix="$PREFIX" deployApps=false \
   --output none
 
 ACR_LOGIN="$(az deployment group show --resource-group "$RG" --name main \
@@ -80,7 +100,7 @@ az acr build --registry "$ACR_NAME" --image "worker:$SHA" \
 # Phase 2: the Container Apps.
 az deployment group create --resource-group "$RG" \
   --template-file "$HERE/main.bicep" \
-  --parameters "@$PARAMS" location="$LOCATION" prefix="$PREFIX" deployApps=true \
+  --parameters "@$PARAMS_NATIVE" location="$LOCATION" prefix="$PREFIX" deployApps=true \
   apiImage="$ACR_LOGIN/api:$SHA" workerImage="$ACR_LOGIN/worker:$SHA" \
   --output none
 

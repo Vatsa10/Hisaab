@@ -206,6 +206,8 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
       ]
     }
     template: {
+      // Let the in-flight job finish when KEDA scales the replica in.
+      terminationGracePeriodSeconds: 600
       containers: [
         {
           name: 'worker'
@@ -232,7 +234,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             custom: {
               type: 'postgresql'
               metadata: {
-                query: 'select count(*) from jobs where status = \'queued\''
+                query: 'select count(*) from jobs where status in (\'queued\',\'running\')'
                 targetQueryValue: '1'
               }
               auth: [
