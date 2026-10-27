@@ -12,9 +12,14 @@ TABLES = ("profiles", "connections", "orders", "order_items", "item_categories",
 
 
 def _url():
+    from helpers import destructive_db_allowed
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
         pytest.skip("TEST_DATABASE_URL not set")
+    if not destructive_db_allowed(url, os.environ):
+        pytest.skip("refusing to run server tests: they DROP the public and auth schemas of TEST_DATABASE_URL, "
+                    "which is not localhost/127.0.0.1. Point it at a throwaway local Postgres, or set "
+                    "ALLOW_DESTRUCTIVE_TEST_DB=1 if that database really is disposable.")
     return url
 
 

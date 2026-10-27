@@ -61,3 +61,19 @@ def fake_login_env(monkeypatch, run, settings_location=None):
     monkeypatch.setattr(browser, "load_settings",
                         lambda: {"location": settings_location} if settings_location else {})
     return seen
+
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+
+def destructive_db_allowed(url: str, env) -> bool:
+    """The server tests drop and recreate the public and auth schemas. Only allow that on a local database
+    (localhost / 127.0.0.1 / ::1 / a local socket) unless ALLOW_DESTRUCTIVE_TEST_DB=1 is set."""
+    if env.get("ALLOW_DESTRUCTIVE_TEST_DB") == "1":
+        return True
+    from psycopg.conninfo import conninfo_to_dict
+    try:
+        hosts = (conninfo_to_dict(url).get("host") or "").split(",")
+    except Exception:
+        return False
+    return all(h.strip().strip("[]") in LOCAL_HOSTS or h.startswith("/") for h in hosts)
