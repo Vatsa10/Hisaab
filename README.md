@@ -1,7 +1,41 @@
-# expense-agent
+# Hisaab
 
-Local, read-only agent that pulls your own order history from Blinkit, Zepto, Swiggy (incl. Instamart)
-and Zomato into SQLite, categorizes items, and reports spend.
+**हिसाब — your food and grocery spending, sorted. Built for India.**
+
+Connect Blinkit, Zepto, Swiggy (incl. Instamart) and Zomato once with your phone number and OTP, and see
+every order in one place: per month, per app, per restaurant and per category. Ask questions about your
+spending in plain words. Before you shop, get your grocery list or your usual restaurant order priced live
+on each app at your address, with fees, so you know which one is cheapest.
+
+- **Read-only by design.** Hisaab reads order history and prices. It never places, changes or cancels an
+  order, and never touches payment or your saved addresses. Filling a cart, when you ask for it, only adds
+  items; you pay in the app yourself.
+- **No hand-written scrapers.** An AI agent learns each app's order and search APIs once (admin-supervised)
+  and saves them as JSON "recipes". Everyday syncs just replay them: fast, cheap and repeatable.
+- **Your data stays yours.** Row-level security in Postgres, encrypted app sessions, OTPs never stored,
+  phone numbers and tokens never logged.
+
+### Status
+
+| Part | State |
+|---|---|
+| CLI (single user, SQLite) | Working — everything below this section |
+| Cloud worker, API, job queue (Postgres) | Built and tested locally |
+| iPhone PWA: sign-in, connect apps, Spend, Orders, Ask | Built; local end-to-end test in progress |
+| Daily sync, limits, budget, admin, notifications | Planned (`docs/superpowers/plans/`) |
+| Cheapest cart (groceries and food) and fill cart | Planned |
+| Hardening, then deploy (Vercel + Azure + Supabase) | Planned |
+
+Stack: Next.js PWA (Vercel), FastAPI and a Chrome worker on Azure Container Apps, Supabase (Auth, Postgres,
+Realtime), Playwright, OpenAI and TypeSafe Jev. Local development: [docs/dev-supabase.md](docs/dev-supabase.md)
+and [web/README.md](web/README.md).
+
+---
+
+## The CLI (single user)
+
+The original tool, still fully supported. It is a local, read-only agent that pulls your own order history
+from Blinkit, Zepto, Swiggy (incl. Instamart) and Zomato into SQLite, categorizes items, and reports spend.
 
 There are no per-site scrapers in the code. An LLM agent finds each site's order-history API at
 runtime and saves what it learns as a JSON "recipe" in `recipes/<site>.json`.
