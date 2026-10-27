@@ -115,12 +115,12 @@ def test_login_reports_the_url_the_browser_landed_on(monkeypatch):
 
 
 PERSONAL = {
-    "orders_page_url": "https://www.zomato.com/users/vatsa-joshi-123/ordering",
+    "orders_page_url": "https://www.zomato.com/users/jane-doe-123/ordering",
     "endpoint": "https://www.zomato.com/webroutes/order/history",
-    "headers": {"Referer": "https://www.zomato.com/users/vatsa-joshi-123/ordering", "ORIGIN": "https://www.zomato.com",
+    "headers": {"Referer": "https://www.zomato.com/users/jane-doe-123/ordering", "ORIGIN": "https://www.zomato.com",
                 "cookie": "zat=abc", "x-client": "web"},
     "nav_trace": [{"action": "navigate", "url": "https://www.zomato.com/"},
-                  {"action": "click", "target": {"text": "Profile", "href": "/profile/vatsa-joshi-123"},
+                  {"action": "click", "target": {"text": "Profile", "href": "/profile/jane-doe-123"},
                    "url_after": "/orders/123456789"}],
     "read_post_allowlist": [{"url": "https://www.zomato.com/api/x", "headers": {"Referer": "https://a/users/q"}}],
 }
@@ -140,7 +140,7 @@ def test_publish_recipe_refuses_account_specific_values(monkeypatch, tmp_path):
     for path in ("$.orders_page_url", "$.nav_trace[1].target.href", "$.nav_trace[1].url_after"):
         assert path in r.output
     assert "$.headers" not in r.output and "$.read_post_allowlist" not in r.output  # dropped, not reported
-    assert "vatsa-joshi-123" not in r.output and "123456789" not in r.output
+    assert "jane-doe-123" not in r.output and "123456789" not in r.output
     assert "--force" in r.output
 
 
