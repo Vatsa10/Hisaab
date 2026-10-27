@@ -120,9 +120,9 @@ def run_sql(query: str) -> dict:
 
 
 def ask(question: str, max_calls: int = 12, *, sql_runner=None, system: str = ANALYST, tool: dict = RUN_SQL,
-        client=None) -> str:
+        client=None, sql_log_level: int = logging.INFO) -> str:
     """The analyst loop. By default it reads the local SQLite database (CLI); server.ask passes its own
-    sql_runner (query -> result dict), system prompt, tool definition and LLM client."""
+    sql_runner (query -> result dict), system prompt, tool definition, LLM client and a quieter SQL log level."""
     sql_runner = sql_runner or run_sql
     client, mdl = client or agent.llm(), agent.model()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
@@ -135,7 +135,7 @@ def ask(question: str, max_calls: int = 12, *, sql_runner=None, system: str = AN
         for tc in msg.tool_calls:
             query = json.loads(tc.function.arguments or "{}").get("query", "")
             result = sql_runner(query)
-            log.info("sql: %s -> %s", query[:120].replace("\n", " "), "error" if "error" in result else len(result["rows"]))
+            log.log(sql_log_level, "sql: %s -> %s", query[:120].replace("\n", " "), "error" if "error" in result else len(result["rows"]))
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": json.dumps(result, ensure_ascii=False, default=str)[:30000]})
     messages.append({"role": "user", "content": "Answer now with what you have."})

@@ -7,6 +7,7 @@ typesafe-sdk==0.6.0
 fastapi>=0.110
 uvicorn>=0.29
 psycopg[binary]>=3.1
+pglast==8.7
 PyJWT[crypto]>=2.8
 httpx>=0.27
 azure-storage-blob>=12.19

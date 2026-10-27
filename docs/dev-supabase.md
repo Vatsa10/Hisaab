@@ -14,7 +14,7 @@ This runs `npx supabase start` (safe to repeat), then writes two gitignored file
 | File | Contents |
 | --- | --- |
 | `web/.env.local` | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_API_URL=http://localhost:8000` |
-| `.env.server.local` | `DATABASE_URL` (local Supabase Postgres), `SUPABASE_JWKS_URL`, and `SUPABASE_JWT_SECRET` commented out |
+| `.env.server.local` | `DATABASE_URL` (local Supabase Postgres), `ASK_DATABASE_URL` (the `ask_reader` login, see below), `SUPABASE_JWKS_URL`, and `SUPABASE_JWT_SECRET` commented out |
 
 The PWA only ever uses the three `NEXT_PUBLIC_*` values. It never gets the service-role key.
 
@@ -35,7 +35,8 @@ uvicorn server.api:app --port 8000
 ## Reset the database
 
 ```bash
-npx --yes supabase@2.122.0 db reset     # re-applies supabase/migrations/0001..0005
+npx --yes supabase@2.122.0 db reset     # re-applies supabase/migrations/0001..0006
+bash scripts/dev_supabase.sh            # then give ask_reader its login password again
 npx --yes supabase@2.122.0 status
 npx --yes supabase@2.122.0 stop         # when you are done
 ```
@@ -54,3 +55,25 @@ Migration 0005 adds `norm_name()` and the `security_invoker` views `monthly_spen
 `merchant_spend`. They exclude cancelled, refunded and failed orders and return only the signed-in user's rows
 (`authenticated` can select; `anon` cannot). It also adds `connections` to the `supabase_realtime`
 publication (a no-op on plain Postgres).
+
+## Ask's database login (`ask_reader`)
+
+`POST /ask` runs the analyst's SQL on its own login, never on `DATABASE_URL`. Migration 0006 creates the role
+`ask_reader`: not a superuser, no `BYPASSRLS`, no `CREATEROLE`/`CREATEDB`, `NOINHERIT`, and a member of
+`authenticated` only. Each query runs as `authenticated` with the caller's JWT claims, read-only, so row-level
+security limits it to the caller's rows. The migration creates the role `NOLOGIN` because a committed migration
+cannot hold a password.
+
+- Locally, `scripts/dev_supabase.sh` sets a fresh random password on every run (applying 0006 first if the
+  running stack predates it) and writes `ASK_DATABASE_URL=postgresql://ask_reader:<password>@…` to
+  `.env.server.local`. The password is never printed.
+- Anywhere else (hosted Supabase, Azure), as an admin role:
+
+  ```sql
+  alter role ask_reader login password '<a long random secret>';
+  ```
+
+  then set `ASK_DATABASE_URL` for the API to the same host and database with user `ask_reader` and that password.
+
+Without `ASK_DATABASE_URL`, or if that login is a superuser, bypasses RLS, or belongs to a role that does, the API
+logs `Ask is disabled: …` at start-up (never the URL) and `/ask` answers 503. Everything else keeps working.

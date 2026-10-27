@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the local Supabase stack (idempotent) and write the dev env files:
 #   web/.env.local      - what the PWA needs (public URL + anon key + API URL)
-#   .env.server.local   - what the API / worker need (DB URL, JWT secret, JWKS URL)
+#   .env.server.local   - what the API / worker need (DB URL, Ask DB URL, JWT secret, JWKS URL)
 # Both files are gitignored. The JWT secret is written to a file only, never echoed.
 set -euo pipefail
 
@@ -25,6 +25,36 @@ for v in API_URL ANON_KEY JWT_SECRET DB_URL; do
   fi
 done
 
+# Ask runs the analyst's SQL on its own login, ask_reader (migration 0006): not a superuser, cannot bypass RLS,
+# can only become `authenticated`. Give it a fresh random password on every run; it goes to .env.server.local only.
+PY="python"
+command -v "$PY" >/dev/null 2>&1 || PY="python3"
+ASK_DB_URL="$(DB_URL="$DB_URL" "$PY" - <<'PYEOF' | tr -d '\r'
+import os
+import secrets
+from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
+
+import psycopg
+from psycopg import sql
+
+url = os.environ["DB_URL"]
+password = secrets.token_urlsafe(24)
+with psycopg.connect(url, autocommit=True) as c:
+    if c.execute("select 1 from pg_roles where rolname = 'ask_reader'").fetchone() is None:
+        # A stack started before migration 0006 existed: apply it (it is idempotent); `db reset` also does.
+        c.execute(Path("supabase/migrations/0006_ask_reader.sql").read_text(encoding="utf-8"))
+    c.execute(sql.SQL("alter role ask_reader login password {}").format(sql.Literal(password)))
+p = urlsplit(url)
+host = p.hostname + (f":{p.port}" if p.port else "")
+print(urlunsplit((p.scheme, f"ask_reader:{quote(password, safe='')}@{host}", p.path, p.query, p.fragment)))
+PYEOF
+)"
+if [ -z "$ASK_DB_URL" ]; then
+  echo "could not set up the ask_reader login" >&2
+  exit 1
+fi
+
 mkdir -p web
 umask 077
 cat > web/.env.local <<EOF
@@ -38,6 +68,7 @@ EOF
 # only if you also want HS256 tokens and remove the JWKS line.
 cat > .env.server.local <<EOF
 DATABASE_URL=$DB_URL
+ASK_DATABASE_URL=$ASK_DB_URL
 # SUPABASE_JWT_SECRET=$JWT_SECRET
 SUPABASE_JWKS_URL=$API_URL/auth/v1/.well-known/jwks.json
 EOF
@@ -45,4 +76,5 @@ EOF
 echo "Supabase API URL : $API_URL"
 echo "Anon key         : $ANON_KEY"
 echo "JWT secret       : written to .env.server.local (not printed)"
+echo "Ask DB login     : ask_reader, random password written to .env.server.local (not printed)"
 echo "Wrote web/.env.local and .env.server.local"

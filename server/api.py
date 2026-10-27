@@ -40,7 +40,32 @@ def ask_fake_enabled() -> bool:
 async def lifespan(_app):
     if ask_fake_enabled():  # raises on a non-local database, so the API refuses to start
         log.warning("ASK_FAKE=1: /ask answers from a fixed query without the LLM (local end-to-end runs only)")
+    conn, problem = open_ask_conn()
+    if problem:  # the rest of the API still serves; /ask answers 503 until this is fixed
+        log.error("Ask is disabled: %s", problem)
+    else:
+        conn.close()
     yield
+
+
+def open_ask_conn():
+    """(connection, None) on the Ask database login (ASK_DATABASE_URL, the ask_reader role), or (None, problem).
+    The problem text never contains the URL or any credential."""
+    url = os.environ.get("ASK_DATABASE_URL", "")
+    if not url:
+        return None, "ASK_DATABASE_URL is not set"
+    try:
+        conn = psycopg.connect(url, autocommit=True, connect_timeout=5)
+    except Exception as e:
+        return None, f"cannot connect to ASK_DATABASE_URL ({type(e).__name__})"
+    try:
+        problem = ask.reader_problem(conn)
+    except psycopg.Error as e:
+        problem = f"cannot check the Ask database role ({type(e).__name__})"
+    if problem:
+        conn.close()
+        return None, problem
+    return conn, None
 
 
 class CorsFromEnv:
@@ -94,6 +119,17 @@ class AskBody(BaseModel):
 
 def get_conn():
     conn = psycopg.connect(settings().database_url, autocommit=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_ask_conn():
+    conn, problem = open_ask_conn()
+    if problem:
+        log.error("/ask refused: %s", problem)
+        raise HTTPException(503, "Ask is unavailable")
     try:
         yield conn
     finally:
@@ -219,7 +255,7 @@ def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depen
 
 
 @app.post("/ask")
-def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_ask_conn)):
     if ask_fake_enabled():
         return {"answer": ask.fake_answer(conn, user)}
     try:

@@ -1,27 +1,70 @@
 """Ask: the insights analyst over the caller's own rows in Postgres.
 
-Every query the model writes goes through scoped_sql, which runs it as role `authenticated` with the caller's JWT
-claims (so row-level security shows only their rows), in a read-only transaction that is always rolled back, with a
-statement timeout and a row cap. The model's SQL is untrusted (a user can ask it to run anything), so the plan is
-inspected before execution: a SELECT can call functions, and set_config() could rewrite the claims or the role
-mid-statement, and a few functions run SQL text at execution time where no static check could see it.
+The model's SQL is untrusted: a user can ask it to run anything. scoped_sql layers four controls:
+1. An allowlist over the parse tree (pglast, Postgres's own parser): one SELECT, only known node types, only analyst
+   functions (so never set_config(), which could rewrite the role or the JWT claims RLS reads), only the order tables
+   and spend views (or CTEs defined in the query), no INTO and no row locks.
+2. The connection's session user is expected to be the dedicated `ask_reader` login (see migration 0006 and
+   server/api.py, which refuses a superuser or RLS-bypassing session): it can only become `authenticated`.
+3. The query runs as role `authenticated` with the caller's JWT claims, so row-level security shows only their
+   rows, in a read-only transaction with a statement timeout, always rolled back; at most MAX_ROWS rows come back.
+4. The role and claims are checked again after the query; database error text is returned only for errors raised
+   before execution (parse / plan), never for errors raised while the query ran.
 """
 import json
-import re
+import logging
 import uuid
 from decimal import Decimal
 
+import pglast
 import psycopg
+from pglast import ast
 
 import agent
 import insights
+
+log = logging.getLogger("server.ask")
 
 MAX_ROWS = 200
 MAX_QUERY_CHARS = 10_000
 STATEMENT_TIMEOUT = "5s"
 
+ALLOWED_TABLES = frozenset({"orders", "order_items", "item_categories", "monthly_spend", "category_spend",
+                            "merchant_spend"})
+
+ALLOWED_FUNCTIONS = frozenset({
+    # aggregates
+    "sum", "count", "avg", "min", "max", "string_agg", "array_agg", "bool_and", "bool_or",
+    # date / time (timezone is what `x AT TIME ZONE 'Asia/Kolkata'` parses to)
+    "date_trunc", "date_part", "extract", "to_char", "to_date", "to_timestamp", "now", "age", "make_date",
+    "justify_days", "justify_hours", "justify_interval", "timezone",
+    # strings
+    "lower", "upper", "trim", "btrim", "ltrim", "rtrim", "length", "substr", "substring", "replace", "split_part",
+    "concat", "concat_ws", "left", "right", "position", "strpos", "initcap", "regexp_replace", "regexp_match",
+    # math
+    "round", "floor", "ceil", "ceiling", "abs", "greatest", "least", "coalesce", "nullif", "div", "mod", "power",
+    "sqrt",
+    # window and ordered-set
+    "row_number", "rank", "dense_rank", "lag", "lead", "first_value", "last_value", "ntile", "percent_rank",
+    "cume_dist", "percentile_cont", "percentile_disc",
+    # ours (migration 0005)
+    "norm_name",
+})
+PUBLIC_FUNCTIONS = frozenset({"norm_name"})  # called unqualified only; never pg_catalog.norm_name
+
+# Parse-tree node types an analyst SELECT needs. Anything else (XML, JSON constructors, ROWS FROM, TABLESAMPLE,
+# parameters, named arguments, any non-SELECT statement...) is refused.
+ALLOWED_NODES = frozenset({
+    "SelectStmt", "ResTarget", "ColumnRef", "A_Const", "A_Star", "A_Expr", "BoolExpr", "FuncCall", "RangeVar",
+    "JoinExpr", "RangeSubselect", "SubLink", "WithClause", "CommonTableExpr", "SortBy", "TypeCast", "TypeName",
+    "CaseExpr", "CaseWhen", "CoalesceExpr", "MinMaxExpr", "NullTest", "BooleanTest", "WindowDef", "GroupingSet",
+    "SQLValueFunction", "A_ArrayExpr", "A_Indices", "A_Indirection", "RowExpr", "CollateClause", "Alias",
+    "String", "Integer", "Float", "Boolean",
+})
+REFUSED_PLAN_NODES = {"ModifyTable", "LockRows"}  # backstop behind the parse-tree check
+
 SCHEMA = """PostgreSQL. You see only your own rows (amounts in INR; placed_at is ISO-8601 local time text, so
-left(placed_at, 7) = 'YYYY-MM'). Tables:
+substr(placed_at, 1, 7) = 'YYYY-MM'). Tables:
 orders(site text -- blinkit|zepto|swiggy|zomato, order_id text, sub_platform text -- 'instamart' for Swiggy Instamart,
        placed_at text, total_amount double precision -- what was paid, currency text,
        status text -- delivered|cancelled|refunded|failed|..., merchant text -- restaurant/store name, may be NULL)
@@ -35,8 +78,14 @@ category_spend(month text 'YYYY-MM', category text -- 'food delivery' for Zomato
 merchant_spend(merchant, site, orders bigint, amount numeric, last_order_at text)
 Rules: when using the tables directly, exclude status IN ('cancelled','refunded','failed') from spend. Zomato and
 Swiggy orders (except sub_platform 'instamart') are food delivery. Join categories with
-item_categories.name_norm = norm_name(order_items.name). Only plain SELECT/WITH queries are allowed; functions
-named pg_*, set_config and the xml functions are refused."""
+item_categories.name_norm = norm_name(order_items.name).
+Only one plain SELECT (WITH allowed) over these tables and views. Functions allowed: aggregates (sum, count, avg,
+min, max, string_agg, array_agg, bool_and, bool_or), date_trunc, date_part, extract, to_char, to_date, to_timestamp,
+now, current_date, age, make_date, AT TIME ZONE, string functions (lower, upper, trim, length, substr, substring,
+replace, split_part, concat, left, right, position, strpos, initcap, regexp_replace, regexp_match), math (round,
+floor, ceil, abs, greatest, least, coalesce, nullif, div, mod, power, sqrt), window functions (row_number, rank,
+dense_rank, lag, lead, first_value, last_value, ntile, percent_rank, cume_dist, percentile_cont, percentile_disc)
+and norm_name. Casts (::numeric, ::date, ::int) are fine."""
 
 ANALYST = insights.analyst_prompt(SCHEMA)
 RUN_SQL = insights.sql_tool(f"Run one read-only PostgreSQL SELECT query over your own orders; returns up to "
@@ -44,20 +93,7 @@ RUN_SQL = insights.sql_tool(f"Run one read-only PostgreSQL SELECT query over you
 
 FAKE_QUERY = "select site, sum(amount) as amount from monthly_spend group by site order by site"
 
-# Functions the model may not call, whatever the arguments. set_config rewrites the role or the JWT claims RLS reads;
-# query_to_xml & co., ts_stat and ts_rewrite execute SQL text at run time; pg_* covers sleeping, signalling backends,
-# reading server files, advisory locks and NOTIFY; lo_* reads and writes server files; the rest touch sequences.
-DENIED = re.compile(r"^(set_config|ts_stat|ts_rewrite|nextval|setval|currval|lastval)$|xml|^pg_|^lo_|^txid_"
-                    r"|^dblink|^binary_upgrade_")
-# Functions outside pg_catalog that the views and RLS policies use (read-only helpers).
-ALLOWED_QUALIFIED = {("auth", "uid"), ("auth", "jwt"), ("auth", "role"), ("auth", "email")}
-PUBLIC_ALLOWED = {"norm_name"}
-REFUSED_NODES = {"ModifyTable", "LockRows"}
-
-# One pass over deparsed SQL: string literals and double-quoted identifiers are consumed whole, so a quote inside one
-# can never hide what follows it.
-_TOKEN = re.compile(r"""(?P<str>'(?:[^']|'')*')|(?P<qid>"(?:[^"]|"")*")|(?P<id>[A-Za-z_][\w$]*)|(?P<ws>\s+)|(?P<other>.)""",
-                    re.S)
+SCOPE_CHANGED = "the query was refused"  # generic on purpose: nothing from the database
 
 
 def default_llm():
@@ -67,7 +103,7 @@ def default_llm():
 def answer(conn, user_id: str, question: str, llm=None) -> str:
     """Run the insights analyst loop with run_sql bound to scoped_sql for this user."""
     return insights.ask(question, sql_runner=lambda query: scoped_sql(conn, user_id, query),
-                        system=ANALYST, tool=RUN_SQL, client=llm or default_llm())
+                        system=ANALYST, tool=RUN_SQL, client=llm or default_llm(), sql_log_level=logging.DEBUG)
 
 
 def fake_answer(conn, user_id: str) -> str:
@@ -89,8 +125,82 @@ def markdown_table(columns: list[str], rows: list[tuple]) -> str:
     return "\n".join(lines)
 
 
+def reader_problem(conn) -> str | None:
+    """Why this connection must not run Ask SQL, or None. Its session user must not be, or belong to, a superuser
+    or a role that bypasses row-level security (it should be ask_reader, which can only become authenticated)."""
+    bad = conn.execute(
+        "select exists (select 1 from pg_roles r where (r.rolsuper or r.rolbypassrls)"
+        " and pg_has_role(session_user, r.oid, 'MEMBER'))").fetchone()[0]
+    if bad:
+        return "the Ask database role is a superuser or bypasses row-level security; use the ask_reader login"
+    if not conn.execute("select pg_has_role(session_user, 'authenticated', 'MEMBER')").fetchone()[0]:
+        return "the Ask database role cannot become authenticated"
+    return None
+
+
+# --- the parse-tree allowlist --------------------------------------------------------------------------------
+
+def _walk(node):
+    if isinstance(node, ast.Node):
+        yield node
+        for field in node:
+            yield from _walk(getattr(node, field))
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _walk(item)
+
+
+def _names(parts) -> list[str]:
+    return [p.sval for p in parts or ()]
+
+
+def check_query(query: str) -> tuple[str | None, set[str]]:
+    """(refusal reason or None, CTE names) for one analyst query, from Postgres's own parse tree."""
+    try:
+        stmts = pglast.parse_sql(query)
+    except pglast.parser.ParseError as e:
+        return f"syntax error: {e}", set()
+    if len(stmts) != 1:
+        return "exactly one SELECT statement is allowed", set()
+    root = stmts[0].stmt
+    if not isinstance(root, ast.SelectStmt):
+        return "only a SELECT (optionally WITH ... SELECT) is allowed", set()
+    nodes = list(_walk(root))
+    ctes = {n.ctename for n in nodes if isinstance(n, ast.CommonTableExpr)}
+    for n in nodes:
+        kind = type(n).__name__
+        if isinstance(n, ast.SelectStmt):
+            if n.intoClause is not None:
+                return "SELECT INTO is not allowed", ctes
+            if n.lockingClause:
+                return "row locks (FOR UPDATE / FOR SHARE) are not allowed", ctes
+        if kind not in ALLOWED_NODES:
+            return f"{kind} is not allowed in an analyst query", ctes
+        if isinstance(n, ast.FuncCall):
+            parts = _names(n.funcname)
+            name = parts[-1] if parts else ""
+            ok = (len(parts) == 1 and name in ALLOWED_FUNCTIONS) or (
+                len(parts) == 2 and parts[0] == "pg_catalog" and name in ALLOWED_FUNCTIONS - PUBLIC_FUNCTIONS)
+            if not ok:
+                return f"function {'.'.join(parts)}() is not allowed", ctes
+        elif isinstance(n, ast.RangeVar):
+            qualified = n.catalogname or n.schemaname
+            if n.relname in ALLOWED_TABLES and n.schemaname in (None, "public") and not n.catalogname:
+                continue
+            if not qualified and n.relname in ctes:
+                continue
+            return f"table {'.'.join(p for p in (n.catalogname, n.schemaname, n.relname) if p)} is not allowed", ctes
+        elif isinstance(n, ast.A_Expr) and len(_names(n.name)) > 1:
+            return "schema-qualified operators are not allowed", ctes
+        elif isinstance(n, ast.CommonTableExpr) and not isinstance(n.ctequery, ast.SelectStmt):
+            return "WITH may only contain SELECT queries", ctes
+    return None, ctes
+
+
+# --- running a query ---------------------------------------------------------------------------------------
+
 def scoped_sql(conn, user_id: str, query: str) -> dict:
-    """Run one read-only SELECT/WITH as `user_id`. Returns {columns, rows, truncated} or {error}.
+    """Run one read-only analyst SELECT as `user_id`. Returns {columns, rows, truncated} or {error}.
 
     conn must be an idle autocommit connection: the query gets its own read-only transaction, which is always
     rolled back, so no role, claim or setting outlives the call."""
@@ -98,112 +208,76 @@ def scoped_sql(conn, user_id: str, query: str) -> dict:
         raise ValueError("scoped_sql needs an idle autocommit connection: each query runs in its own read-only "
                          "transaction")
     uid = str(uuid.UUID(str(user_id)))
-    body = (query or "").strip().rstrip(";").rstrip()
-    if not insights.READ_ONLY.match(body) or ";" in body:
-        return {"error": "only a single SELECT/WITH query is allowed"}
+    body = (query or "").strip()
     if len(body) > MAX_QUERY_CHARS:
         return {"error": f"query is longer than {MAX_QUERY_CHARS} characters"}
+    refusal, ctes = check_query(body)
+    if refusal:
+        return {"error": refusal}
     conn.execute("begin read only")
     try:
-        conn.execute("set local role authenticated")
-        conn.execute("select set_config('request.jwt.claim.sub', %s, true), set_config('request.jwt.claims', %s, true)",
-                     (uid, json.dumps({"sub": uid, "role": "authenticated"})))
-        conn.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
-        conn.execute("set local search_path = pg_catalog, public")
-        if not _in_scope(conn, uid):
-            raise RuntimeError("scoped_sql could not enter the caller's read-only scope")
-        try:
+        _enter_scope(conn, uid)
+        # A CTE name that is also a real relation would reach that relation wherever the CTE is out of scope.
+        shadowing = [r[0] for r in conn.execute(
+            "select n from unnest(%s::text[]) n where to_regclass(quote_ident(n)) is not null", (sorted(ctes),))]
+        shadowing = [n for n in shadowing if n not in ALLOWED_TABLES]
+        if shadowing:
+            return {"error": f"rename the CTE {shadowing[0]!r}: it shadows a database table"}
+        try:  # planning only: nothing has executed, so the database's message is safe to return
             plan = conn.execute("explain (verbose, format json) " + body).fetchone()[0]
-            refusal = _refusal(conn, plan)
-            if refusal:
-                return {"error": refusal}
+        except psycopg.Error as e:
+            return {"error": _plan_error(e)}
+        if any(n.get("Node Type") in REFUSED_PLAN_NODES for n in _plan_nodes(plan)):
+            return {"error": "only plain reads are allowed (no data changes or row locks)"}
+        try:
             # A server-side cursor: at most MAX_ROWS + 1 rows ever leave the database.
             with conn.cursor(name="ask_sql") as cur:
                 cur.execute(body)
                 columns = [d.name for d in cur.description or []]
                 rows = cur.fetchmany(MAX_ROWS + 1)
-            if not _in_scope(conn, uid):  # belt and braces: the statement must not have changed who it ran as
-                return {"error": "the query changed its own role or claims"}
         except psycopg.Error as e:
-            return {"error": str(e).strip() or type(e).__name__}
+            # Raised while the query ran: its text may carry values the query computed, so only the error class.
+            return {"error": f"the query failed while running ({type(e).__name__})"}
+        if not _in_scope(conn, uid):  # the statement must not have changed who it ran as
+            return {"error": SCOPE_CHANGED}
         return {"columns": columns, "rows": [tuple(r) for r in rows[:MAX_ROWS]], "truncated": len(rows) > MAX_ROWS}
     finally:
         conn.execute("rollback")
 
 
+def _enter_scope(conn, uid: str) -> None:
+    """Inside an open read-only transaction: become `authenticated` with uid's claims, a statement timeout and a
+    fixed search path. Every setting is LOCAL, so the rollback undoes it."""
+    conn.execute("set local role authenticated")
+    conn.execute("select set_config('request.jwt.claim.sub', %s, true), set_config('request.jwt.claims', %s, true)",
+                 (uid, json.dumps({"sub": uid, "role": "authenticated"})))
+    conn.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
+    conn.execute("set local search_path = pg_catalog, public")
+    if not _in_scope(conn, uid):
+        raise RuntimeError("scoped_sql could not enter the caller's read-only scope")
+
+
 def _in_scope(conn, uid: str) -> bool:
     row = conn.execute("select current_user::text, current_setting('transaction_read_only'), "
-                       "current_setting('request.jwt.claim.sub', true)").fetchone()
-    return row == ("authenticated", "on", uid)
+                       "current_setting('request.jwt.claim.sub', true), current_setting('request.jwt.claims', true)"
+                       ).fetchone()
+    try:
+        claims = json.loads(row[3] or "null")
+    except ValueError:
+        return False
+    return row[:3] == ("authenticated", "on", uid) and claims == {"sub": uid, "role": "authenticated"}
 
 
-def _strings(node):
+def _plan_error(e: psycopg.Error) -> str:
+    msg = (getattr(e.diag, "message_primary", None) or type(e).__name__).strip()
+    return msg[:300]
+
+
+def _plan_nodes(node):
     if isinstance(node, dict):
+        yield node
         for v in node.values():
-            yield from _strings(v)
+            yield from _plan_nodes(v)
     elif isinstance(node, list):
         for v in node:
-            yield from _strings(v)
-    elif isinstance(node, str):
-        yield node
-
-
-def _nodes(node):
-    if isinstance(node, dict):
-        yield node
-        for v in node.values():
-            yield from _nodes(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from _nodes(v)
-
-
-def _ident(kind: str, text: str) -> str:
-    return text[1:-1].replace('""', '"') if kind == "qid" else text
-
-
-def function_calls(text: str) -> set[tuple[str | None, str]]:
-    """(schema or None, name) of every `name(` / `schema.name(` in deparsed SQL, outside string literals."""
-    toks = [(m.lastgroup, m.group()) for m in _TOKEN.finditer(text) if m.lastgroup != "ws"]
-    calls = set()
-    for i, (kind, tok) in enumerate(toks):
-        if tok != "(" or i == 0 or toks[i - 1][0] not in ("id", "qid"):
-            continue
-        name = _ident(*toks[i - 1])
-        schema = None
-        if i >= 3 and toks[i - 2][1] == "." and toks[i - 3][0] in ("id", "qid"):
-            schema = _ident(*toks[i - 3])
-        calls.add((schema, name))
-    return calls
-
-
-def _refusal(conn, plan) -> str | None:
-    """Why the planned query may not run, or None. Works on EXPLAIN VERBOSE output, where views and inlined
-    functions are expanded and names are normalised (U& escapes, quoting) by Postgres itself."""
-    calls = set()
-    for node in _nodes(plan):
-        if node.get("Node Type") in REFUSED_NODES:
-            return "only plain reads are allowed (no data changes or row locks)"
-        if "Function Name" in node:
-            calls.add((node.get("Schema"), node["Function Name"]))
-    for s in _strings(plan):
-        calls |= function_calls(s)
-    unqualified = set()
-    for schema, name in calls:
-        if schema in (None, "pg_catalog"):
-            if DENIED.search(name.lower()):
-                return f"function {name}() is not allowed"
-            if schema is None:
-                unqualified.add(name)
-        elif schema == "public":
-            if name not in PUBLIC_ALLOWED:
-                return f"function {schema}.{name}() is not allowed"
-        elif (schema, name) not in ALLOWED_QUALIFIED:
-            return f"function {schema}.{name}() is not allowed"
-    if unqualified:  # with search_path pg_catalog, public an unqualified call may also be a public function
-        public = {r[0] for r in conn.execute(
-            "select distinct proname::text from pg_proc where pronamespace = 'public'::regnamespace "
-            "and proname = any(%s)", (sorted(unqualified),))}
-        if public - PUBLIC_ALLOWED:
-            return f"function {sorted(public - PUBLIC_ALLOWED)[0]}() is not allowed"
-    return None
+            yield from _plan_nodes(v)
