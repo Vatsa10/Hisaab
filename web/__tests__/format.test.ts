@@ -14,10 +14,16 @@ describe("formatINR", () => {
     expect(formatINR(5113.4)).toBe("₹5,113");
   });
 
-  it("shows two decimals below ₹100", () => {
+  it("shows two decimals below ₹100 only when there are paise", () => {
     expect(formatINR(49.5)).toBe("₹49.50");
-    expect(formatINR(7)).toBe("₹7.00");
     expect(formatINR(0.05)).toBe("₹0.05");
+  });
+
+  it("never shows .00 on whole rupees", () => {
+    expect(formatINR(90)).toBe("₹90");
+    expect(formatINR(7)).toBe("₹7");
+    expect(formatINR(96.999)).toBe("₹97");
+    expect(formatINR(-40)).toBe("-₹40");
   });
 
   it("does not show ₹100.00 for amounts that round up to 100", () => {

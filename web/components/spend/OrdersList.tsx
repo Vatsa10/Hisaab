@@ -109,15 +109,18 @@ export function OrdersList({ site, month }: OrdersListProps) {
   const groups = useMemo(() => groupByMonth(orders), [orders]);
 
   const filterLabel = [site ? appLabel(site).name : null, month ? monthLabel(month) : null].filter(Boolean).join(" · ");
+  // Filtered by app: the app is the title under an "Orders" eyebrow. The month (if any) is not
+  // repeated here; the month heading below already says it.
   const header = (
     <PageHeader
-      title="Orders"
-      subtitle={filterLabel || undefined}
+      eyebrow={site ? "Orders" : undefined}
+      title={site ? appLabel(site).name : "Orders"}
       action={
         filterLabel ? (
+          // 44px tall, text sat on the bottom so its baseline lines up with the title's.
           <Link
             href="/orders"
-            className="-mr-2 inline-flex min-h-11 items-center rounded-control px-2 text-body font-semibold text-accent transition-opacity active:opacity-60"
+            className="-mr-2 inline-flex min-h-11 items-end rounded-control px-2 pb-0.5 text-body font-semibold text-accent transition-opacity active:opacity-60"
           >
             Show all
           </Link>
@@ -225,7 +228,7 @@ function MonthSection({ group }: { group: MonthGroup }) {
     <section aria-labelledby={headingId}>
       <h2
         id={headingId}
-        className="sticky top-0 z-10 bg-canvas pb-2 pt-4 text-label font-semibold text-ink-muted"
+        className="sticky top-0 z-10 mb-2 border-b border-line-soft bg-canvas pb-1.5 pt-4 text-label font-semibold text-ink-muted"
       >
         {group.label}
       </h2>
@@ -244,7 +247,12 @@ const OrderRow = memo(function OrderRow({ order }: { order: OrderSummary }) {
   const app = appLabel(order.site, order.subPlatform);
   const merchant = distinctMerchant(order.merchant, app);
   const voided = voidedLabel(order.status);
-  const meta = [merchant ? app.name : null, app.sub, shortDate(order.placedAt)].filter(Boolean).join(" · ");
+  // Title: the restaurant or store, else the sub-platform (Instamart), else the app. The meta line
+  // names the app whenever the title isn't it ("Instamart" / "Swiggy · 19 Sep"), as on the detail page.
+  const title = merchant ?? app.sub ?? app.name;
+  const meta = [merchant || app.sub ? app.name : null, merchant ? app.sub : null, shortDate(order.placedAt)]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <li className="border-b border-line-soft last:border-b-0">
@@ -255,10 +263,12 @@ const OrderRow = memo(function OrderRow({ order }: { order: OrderSummary }) {
         <AppDot className={app.dotClass} />
         <span className="min-w-0 flex-1">
           <span data-title="" className="block truncate text-body font-medium">
-            {merchant ?? app.name}
+            {title}
           </span>
           <span className="mt-0.5 flex min-w-0 items-center gap-2">
-            <span className="truncate text-label text-ink-muted">{meta}</span>
+            <span data-meta="" className="truncate text-label text-ink-muted">
+              {meta}
+            </span>
             {voided ? <VoidBadge>{voided}</VoidBadge> : null}
           </span>
         </span>

@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Money } from "@/components/ui/Money";
 import { cn } from "@/lib/cn";
+import { formatINR } from "@/lib/format";
 import { getOrder } from "@/lib/queries";
 import { appLabel, distinctMerchant, longDateTime, qtyLabel, statusLabel, voidedLabel } from "./display";
 import { AppDot, LoadError, Skeleton, VoidBadge } from "./parts";
@@ -105,11 +106,8 @@ function Detail({ order }: { order: NonNullable<Awaited<ReturnType<typeof getOrd
         </Card>
 
         <Card as="section" aria-labelledby={itemsId} padding="none" className="overflow-hidden">
-          <h2 id={itemsId} className="flex items-baseline justify-between px-4 pb-1 pt-4 text-label text-ink-muted">
-            <span>Items</span>
-            <span>
-              {order.items.length} {order.items.length === 1 ? "item" : "items"}
-            </span>
+          <h2 id={itemsId} className="px-4 pb-1 pt-4 text-label text-ink-muted">
+            {order.items.length} {order.items.length === 1 ? "item" : "items"}
           </h2>
           {order.items.length === 0 ? (
             <p className="px-4 pb-4 pt-1 text-body text-ink-muted">{app.name} didn&apos;t list the items for this order.</p>
@@ -120,7 +118,7 @@ function Detail({ order }: { order: NonNullable<Awaited<ReturnType<typeof getOrd
                   <span className="min-w-0 flex-1">
                     <span className="block break-words text-body">{item.name ?? "Unnamed item"}</span>
                     {item.qty !== null ? (
-                      <span className="mt-0.5 block text-label tabular-nums text-ink-muted">×{qtyLabel(item.qty)}</span>
+                      <span className="mt-0.5 block text-label tabular-nums text-ink-muted">{qtyLine(item.qty, item.price)}</span>
                     ) : null}
                   </span>
                   {item.price !== null ? (
@@ -137,11 +135,22 @@ function Detail({ order }: { order: NonNullable<Awaited<ReturnType<typeof getOrd
           )}
         </Card>
         {order.items.length > 0 && !anyPrice ? (
-          <p className="px-1 text-label text-ink-muted">{app.name} doesn&apos;t list item prices, only the order total.</p>
+          <p className="px-4 text-label text-ink-muted">{app.name} doesn&apos;t list item prices, only the order total.</p>
         ) : null}
       </div>
     </>
   );
+}
+
+/**
+ * The line under an item's name. A stored `price` is the line total: recipes.py multiplies a
+ * per-unit price by qty before saving (`price_is_unit`), and the category_spend view sums it
+ * as-is. So with qty above 1 the unit price is derived ("2 × ₹199", with ₹398 on the right);
+ * otherwise just the quantity ("×1").
+ */
+function qtyLine(qty: number, price: number | null): string {
+  if (price !== null && qty > 1) return `${qtyLabel(qty)} × ${formatINR(price / qty)}`;
+  return `×${qtyLabel(qty)}`;
 }
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {

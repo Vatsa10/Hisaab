@@ -25,8 +25,9 @@ function groupIndian(digits: string): string {
 }
 
 /**
- * Rupees with Indian grouping: whole rupees from ₹100 up ("₹1,23,456"), two decimals below
- * ("₹49.50"). Zero is "₹0" (as in the approved mockup); refunds are "-₹1,500"; NaN/Infinity is "—".
+ * Rupees with Indian grouping: whole rupees from ₹100 up ("₹1,23,456"); below ₹100 two decimals
+ * only when there are paise ("₹49.50", but "₹90", never "₹90.00"). Zero is "₹0" (as in the
+ * approved mockup); refunds are "-₹1,500"; NaN/Infinity is "—".
  */
 export function formatINR(amount: number): string {
   if (!Number.isFinite(amount)) return "—";
@@ -38,6 +39,7 @@ export function formatINR(amount: number): string {
     return `${sign}₹${groupIndian(String(rupees))}`;
   }
   const rupees = Math.floor(cents / 100);
+  if (cents % 100 === 0) return `${sign}₹${rupees}`;
   const paise = String(cents % 100).padStart(2, "0");
   return `${sign}₹${rupees}.${paise}`;
 }

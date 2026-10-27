@@ -6,7 +6,7 @@ import { buttonClassName } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { monthLabel } from "@/lib/format";
-import { getMonthlySpend, getTopMerchants } from "@/lib/queries";
+import { getMonthlySpend, getSpendToDate, getTopMerchants } from "@/lib/queries";
 import { AppBreakdown } from "./AppBreakdown";
 import { CategoryList } from "./CategoryList";
 import { LoadError, Skeleton } from "./parts";
@@ -22,10 +22,16 @@ export interface SpendDashboardProps {
   today?: Date;
 }
 
+/** "2026-09" -> "September" */
+function monthName(month: string): string {
+  return monthLabel(month).split(" ")[0] ?? month;
+}
+
 /**
  * The home screen (mockup A, "dashboard first"): month eyebrow and "Spending" title, the total
  * card with six monthly bars, the per-app card, "Top this year" and the selected month's
- * categories. With no spend at all it is the same layout at zero, plus "Connect an app".
+ * categories. With no spend in the last six months it is the same layout at zero, plus
+ * "Connect an app" (and when the last order was, if there ever was one).
  */
 export function SpendDashboard({ today }: SpendDashboardProps) {
   // The month comes from the phone's clock and time zone, never the server's, so it is only
@@ -33,17 +39,27 @@ export function SpendDashboard({ today }: SpendDashboardProps) {
   const isClient = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const now = today ?? (isClient ? new Date() : null);
   const current = now ? monthKey(now) : null;
+  const day = now ? now.getDate() : null;
   const year = current ? Number(current.slice(0, 4)) : null;
 
   const monthly = useLoad(current === null ? null : "monthly", () => getMonthlySpend());
   const top = useLoad(year === null ? null : String(year), () => getTopMerchants(year ?? 0));
   const [picked, setPicked] = useState<string | null>(null);
 
+  const monthlyData = monthly.status === "ready" ? monthly.data : null;
   const summary = useMemo(() => {
-    if (monthly.status !== "ready" || current === null) return null;
+    if (monthlyData === null || current === null) return null;
     const [y, m] = current.split("-").map(Number);
-    return buildSpendSummary(monthly.data, new Date(y ?? 1970, (m ?? 1) - 1, 1));
-  }, [monthly, current]);
+    return buildSpendSummary(monthlyData, new Date(y ?? 1970, (m ?? 1) - 1, 1));
+  }, [monthlyData, current]);
+
+  const selected = summary && picked && summary.months.some((m) => m.month === picked) ? picked : current;
+  // The current month is still running, so it is compared with the same days of last month
+  // (the 1st up to today's day of the month); only that comparison needs another read, and it
+  // starts alongside the monthly read rather than after it.
+  const lastMonth = current ? previousMonth(current) : null;
+  const toDateKey = selected === current && lastMonth && day ? `${lastMonth}|${day}` : null;
+  const toDate = useLoad(toDateKey, () => getSpendToDate(lastMonth ?? "", day ?? 1));
 
   const header = (
     <PageHeader
@@ -61,7 +77,7 @@ export function SpendDashboard({ today }: SpendDashboardProps) {
     );
   }
 
-  if (!summary || current === null) {
+  if (!summary || current === null || selected === null) {
     return (
       <>
         {header}
@@ -70,27 +86,42 @@ export function SpendDashboard({ today }: SpendDashboardProps) {
     );
   }
 
-  if (!summary.hasData) {
+  if (!summary.inWindow) {
     const zero = summary.months[summary.months.length - 1]!;
     return (
       <>
         {header}
         <div className="space-y-3">
-          <TotalCard months={summary.months} currentMonth={current} selectedMonth={current} previousTotal={undefined} empty />
+          <TotalCard
+            months={summary.months}
+            currentMonth={current}
+            selectedMonth={current}
+            previousTotal={undefined}
+            compareLabel=""
+            empty
+          />
           <AppBreakdown byApp={zero.byApp} instamart={0} />
           <div className="pt-2">
             <Link href="/accounts" className={buttonClassName({ size: "lg", fullWidth: true })}>
               Connect an app
             </Link>
-            <p className="mt-2.5 text-center text-label text-ink-muted">Your orders fill this in, month by month.</p>
+            <p className="mt-2.5 text-center text-label text-ink-muted">
+              {summary.lastMonth
+                ? `Your last order was in ${monthLabel(summary.lastMonth)}.`
+                : "Your orders fill this in, month by month."}
+            </p>
           </div>
         </div>
       </>
     );
   }
 
-  const selected = picked && summary.months.some((m) => m.month === picked) ? picked : current;
   const point = summary.months.find((m) => m.month === selected)!;
+  const prev = previousMonth(selected);
+  const comparison =
+    selected === current
+      ? { total: toDate.status === "ready" ? toDate.data : undefined, label: `this time in ${monthName(prev)}` }
+      : { total: summary.monthTotals[prev], label: monthName(prev) };
   const best = top.status === "ready" ? top.data[0] : undefined;
 
   return (
@@ -101,7 +132,9 @@ export function SpendDashboard({ today }: SpendDashboardProps) {
           months={summary.months}
           currentMonth={current}
           selectedMonth={selected}
-          previousTotal={summary.monthTotals[previousMonth(selected)]}
+          previousTotal={comparison.total}
+          compareLabel={comparison.label}
+          comparing={selected === current && toDate.status === "loading"}
           onSelect={setPicked}
         />
         <AppBreakdown byApp={point.byApp} instamart={point.instamart} month={selected} />

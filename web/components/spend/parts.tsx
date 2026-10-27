@@ -3,9 +3,12 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/cn";
 
-/** A grey placeholder block. Size it with classes; it pulses gently (reduced motion: still). */
+/**
+ * A grey placeholder block in the `line` neutral (#e3e5e8), dark enough to read on white cards.
+ * Size it with classes; it pulses gently (reduced motion: still).
+ */
 export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
-  return <span aria-hidden="true" style={style} className={cn("block animate-pulse rounded-tile bg-line-soft", className)} />;
+  return <span aria-hidden="true" style={style} className={cn("block animate-pulse rounded-tile bg-line", className)} />;
 }
 
 /** 8px app colour dot. */
@@ -45,7 +48,7 @@ export function Chevron({ className }: { className?: string }) {
 /** A failed load: says what failed and offers one retry button. */
 export function LoadError({ what, onRetry, className }: { what: string; onRetry: () => void; className?: string }) {
   return (
-    <Card className={cn("px-5 py-5", className)}>
+    <Card className={className}>
       <div role="alert">
         <p className="text-headline">Couldn&apos;t load {what}</p>
         <p className="mt-1 text-body text-ink-muted">Check your connection, then try again.</p>

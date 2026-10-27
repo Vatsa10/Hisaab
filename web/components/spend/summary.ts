@@ -21,6 +21,10 @@ export interface SpendSummary {
   monthTotals: Record<string, number>;
   /** True when the user has any spend at all (in any month). */
   hasData: boolean;
+  /** True when some of that spend falls in the six chart months. */
+  inWindow: boolean;
+  /** The latest "YYYY-MM" with spend, or null when there is none. */
+  lastMonth: string | null;
 }
 
 export const CHART_MONTHS = 6;
@@ -80,13 +84,16 @@ export function buildSpendSummary(rows: readonly MonthlySpendRow[], today: Date)
   }));
   const index = new Map(months.map((m, i) => [m.month, i]));
 
-  let hasData = false;
+  let inWindow = false;
+  let lastMonth: string | null = null;
   const monthTotals: Record<string, number> = {};
   for (const r of rows) {
-    if (r.amount !== 0 || r.orders > 0) hasData = true;
+    const active = r.amount !== 0 || r.orders > 0;
+    if (active && (lastMonth === null || r.month > lastMonth)) lastMonth = r.month;
     monthTotals[r.month] = round2((monthTotals[r.month] ?? 0) + r.amount);
     const i = index.get(r.month);
     if (i === undefined) continue;
+    if (active) inWindow = true;
     const point = months[i]!;
     point.total = round2(point.total + r.amount);
     point.orders += r.orders;
@@ -95,5 +102,5 @@ export function buildSpendSummary(rows: readonly MonthlySpendRow[], today: Date)
     point.byApp[app] = round2(point.byApp[app] + r.amount);
     if (instamart || r.subPlatform === "instamart") point.instamart = round2(point.instamart + r.amount);
   }
-  return { months, monthTotals, hasData };
+  return { months, monthTotals, hasData: lastMonth !== null, inWindow, lastMonth };
 }

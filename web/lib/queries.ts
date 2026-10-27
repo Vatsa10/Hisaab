@@ -166,6 +166,36 @@ export async function getTopMerchants(year: number, c?: SupabaseClient): Promise
   return [...totals.values()].sort((a, b) => b.amount - a.amount || b.orders - a.orders);
 }
 
+/**
+ * Spend in `month` ("YYYY-MM") from the 1st up to and including day `dayOfMonth`, for a fair
+ * month-to-date comparison ("vs this time in September"). Same rule as the views: cancelled,
+ * refunded and failed orders don't count. A day past the month's end simply covers the whole month.
+ */
+export async function getSpendToDate(month: string, dayOfMonth: number, c?: SupabaseClient): Promise<number> {
+  const db = client(c);
+  const end = `${month}-${String(Math.max(1, Math.floor(dayOfMonth)) + 1).padStart(2, "0")}`;
+  let total = 0;
+  for (let from = 0; ; from += READ_CHUNK) {
+    const { data, error } = await db
+      .from("orders")
+      .select("total_amount, status")
+      .gte("placed_at", `${month}-01`)
+      .lt("placed_at", end)
+      .order("site", { ascending: true })
+      .order("order_id", { ascending: true })
+      .range(from, from + READ_CHUNK - 1);
+    if (error) throw new QueryError("last month's spending");
+    const rows = (data ?? []) as Record<string, unknown>[];
+    for (const r of rows) {
+      const status = str(r.status);
+      if (status && NOT_SPENT.has(status)) continue;
+      total += num(r.total_amount);
+    }
+    if (rows.length < READ_CHUNK) break;
+  }
+  return Math.round(total * 100) / 100;
+}
+
 // --- Orders: keyset pagination, newest first --------------------------------------------------
 
 type CursorKey = [placedAt: string | null, site: string, orderId: string];

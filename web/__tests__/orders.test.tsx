@@ -56,6 +56,7 @@ describe("OrdersList", () => {
     expect(biryani).toHaveTextContent("Swiggy");
     expect(biryani).toHaveTextContent("21 Oct");
     expect(biryani).toHaveTextContent("₹649");
+    expect(biryani.querySelector("[data-meta]")).toHaveTextContent("Swiggy · 21 Oct");
 
     // No merchant: the app name is the title.
     const zepto = within(sep).getByRole("link");
@@ -68,8 +69,8 @@ describe("OrdersList", () => {
     q.getOrders.mockResolvedValueOnce({ orders: PAGE_1, nextCursor: null });
     render(<OrdersList />);
     const link = await screen.findByRole("link", { name: /₹300/ });
-    expect(link.querySelector("[data-title]")).toHaveTextContent("Swiggy");
-    expect(link).toHaveTextContent("Instamart");
+    expect(link.querySelector("[data-title]")).toHaveTextContent("Instamart");
+    expect(link.querySelector("[data-meta]")).toHaveTextContent("Swiggy · 12 Oct");
     expect(link.querySelector("[data-app-dot]")).toHaveClass("bg-app-swiggy");
   });
 
@@ -88,6 +89,9 @@ describe("OrdersList", () => {
       .mockResolvedValueOnce({ orders: PAGE_2, nextCursor: null });
     render(<OrdersList site="swiggy" />);
     await screen.findByRole("region", { name: "October 2026" });
+    // Filtered: the app is the title, with "Show all" beside it.
+    expect(screen.getByRole("heading", { level: 1, name: "Swiggy" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Show all" })).toHaveAttribute("href", "/orders");
 
     await userEvent.click(screen.getByRole("button", { name: "Show older orders" }));
     expect(q.getOrders).toHaveBeenLastCalledWith({ site: "swiggy", cursor: "c1" });
@@ -116,6 +120,7 @@ describe("OrderDetailView", () => {
     ...order({ orderId: "a3", site: "zomato", merchant: "Domino's", status: "cancelled", total: 520 }),
     currency: "INR",
     items: [
+      // price is the line total (recipes.py multiplies unit prices by qty before storing).
       { idx: 0, name: "Farmhouse Pizza", qty: 2, price: 398 },
       { idx: 1, name: "Garlic Bread", qty: 1, price: null },
     ],
@@ -129,10 +134,10 @@ describe("OrderDetailView", () => {
     expect(q.getOrder).toHaveBeenCalledWith("zomato", "a3");
     expect(screen.getByText("Cancelled")).toBeInTheDocument();
 
-    const items = within(screen.getByRole("region", { name: /Items/ })).getAllByRole("listitem");
+    const items = within(screen.getByRole("region", { name: "2 items" })).getAllByRole("listitem");
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent("Farmhouse Pizza");
-    expect(items[0]).toHaveTextContent("×2");
+    expect(items[0]).toHaveTextContent("2 × ₹199");
     expect(items[0]).toHaveTextContent("₹398");
     expect(items[1]).toHaveTextContent("Garlic Bread");
     expect(items[1]).toHaveTextContent("×1");

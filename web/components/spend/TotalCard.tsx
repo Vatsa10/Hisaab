@@ -5,12 +5,8 @@ import { Card } from "@/components/ui/Card";
 import { Money } from "@/components/ui/Money";
 import { cn } from "@/lib/cn";
 import { formatINR, monthLabel, pctChange } from "@/lib/format";
-import { previousMonth, shortMonth, type MonthPoint } from "./summary";
-
-/** "2026-09" -> "September" */
-function monthName(month: string): string {
-  return monthLabel(month).split(" ")[0] ?? month;
-}
+import { Skeleton } from "./parts";
+import { shortMonth, type MonthPoint } from "./summary";
 
 /** Placeholder silhouette for the empty chart (the approved mockup's bar shape, faded). */
 const GHOST_HEIGHTS = [48, 96, 100, 50, 36, 16];
@@ -19,8 +15,12 @@ export interface TotalCardProps {
   months: MonthPoint[];
   currentMonth: string;
   selectedMonth: string;
-  /** Total of the month before the selected one (0 or missing: no comparison). */
+  /** What the selected total is compared with (0 or missing: no comparison shown). */
   previousTotal: number | undefined;
+  /** Names that comparison: "this time in September" (month to date) or "August" (whole month). */
+  compareLabel: string;
+  /** The comparison is still loading: hold its line with a placeholder so nothing shifts. */
+  comparing?: boolean;
   onSelect?: (month: string) => void;
   /** Mockup A at zero: ₹0, faded bars that do nothing. */
   empty?: boolean;
@@ -28,16 +28,25 @@ export interface TotalCardProps {
 
 /**
  * The big number: the selected month's total (the current month reads "This month so far"), its
- * change against the month before (green ▼ when less, orange ▲ when more, hidden when there is
- * nothing to compare with), and six monthly bars. Tapping a bar selects that month.
+ * change (green ▼ when less, orange ▲ when more, hidden when there is nothing to compare with)
+ * against the same days of last month for the current month, or the whole month before for a
+ * past one, and six monthly bars. Tapping a bar selects that month; only its label is emphasised.
  */
-export function TotalCard({ months, currentMonth, selectedMonth, previousTotal, onSelect, empty = false }: TotalCardProps) {
+export function TotalCard({
+  months,
+  currentMonth,
+  selectedMonth,
+  previousTotal,
+  compareLabel,
+  comparing = false,
+  onSelect,
+  empty = false,
+}: TotalCardProps) {
   const labelId = useId();
   const point = months.find((m) => m.month === selectedMonth) ?? months[months.length - 1];
   const total = empty ? 0 : (point?.total ?? 0);
   const isCurrent = selectedMonth === currentMonth;
   const pct = empty ? null : pctChange(total, previousTotal);
-  const prevName = monthName(previousMonth(selectedMonth));
   const max = Math.max(...months.map((m) => m.total), 0);
 
   return (
@@ -48,11 +57,13 @@ export function TotalCard({ months, currentMonth, selectedMonth, previousTotal, 
       <p className="mt-0.5 text-figure">
         <Money amount={total} />
       </p>
-      {pct === null ? null : Math.round(pct) === 0 ? (
-        <p className="mt-0.5 text-label font-semibold text-ink-muted">Same as {prevName}</p>
+      {comparing && !empty ? (
+        <Skeleton className="mb-0.5 mt-1 h-3.5 w-40" />
+      ) : pct === null ? null : Math.round(pct) === 0 ? (
+        <p className="mt-0.5 text-label font-semibold text-ink-muted">Same as {compareLabel}</p>
       ) : (
         <p className={cn("mt-0.5 text-label font-semibold", pct < 0 ? "text-accent" : "text-up")}>
-          <span aria-hidden="true">{pct < 0 ? "▼" : "▲"}</span> {Math.round(Math.abs(pct))}% vs {prevName}
+          <span aria-hidden="true">{pct < 0 ? "▼" : "▲"}</span> {Math.round(Math.abs(pct))}% vs {compareLabel}
           <span className="sr-only">{pct < 0 ? ", less" : ", more"}</span>
         </p>
       )}
@@ -64,7 +75,14 @@ export function TotalCard({ months, currentMonth, selectedMonth, previousTotal, 
               <div className="flex h-20 items-end">
                 <div className="w-full rounded-t bg-accent-bar/50" style={{ height: `${GHOST_HEIGHTS[i] ?? 40}%` }} />
               </div>
-              <span className="text-center text-caption text-ink-muted">{shortMonth(m.month)}</span>
+              <span
+                className={cn(
+                  "text-center text-caption",
+                  m.month === currentMonth ? "font-medium text-ink" : "text-ink-muted",
+                )}
+              >
+                {shortMonth(m.month)}
+              </span>
             </div>
           ))}
         </div>
@@ -72,7 +90,6 @@ export function TotalCard({ months, currentMonth, selectedMonth, previousTotal, 
         <div role="group" aria-label="Last six months" className="mt-4 grid grid-cols-6 gap-1.5">
           {months.map((m) => {
             const selected = m.month === selectedMonth;
-            const current = m.month === currentMonth;
             const height = max > 0 && m.total > 0 ? Math.max(4, (m.total / max) * 100) : 0;
             return (
               <button
@@ -99,7 +116,7 @@ export function TotalCard({ months, currentMonth, selectedMonth, previousTotal, 
                 <span
                   className={cn(
                     "w-full text-center text-caption",
-                    selected ? "font-semibold text-ink" : current ? "font-medium text-ink" : "text-ink-muted",
+                    selected ? "font-semibold text-ink" : "text-ink-muted",
                   )}
                 >
                   {shortMonth(m.month)}
