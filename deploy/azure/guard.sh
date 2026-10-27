@@ -16,11 +16,9 @@ dockerignore_excludes_env_deploy() {
     case "$line" in \#*) continue ;; esac
     case "$line" in
       '!'*)
-        if [ "$excluded" -eq 1 ]; then
-          case "$line" in
-            *deploy*|*.env*) return 1 ;;
-          esac
-        fi
+        # Fail closed: any negation after the exclusion could re-include the file
+        # (wildcards like !** or !**/* do), so none is allowed.
+        [ "$excluded" -eq 1 ] && return 1
         ;;
       'deploy/azure/.env.deploy'|'/deploy/azure/.env.deploy'|'**/.env.deploy'|'**/.env*' \
         |'deploy/azure'|'deploy/azure/'|'deploy'|'deploy/')

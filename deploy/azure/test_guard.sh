@@ -32,6 +32,12 @@ check "deploy then bare negation"     1 'deploy\n!deploy/azure/.env.deploy\n'
 check "deploy then !deploy/azure"     1 'deploy\n!deploy/azure\n'
 check "exclusion then !**/.env*"      1 '**/.env.deploy\n!**/.env*\n'
 check "negation before exclusion"     0 '!deploy/azure/other\ndeploy/azure\n'
-check "unrelated negation after"      0 'deploy/azure\n!docker/keep.txt\n'
+check "unrelated negation after (fail closed)" 1 'deploy/azure\n!docker/keep.txt\n'
+check "exclusion then !**/*"          1 'deploy\n!**/*\n'
+check "exclusion then !**"            1 'deploy\n!**\n'
+check "exclusion then !**/.*"         1 'deploy\n!**/.*\n'
+check "exclusion then !*"             1 'deploy\n!*\n'
+check "seed negation before exclusion" 0 '!recipes/*.seed.json\ndeploy/azure/.env.deploy\n'
+check "comment then negation ignored" 0 'deploy\n# !**\n'
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || { echo "$fails FAILED"; exit 1; }
