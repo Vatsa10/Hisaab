@@ -37,3 +37,22 @@ def test_set_progress_merges(pg):
     jobs.set_progress(pg, jid, stage="syncing")
     jobs.set_progress(pg, jid, orders_found=12)
     assert pg.execute("select progress from jobs").fetchone()[0] == {"stage": "syncing", "orders_found": 12}
+
+
+def test_claim_skips_a_row_locked_by_another_transaction(pg, pg2):
+    jobs.enqueue(pg, A, "sync", "zepto")
+    pg.execute("set lock_timeout = '2s'")  # fail fast instead of hanging if SKIP LOCKED is missing
+    with pg2.transaction():
+        pg2.execute("select id from jobs where status='queued' for update")
+        assert jobs.claim(pg, "w1", ("sync",)) is None
+    assert jobs.claim(pg, "w1", ("sync",)) is not None
+
+
+def test_claim_takes_next_unlocked_job(pg, pg2):
+    jobs.enqueue(pg, A, "sync", "zepto")
+    newer = jobs.enqueue(pg, A, "sync", "blinkit")
+    pg.execute("set lock_timeout = '2s'")
+    with pg2.transaction():
+        pg2.execute("select id from jobs where site='zepto' for update")
+        got = jobs.claim(pg, "w1", ("sync",))
+    assert got is not None and got.id == newer
