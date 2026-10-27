@@ -61,6 +61,10 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
     return prompt
 
 
+# Plan 1 name (it only asked for OTPs then); kept so code and tests written against Plan 1 still work.
+make_otp_prompt = make_prompt
+
+
 def _profiles_root() -> Path:
     return Path((os.getenv("PROFILE_ROOT") or "").strip() or "profiles_users")
 

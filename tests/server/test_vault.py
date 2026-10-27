@@ -109,6 +109,19 @@ def test_unsafe_archive_is_refused(tmp_path, setup):
     assert not dst.exists() or not any(dst.iterdir())
 
 
+def test_archive_with_parent_path_is_refused(tmp_path):
+    store = vault.LocalStore(tmp_path / "store")
+    key = os.urandom(32)
+    store.put(vault.blob_key(A, "zepto"), _evil_blob(key, lambda tf: _file(tf, "../evil")))
+    dst = tmp_path / "work" / "dst"
+    with pytest.raises(vault.VaultError):
+        vault.restore_profile(store, key, A, "zepto", dst)
+    assert not (tmp_path / "work" / "evil").exists()
+    assert not dst.exists() or not any(dst.iterdir())
+    outside = [p for p in tmp_path.rglob("*") if p.is_file() and store.root not in p.parents]
+    assert outside == []
+
+
 def test_delete_user_profiles_only_touches_that_user(tmp_path):
     src, store, key = _setup(tmp_path)
     vault.save_profile(store, key, A, "zepto", src)

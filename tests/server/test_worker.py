@@ -17,7 +17,7 @@ def _notify_later(conn, jid, payload, delay=0.5):
 
 def test_prompt_otp_round_trip(pg, pg_listen, pg2):
     jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
-    ask = worker.make_prompt(pg_listen, pg, jid, timeout_s=5)
+    ask = worker.make_otp_prompt(pg_listen, pg, jid, timeout_s=5)  # the Plan 1 name of make_prompt
     _notify_later(pg2, jid, "4321")
     assert ask("Enter OTP", "otp") == "4321"
     assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("otp_received",)
