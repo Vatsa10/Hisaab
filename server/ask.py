@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import pglast
 import psycopg
-from pglast import ast
+from pglast import ast, enums
 
 import agent
 import insights
@@ -71,6 +71,10 @@ ALLOWED_CAST_TYPES = frozenset({
 # Column names that are also function names, where `x.name` cannot become a dangerous call: name() is a cast to the
 # `name` type that takes text, never a row.
 NOTATION_SAFE = frozenset({"name"})
+# Keyword "functions" without parentheses: only the date/time ones. current_user, session_user, current_role, user,
+# current_schema and current_catalog would reveal role, schema and database names.
+ALLOWED_SQL_VALUE_FUNCTIONS = frozenset(op.value for op in enums.SQLValueFunctionOp if op.name.startswith(
+    ("SVFOP_CURRENT_DATE", "SVFOP_CURRENT_TIME", "SVFOP_LOCALTIME")))  # incl. CURRENT_TIMESTAMP, LOCALTIMESTAMP, _N
 
 SCHEMA = """PostgreSQL. You see only your own rows (amounts in INR; placed_at is ISO-8601 local time text, so
 substr(placed_at, 1, 7) = 'YYYY-MM'). Tables:
@@ -197,14 +201,16 @@ def _output_names(nodes) -> set[str]:
 
 
 def _range_names(nodes) -> set[str]:
-    """Names a FROM item is known by in the query (its alias, else the relation or CTE name)."""
+    """Names a FROM item is known by in the query: any node's alias (tables, subqueries, VALUES, JOINs, and the
+    refused table functions), else the relation or CTE name."""
     names = set()
     for n in nodes:
-        if isinstance(n, ast.RangeVar):
-            names.add(n.alias.aliasname if n.alias else n.relname)
-        elif isinstance(n, ast.RangeSubselect) and n.alias:
-            names.add(n.alias.aliasname)
-        elif isinstance(n, ast.CommonTableExpr):
+        alias = getattr(n, "alias", None)
+        if isinstance(alias, ast.Alias):
+            names.add(alias.aliasname)
+        elif isinstance(n, ast.RangeVar):
+            names.add(n.relname)
+        if isinstance(n, ast.CommonTableExpr):
             names.add(n.ctename)
     return names
 
@@ -213,6 +219,30 @@ def _stars_in_select_lists(nodes) -> set[int]:
     """ids of `*` / `t.*` ColumnRefs that are a whole select-list entry (expanded into columns, never a row value)."""
     return {id(t.val) for n in nodes if isinstance(n, ast.SelectStmt) for t in n.targetList or ()
             if isinstance(t.val, ast.ColumnRef) and isinstance(t.val.fields[-1], ast.A_Star)}
+
+
+def _select_list_names(sel) -> set[str]:
+    """The output column names of one SELECT (of its leftmost branch for UNION / INTERSECT / EXCEPT)."""
+    while sel.op != enums.SetOperation.SETOP_NONE:
+        sel = sel.larg
+    return {t.name or _inferred_name(t.val) for t in sel.targetList or ()} - {None}
+
+
+def _output_column_refs(nodes) -> set[int]:
+    """ids of bare names in ORDER BY / GROUP BY that match their SELECT's output names. Postgres resolves those to
+    the output column (ORDER BY prefers it; GROUP BY takes an input column first, never a whole row), so they are
+    not whole-row references even when a FROM item has the same name."""
+    ids = set()
+    for n in nodes:
+        if not isinstance(n, ast.SelectStmt):
+            continue
+        outputs = _select_list_names(n)
+        items = [s.node for s in n.sortClause or ()] + list(n.groupClause or ())
+        for item in items:
+            if (isinstance(item, ast.ColumnRef) and len(item.fields) == 1 and isinstance(item.fields[0], ast.String)
+                    and item.fields[0].sval in outputs):
+                ids.add(id(item))
+    return ids
 
 
 def check_query(query: str, known_columns=frozenset()) -> tuple[str | None, set[str], set[str]]:
@@ -232,11 +262,12 @@ def check_query(query: str, known_columns=frozenset()) -> tuple[str | None, set[
     ctes = {n.ctename for n in nodes if isinstance(n, ast.CommonTableExpr)}
     known = set(known_columns) | _output_names(nodes)
     fields: set[str] = set()
-    refusal = _check_nodes(nodes, ctes, known, _range_names(nodes), _stars_in_select_lists(nodes), fields)
+    exempt = _stars_in_select_lists(nodes) | _output_column_refs(nodes)
+    refusal = _check_nodes(nodes, ctes, known, _range_names(nodes), exempt, fields)
     return refusal, ctes, fields
 
 
-def _check_nodes(nodes, ctes, known, ranges, select_stars, fields) -> str | None:
+def _check_nodes(nodes, ctes, known, ranges, exempt, fields) -> str | None:
     for n in nodes:
         kind = type(n).__name__
         if isinstance(n, ast.SelectStmt):
@@ -261,9 +292,11 @@ def _check_nodes(nodes, ctes, known, ranges, select_stars, fields) -> str | None
                 continue
             return f"table {'.'.join(p for p in (n.catalogname, n.schemaname, n.relname) if p)} is not allowed"
         elif isinstance(n, ast.ColumnRef):
-            refusal = _check_column_ref(n, known, ranges, select_stars, fields)
+            refusal = _check_column_ref(n, known, ranges, exempt, fields)
             if refusal:
                 return refusal
+        elif isinstance(n, ast.SQLValueFunction) and n.op not in ALLOWED_SQL_VALUE_FUNCTIONS:
+            return f"{enums.SQLValueFunctionOp(n.op).name.removeprefix('SVFOP_').lower()} is not allowed"
         elif isinstance(n, ast.A_Indirection):
             if not all(isinstance(i, ast.A_Indices) for i in n.indirection or ()):
                 return "field selection like (x).f is not allowed; use alias.column"
@@ -282,20 +315,21 @@ def _check_nodes(nodes, ctes, known, ranges, select_stars, fields) -> str | None
     return None
 
 
-def _check_column_ref(n, known, ranges, select_stars, fields) -> str | None:
+def _check_column_ref(n, known, ranges, exempt, fields) -> str | None:
     """Postgres reads `x.f` as the call f(x) when x has no column f, and a bare FROM-item name as its whole row; so a
-    qualified name must end in a real or query-defined column, and a bare name must not be a FROM item."""
+    qualified name must end in a real or query-defined column, and a bare name must not be a FROM item (except an
+    ORDER BY / GROUP BY name that is one of its SELECT's output columns). exempt holds ids of the allowed `*` / `t.*`
+    select-list entries and of those ORDER BY / GROUP BY names."""
     parts = n.fields
     if isinstance(parts[-1], ast.A_Star):
-        if id(n) not in select_stars:
+        if id(n) not in exempt:
             return "a whole row (t.* or *) may only be a select-list entry"
         return None if len(parts) <= 2 else "three-part names are not allowed; use alias.column"
     names = [p.sval for p in parts]
     if len(names) == 1:
-        if names[0] in ranges:  # could be the whole row of that FROM item
-            if names[0] in known:
-                return f"{names[0]!r} is both a column and a table/alias in this query; write alias.{names[0]}"
-            return f"{names[0]!r} is a table or alias; select its columns, not the whole row"
+        if names[0] in ranges and id(n) not in exempt:  # could be the whole row of that FROM item
+            return (f"{names[0]!r} names a table or alias in this query, so it could mean the whole row; "
+                    f"write alias.column")
         return None
     if len(names) > 2:
         return "three-part names are not allowed; use alias.column"

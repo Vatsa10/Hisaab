@@ -144,7 +144,7 @@ def test_ask_sql_is_scoped_to_caller(pg):
 def test_ask_sql_is_scoped_on_the_ask_reader_login(pg, ask_conn):
     _two_users(pg)
     assert ask.scoped_sql(ask_conn, A, "select sum(total_amount) from orders")["rows"] == [(100.0,)]
-    assert ask.scoped_sql(ask_conn, A, "select current_user")["rows"] == [("authenticated",)]
+    assert ask.scoped_sql(ask_conn, A, "select count(*) from orders")["rows"] == [(1,)]  # only A's row
     assert ask_conn.execute("select session_user::text, current_user::text").fetchone() == ("ask_reader",) * 2
 
 
@@ -175,7 +175,7 @@ def test_ask_scope_is_authenticated_read_only_with_the_callers_claims(pg):
 
 
 def test_ask_sql_leaves_the_connection_clean(pg):
-    assert ask.scoped_sql(pg, A, "select current_user")["rows"] == [("authenticated",)]
+    assert ask.scoped_sql(pg, A, "select 1")["rows"] == [(1,)]
     assert pg.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
     user, sub = pg.execute("select current_user::text, current_setting('request.jwt.claim.sub', true)").fetchone()
     assert user != "authenticated" and sub in (None, "")
@@ -229,6 +229,27 @@ ESCAPES = [
     "select count(o.*) from orders o",
     "select (o.*)::text from orders o",
     "select m from (select * from orders) m",
+    # ... through a JOIN alias, and through a VALUES alias.
+    "select j::text from (orders o cross join (select 1 as k) s) j",
+    "select j from (orders o join order_items i on o.order_id = i.order_id) j",
+    "select concat(j) from (orders o cross join (select 1 as k) s) j",
+    "select count(j) from (orders o cross join (select 1 as k) s) j group by j",
+    "select array_agg(j) from (orders o cross join (select 1 as k) s) j",
+    "select v from (values (1)) v(x)",
+    "select v::text from (values (1)) v",
+    # A bare name in the select list (or WHERE) that is a FROM item is its whole row, even if it is also an alias.
+    "select orders from orders",
+    "select count(*) as orders from orders where orders is not null",
+    # Table functions and samples carry aliases too; they are refused outright.
+    "select x from xmltable('/a' passing '<a/>' columns x int) t",
+    "select merchant from orders tablesample system (100)",
+    # Who am I: role, schema and database names are not the analyst's business.
+    "select current_user",
+    "select session_user",
+    "select current_role",
+    "select user",
+    "select current_schema",
+    "select current_catalog",
     # Casts to anything but plain scalars reach the catalog.
     "select 'pg_authid'::regclass",
     "select 'set_config'::regproc",
@@ -312,6 +333,19 @@ def test_ask_sql_hides_database_text_for_errors_raised_while_running(pg):
     ("select i.name, i.qty from order_items i", lambda rows: rows == [("Amul Milk!", None)]),
     ("select m.orders from monthly_spend m where m.site in (select site from orders)", lambda rows: rows == [(2,)]),
     ("select o.* from orders o where o.order_id = '1'", lambda rows: rows[0][2] == "1"),
+    # ORDER BY / GROUP BY a select-list name refers to that output column, even when a table has the same name.
+    ("select site, count(*) as orders from orders group by site order by orders desc",
+     lambda rows: rows == [("zepto", 2)]),
+    ("select site, count(*) from orders group by site order by count desc", lambda rows: rows == [("zepto", 2)]),
+    ("select site, sum(total_amount) from orders group by site order by sum desc, site",
+     lambda rows: rows == [("zepto", 220.0)]),
+    ("select substr(placed_at, 1, 7) as orders, count(*) from orders group by orders order by orders",
+     lambda rows: rows == [("2025-01", 2)]),
+    ("select site as s from orders union select site from monthly_spend order by s", lambda rows: rows == [("zepto",)]),
+    # Date/time keywords are fine.
+    ("select current_date - current_date, localtimestamp is not null, current_timestamp is not null, "
+     "localtime is not null, current_time is not null from orders limit 1",
+     lambda rows: rows == [(0, True, True, True, True)]),
     ("select total_amount::numeric(10, 2), placed_at::timestamp with time zone, '7'::double precision, "
      "'2025-01-01'::date + interval '1 month', 'x'::varchar(3), 1::bigint, true::boolean from orders limit 1",
      lambda rows: len(rows) == 1),
