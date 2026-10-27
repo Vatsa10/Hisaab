@@ -20,6 +20,7 @@ class Settings:
     profile_master_key: bytes | None = field(default=None, repr=False)
     proxy_url_template: str = field(default="", repr=False)
     heartbeat_s: int = 30
+    max_job_s: int = 1200  # a job running longer is presumed hung: the worker stops heart-beating and exits
 
 
 def _master_key(env, store_url: str, for_worker: bool) -> bytes | None:
@@ -72,4 +73,5 @@ def settings(for_worker: bool = False) -> Settings:
         profile_master_key=_master_key(env, store_url, for_worker),
         proxy_url_template=proxy_template,
         heartbeat_s=int(env("HEARTBEAT_S", "30")),
+        max_job_s=int(env("MAX_JOB_S", "1200")),
     )

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -123,15 +124,39 @@ def _status(conn, user_id: str, site: str) -> str | None:
     return row[0] if row else None
 
 
+HEARTBEAT_CONNECT_TIMEOUT_S = 10
+EXIT_JOB_OVERRUN = 70  # process exit code when a job ran past MAX_JOB_S
+
+
 def _heartbeat_loop(database_url: str, job_id: str, worker_id: str | None, every_s: float,
-                    stop: threading.Event) -> None:
-    """Touch the job every every_s seconds on its own connection until stop is set or the job is no longer ours."""
+                    stop: threading.Event, max_job_s: float | None = None,
+                    on_overrun: Callable[[], None] | None = None) -> None:
+    """Touch the job every every_s seconds on its own connection until stop is set or the job is no longer ours.
+
+    A job still running after max_job_s is presumed hung (a browser call that never returns): heartbeats stop,
+    so the row goes stale and requeue_stale reclaims it, and on_overrun() is called (the worker exits)."""
     conn = None
+    start = time.monotonic()
+    deadline = start + max_job_s if max_job_s else None
+    next_beat = start + every_s
     try:
-        while not stop.wait(every_s):
+        while True:
+            wake = next_beat if deadline is None else min(next_beat, deadline)
+            if stop.wait(max(0.0, wake - time.monotonic())):
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                log.error("job %s ran past MAX_JOB_S (%ss): heartbeats stopped; worker exiting so the job is "
+                          "reclaimed", job_id, max_job_s)
+                if on_overrun is not None:
+                    on_overrun()
+                return
+            if time.monotonic() < next_beat:
+                continue
+            next_beat = time.monotonic() + every_s
             try:
                 if conn is None:
-                    conn = psycopg.connect(database_url, autocommit=True)
+                    conn = psycopg.connect(database_url, autocommit=True,
+                                           connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_S)
                 if not jobs.heartbeat(conn, job_id, worker_id):
                     return
             except Exception as e:
@@ -173,11 +198,15 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
                          last_synced_at=datetime.now(timezone.utc))
 
 
-def run_job(job: jobs.Job, conn, s: Settings) -> None:
+def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
     """Run one claimed job. The user's encrypted profile is restored into a fresh per-job directory, the browser
     goes out through the user's sticky proxy session (if configured), the job heartbeats while it runs, and the
     profile is saved back only after a success. The plaintext directory is always deleted. A connect job gets
-    its own fresh LISTEN connection, closed when the job ends, so one that died never affects the next job."""
+    its own fresh LISTEN connection, closed when the job ends, so one that died never affects the next job.
+
+    A job still running after s.max_job_s is presumed hung: its heartbeat stops and exit_process(non-zero) is
+    called from the heartbeat thread (default os._exit), so the container restarts and the job is reclaimed."""
+    exit_process = exit_process or os._exit
     cfg = browser.SITES[job.site]
     db_site, sub_platform = cfg.get("db_site", job.site), cfg.get("sub_platform")
     phone = (job.payload or {}).get("phone")
@@ -186,7 +215,8 @@ def run_job(job: jobs.Job, conn, s: Settings) -> None:
     runs_dir = Path(tempfile.mkdtemp(prefix="ea-runs-"))
     stop_hb = threading.Event()
     heartbeat = threading.Thread(target=_heartbeat_loop, name="job-heartbeat", daemon=True,
-                                 args=(s.database_url, job.id, job.worker_id, s.heartbeat_s, stop_hb))
+                                 args=(s.database_url, job.id, job.worker_id, s.heartbeat_s, stop_hb,
+                                       s.max_job_s, lambda: exit_process(EXIT_JOB_OVERRUN)))
     vault_store = None
 
     def fail(error: str, status: str | None = None) -> None:

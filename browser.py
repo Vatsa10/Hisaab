@@ -74,7 +74,7 @@ class SessionExpired(Exception):
 
 
 _FETCH_JS = """async ({url, method, headers, body}) => {
-  const r = await fetch(url, {method, headers, body, credentials: 'include'});
+  const r = await fetch(url, {method, headers, body, credentials: 'include', signal: AbortSignal.timeout(60000)});
   return {status: r.status, url: r.url, text: await r.text()};
 }"""
 

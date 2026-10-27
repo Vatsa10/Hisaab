@@ -254,6 +254,10 @@ export ALLOW_DEV_PROFILE_KEY=1          # or: export PROFILE_MASTER_KEY=<base64 
 python -m server.worker
 ```
 
+`MAX_JOB_S` (default 1200 s) is the longest a job may run. A job still running after that is presumed
+hung: its heartbeat stops and the worker process exits (non-zero), so the container restarts and the
+stale job is reclaimed. In-page API calls time out after 60 s.
+
 ## Tests
 
 ```bash

@@ -686,3 +686,66 @@ def test_relay_check_crash_is_proxy_unavailable(pg, monkeypatch, caplog):
     worker.run_job(_sync_job(pg), pg, s)
     assert pg.execute("select error from jobs").fetchone() == ("proxy_unavailable",)
     assert not _leaks(caplog.text)
+
+
+# ---------------------------------------------------------------- hung jobs: MAX_JOB_S (final review)
+
+def test_job_past_max_job_s_stops_heartbeat_and_exits(pg, pg2, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    exited = threading.Event()
+    codes = []
+    s = dataclasses.replace(settings_for_tests(), heartbeat_s=1, max_job_s=2)
+    job = _sync_job(pg)
+    pg.execute("update jobs set heartbeat_at = now() - interval '1 hour'")
+    seen = {}
+
+    def hung(site, since, **k):  # a job that never finishes on its own
+        assert exited.wait(10), "the overrun exit was never called"
+        seen["hb1"] = pg2.execute("select heartbeat_at from jobs").fetchone()[0]
+        time.sleep(1.5)  # longer than heartbeat_s: a live heartbeat would have touched the row again
+        seen["hb2"] = pg2.execute("select heartbeat_at from jobs").fetchone()[0]
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", hung)
+    t0 = time.monotonic()
+    worker.run_job(job, pg, s, exit_process=lambda code: (codes.append(code), exited.set()))
+    assert codes and codes[0] != 0
+    assert 2 <= time.monotonic() - t0 < 10
+    assert seen["hb1"] == seen["hb2"]
+    assert pg.execute("select %s > now() - interval '1 minute'", (seen["hb1"],)).fetchone() == (True,)
+    assert "MAX_JOB_S" in caplog.text
+
+
+def test_job_within_max_job_s_does_not_exit(pg, monkeypatch):
+    codes = []
+    s = dataclasses.replace(settings_for_tests(), heartbeat_s=1, max_job_s=60)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: time.sleep(1.2) or [])
+    worker.run_job(_sync_job(pg), pg, s, exit_process=codes.append)
+    assert codes == []
+    assert pg.execute("select status from jobs").fetchone() == ("done",)
+
+
+def test_max_job_s_setting(monkeypatch):
+    from server.config import settings
+    monkeypatch.delenv("MAX_JOB_S", raising=False)
+    assert settings().max_job_s == 1200
+    monkeypatch.setenv("MAX_JOB_S", "90")
+    assert settings().max_job_s == 90
+
+
+def test_heartbeat_connection_has_connect_timeout(monkeypatch):
+    seen = []
+
+    def connect(url, **k):
+        seen.append(k)
+        raise OSError("db down")
+    monkeypatch.setattr(worker.psycopg, "connect", connect)
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    worker._heartbeat_loop("postgresql://x", "j", "w", 0.05, stop)
+    assert seen and all(k.get("connect_timeout") == 10 for k in seen)
+
+
+def test_in_page_fetch_has_a_timeout():
+    import browser
+    assert "signal: AbortSignal.timeout(60000)" in browser._FETCH_JS
