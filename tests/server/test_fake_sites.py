@@ -121,3 +121,31 @@ def test_fake_login_logic():
     asked.clear()
     fake_sites.login("zomato", "9000000000", lambda t, k="otp": (asked.append(k), "123456")[1])
     assert asked == ["question", "otp"]
+
+
+def test_fake_main_starts_with_only_a_local_database_url(monkeypatch, tmp_path):
+    """No vault key, dev-key opt-in or proxy template: fake mode needs none of them to get through start-up."""
+    for k in ("PROFILE_MASTER_KEY", "ALLOW_DEV_PROFILE_KEY", "PROXY_URL_TEMPLATE", "PROFILE_STORE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("WORKER_FAKE", "1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:54329/none")
+    monkeypatch.setenv("PROXY_URL_TEMPLATE", "not a url {")  # would be rejected by a real worker
+    monkeypatch.setenv("PROFILE_ROOT", str(tmp_path / "profiles"))
+    worker.main(max_loops=0)
+    assert (tmp_path / "profiles").is_dir()
+
+
+def test_real_main_still_validates_vault_key(monkeypatch):
+    for k in ("PROFILE_MASTER_KEY", "ALLOW_DEV_PROFILE_KEY", "WORKER_FAKE"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:54329/none")
+    with pytest.raises(ValueError, match="PROFILE_MASTER_KEY"):
+        worker.main(max_loops=0)
+
+
+def test_fake_refusal_not_masked_by_other_config_errors(monkeypatch):
+    monkeypatch.setenv("WORKER_FAKE", "1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.example.supabase.co:5432/postgres")
+    monkeypatch.setenv("PROFILE_MASTER_KEY", "!!!not base64!!!")
+    with pytest.raises(RuntimeError, match="WORKER_FAKE"):
+        worker.main(max_loops=0)

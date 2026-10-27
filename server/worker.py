@@ -201,12 +201,12 @@ def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
 
 
 def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profile_dir: Path,
-             proxy_server: str | None) -> None:
+             proxy_server: str | None, fetch: Callable | None = None) -> None:
     own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
-    orders = (fake_sites.fetch_orders if _fake_mode() else sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
-                               allow_learn=False, proxy_server=proxy_server,
-                               recipe_loader=lambda site: store.get_recipe(conn, site),
-                               orders_page_url=own.get("orders_page_url"))
+    orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
+                   allow_learn=False, proxy_server=proxy_server,
+                   recipe_loader=lambda site: store.get_recipe(conn, site),
+                   orders_page_url=own.get("orders_page_url"))
     n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
     jobs.set_progress(conn, job.id, stage="synced", orders_found=n)
     store.set_connection(conn, job.user_id, db_site, status="connected",
@@ -295,7 +295,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                     return fail("login_failed", "error")
                 store.set_connection(conn, job.user_id, db_site, status="connected")
                 save_profile()  # a good login is kept even if the first sync below fails
-            _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server)
+            _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
+                     fetch=fake_sites.fetch_orders if fake else sync.fetch_orders)
             save_profile()
         jobs.finish(conn, job.id, worker_id=job.worker_id)
     except browser.SessionExpired:
@@ -423,8 +424,9 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     process when a job hangs (MAX_JOB_S) or will not unwind after a drain abort; max_loops is for tests."""
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     exit_process = exit_process or os._exit
-    s = settings(for_worker=True)
-    _check_fake_mode(s.database_url)
+    _check_fake_mode(os.getenv("DATABASE_URL", ""))  # before settings(): no other config error may mask it
+    # Fake mode has no vault and no proxy, so their key / template validation (for_worker) does not apply.
+    s = settings(for_worker=not _fake_mode())
     _wipe_profiles_root(s.profile_store_url)
     log.info("worker started id=%s", worker_id)
     drain = _Drain(s, worker_id, exit_process)
