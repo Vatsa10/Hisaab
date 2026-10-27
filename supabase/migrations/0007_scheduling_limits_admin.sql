@@ -125,7 +125,7 @@ grant all on usage, admins, invites, waitlist, recipe_approvals, notifications, 
 -- Invite-only sign-up (ruling R1). GoTrue calls this as supabase_auth_admin before it creates any user, for
 -- email/password and OAuth alike. security definer: it runs as the owner, so supabase_auth_admin needs no table
 -- grants. Rules, in order:
---   1. an admin email is always allowed;
+--   1. an admin email is always allowed (and its invite, if any, is marked accepted);
 --   2. an email with no invite is added to the waitlist and refused (invite_only);
 --   3. while the current IST month's budget is paused, invited sign-ups are refused (signups_paused);
 --   4. otherwise the invite is marked accepted and the sign-up goes ahead.
@@ -139,6 +139,7 @@ declare
   v_month text := to_char(now() at time zone 'Asia/Kolkata', 'YYYY-MM');
 begin
   if v_email is not null and v_email <> '' and exists (select 1 from admins where email = v_email) then
+    update invites set accepted_at = now() where email = v_email and accepted_at is null;
     return '{}'::jsonb;
   end if;
 
@@ -158,6 +159,8 @@ begin
 end;
 $$;
 
-revoke execute on function public.before_user_created(jsonb) from public, anon, authenticated;
+-- Only GoTrue may call it. Supabase's default privileges grant execute on new functions to the API roles,
+-- service_role included, so take it back from all of them.
+revoke execute on function public.before_user_created(jsonb) from public, anon, authenticated, service_role;
 grant usage on schema public to supabase_auth_admin;
 grant execute on function public.before_user_created(jsonb) to supabase_auth_admin;

@@ -70,15 +70,24 @@ def test_hook_allows_admin_even_when_paused(pg):
     assert pg.execute("select count(*) from waitlist").fetchone() == (0,)
 
 
+def test_hook_marks_admin_invite_accepted(pg):
+    pg.execute("insert into admins(email) values ('boss@x.com')")
+    pg.execute("insert into invites(email) values ('boss@x.com')")
+    pause_budget(pg)
+    assert hook(pg, "Boss@X.com") == {}
+    assert pg.execute("select accepted_at is not null from invites").fetchone() == (True,)
+
+
 def test_hook_not_executable_by_users(pg, as_user):
     with as_user(pg, A), pytest.raises(psycopg.errors.InsufficientPrivilege):
         hook(pg, "new@x.com")
 
 
-def test_hook_not_executable_by_anon(pg):
+@pytest.mark.parametrize("role", ["anon", "service_role"])
+def test_hook_not_executable_by_api_roles(pg, role):
     pg.execute("begin")
     try:
-        pg.execute("set local role anon")
+        pg.execute(f"set local role {role}")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             hook(pg, "new@x.com")
     finally:
@@ -193,7 +202,9 @@ def test_add_user_helper(pg):
     assert pg.execute("select email from auth.users where id = %s", (A,)).fetchone() == ("a@x.com",)
 
 
-def test_auth_users_truncated_between_tests(pg):
-    assert pg.execute("select count(*) from auth.users").fetchone() == (0,)
-    add_user(pg, A, "A@X.com")
-    assert pg.execute("select email from auth.users").fetchone() == ("A@X.com",)
+@pytest.mark.parametrize("run", [1, 2])
+def test_auth_users_truncated_between_tests(pg, run):
+    """Both runs insert the same user; whichever runs second only succeeds if the pg fixture truncated
+    auth.users in between, whatever order the tests run in."""
+    add_user(pg, A, f"run{run}@x.com")
+    assert pg.execute("select email from auth.users").fetchall() == [(f"run{run}@x.com",)]
