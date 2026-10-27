@@ -237,7 +237,8 @@ def _wait_for_cdp(port: int, proc: subprocess.Popen, timeout: float = 20) -> Non
 
 @contextlib.contextmanager
 def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
-              profile_dir: Path | None = None, location: dict | None = None):
+              profile_dir: Path | None = None, location: dict | None = None,
+              proxy_server: str | None = None):
     """Yield (context, page, guard, capture) for a site's persistent profile.
 
     profile_dir / location override the per-site profile folder and the saved delivery location (per-user runs);
@@ -252,10 +253,14 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
     guard, capture = Guard(allowlist, login_mode), Capture()
     loc = effective_location(location)
     port = _free_port()
+    chrome_args = [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
+                   f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
+                   "--hide-crash-restore-bubble", "--window-size=1280,960"]
+    if proxy_server:
+        # <-loopback> clears Chrome's implicit loopback bypass so even 127.0.0.1 goes via the relay
+        chrome_args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>"]
     proc = subprocess.Popen(
-        [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
-         f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
-         "--hide-crash-restore-bubble", "--window-size=1280,960", "about:blank"],
+        chrome_args + ["about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         _wait_for_cdp(port, proc)
