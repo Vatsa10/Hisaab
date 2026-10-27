@@ -63,6 +63,8 @@ class Relay:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._server = None
+        self._tasks: set = set()
+        self._writers: set = set()
 
     # lifecycle ---------------------------------------------------------
     def __enter__(self):
@@ -80,7 +82,17 @@ class Relay:
                 ready.set()
                 return
             ready.set()
-            self._loop.run_forever()
+            try:
+                self._loop.run_forever()
+            finally:
+                # nothing may stay pending: cancel leftovers, let them unwind, then close the loop
+                pending = asyncio.all_tasks(self._loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                self._loop.close()
 
         self._thread = threading.Thread(target=run, daemon=True, name="proxy-relay")
         self._thread.start()
@@ -95,22 +107,27 @@ class Relay:
         loop, server = self._loop, self._server
         if loop is not None and server is not None:
             async def _shutdown():
-                server.close()
-                await server.wait_closed()
-                for t in asyncio.all_tasks():
-                    if t is not asyncio.current_task():
-                        t.cancel()
+                server.close()  # stop accepting first
+                for w in list(self._writers):
+                    try:
+                        w.close()
+                    except Exception:
+                        pass
+                tasks = [t for t in self._tasks if not t.done()]
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                try:  # active connections are gone now, so this returns promptly
+                    await asyncio.wait_for(server.wait_closed(), 2)
+                except Exception:
+                    pass
             try:
                 asyncio.run_coroutine_threadsafe(_shutdown(), loop).result(5)
             except Exception:
-                pass
+                log.debug("relay shutdown did not finish cleanly")
             loop.call_soon_threadsafe(loop.stop)
             if self._thread:
-                self._thread.join(5)
-            try:
-                loop.close()
-            except Exception:
-                pass
+                self._thread.join(5)  # the thread closes the loop itself after cancelling leftovers
         return False
 
     # health check ------------------------------------------------------
@@ -150,6 +167,9 @@ class Relay:
     # connection handling -----------------------------------------------
     async def _handle(self, reader, writer):
         up_writer = None
+        task = asyncio.current_task()
+        self._tasks.add(task)
+        self._writers.add(writer)
         try:
             try:
                 head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 30)
@@ -169,6 +189,7 @@ class Relay:
             try:
                 up_reader, up_writer = await asyncio.wait_for(
                     asyncio.open_connection(self._host, self._port), _CONNECT_TIMEOUT_S)
+                self._writers.add(up_writer)
             except (OSError, asyncio.TimeoutError):
                 writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 return
@@ -206,6 +227,9 @@ class Relay:
         except Exception:
             log.debug("relay connection error", exc_info=False)
         finally:
+            self._tasks.discard(task)
+            self._writers.discard(writer)
+            self._writers.discard(up_writer)
             for w in (up_writer, writer):
                 if w is not None:
                     try:

@@ -14,21 +14,45 @@ GOOD_AUTH = "Basic dXNlci14eXo6cGFzcw=="  # user-xyz:pass
 
 
 class _Loop:
-    """An asyncio loop in a daemon thread hosting servers on 127.0.0.1."""
+    """An asyncio loop in a daemon thread hosting servers on 127.0.0.1; stop() tears everything down."""
 
     def __init__(self):
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.servers = []
+        self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def _run(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self.loop)
+            for t in pending:
+                t.cancel()
+            if pending:
+                self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.close()
 
     def serve(self, handler):
         fut = asyncio.run_coroutine_threadsafe(asyncio.start_server(handler, "127.0.0.1", 0), self.loop)
         server = fut.result(5)
+        self.servers.append(server)
         return server, server.sockets[0].getsockname()[1]
 
     def stop(self):
+        async def _close():
+            for s in self.servers:
+                s.close()
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        asyncio.run_coroutine_threadsafe(_close(), self.loop).result(5)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(5)
+        assert not self.thread.is_alive()
 
 
 @pytest.fixture
@@ -196,6 +220,24 @@ def test_relay_stops_on_exit(fake_upstream):
         p = relay.port
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", p), timeout=2).close()
+
+
+def test_relay_exit_with_open_tunnel_does_not_block(fake_upstream, target):
+    port, _ = fake_upstream
+    with Relay(_url(port)) as relay:
+        s = socket.create_connection(("127.0.0.1", relay.port), timeout=5)
+        s.sendall(f"CONNECT 127.0.0.1:{target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += s.recv(4096)
+        assert buf.startswith(b"HTTP/1.1 200")
+        thread = relay._thread
+        t0 = time.monotonic()
+    try:  # client socket is still open here
+        assert time.monotonic() - t0 < 2
+        assert not thread.is_alive()
+    finally:
+        s.close()
 
 
 def test_relay_does_not_log_credentials(fake_upstream, target, caplog):
