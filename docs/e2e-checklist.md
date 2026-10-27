@@ -85,7 +85,8 @@ Expected: the start of a JWT beginning `eyJ`. The token lasts one hour; re-run t
 Sanity check that auth works (404 `no connection` is the correct answer here, 401 is not):
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/connections/zepto/refresh -H "Authorization: Bearer $TOKEN"
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $API/connections/zepto/refresh \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 Expected: `404`.
@@ -111,13 +112,15 @@ Use your own number as 10 digits or with country code, e.g. `+91<10-digit-number
 
 ```bash
 export PHONE='+91<your-10-digit-number>'
-curl -s -X POST $API/connections/zepto/connect \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"phone\":\"$PHONE\"}")
-
+export JOB_ID=$(curl -s -X POST $API/connections/zepto/connect \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{\"phone\":\"$PHONE\"}" \
+  | python -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+echo "$JOB_ID"
 ```
 
-Expected: a job id (uuid) is printed (the API answered 202). If it fails with a KeyError, rerun the curl alone with `-i` to see the status. Errors: `412` = step 4 not done; `422` = bad phone;
-`409` = a connect job is already active (finish or wait for it, see Troubleshooting).
+Expected: a job id (uuid) is printed (the API answered 202). If `JOB_ID` is empty, run the same curl with `-i`
+(and without the `| python ...` part) to see the error status: `412` = consent missing (step 4 not done),
+`409` = a connect job is already active (finish or wait for it, see Troubleshooting), `422` = bad phone.
 
 ### Watch the job
 
@@ -200,7 +203,9 @@ Expected: at least one file.
 This is the main check: the worker restores the saved profile into a fresh directory, so no login is needed.
 
 ```bash
-export JOB2=$(curl -s -X POST $API/connections/zepto/refresh -H "Authorization: Bearer $TOKEN"   | python -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+export JOB2=$(curl -s -X POST $API/connections/zepto/refresh \
+  -H "Authorization: Bearer $TOKEN" \
+  | python -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 echo "$JOB2"
 ```
 
@@ -254,7 +259,9 @@ fresh login.
 docker compose down -v       # stops everything and deletes the database AND the vault volume
 ```
 
-Use `docker compose down` (no `-v`) to keep the data. After `down -v`, redo step 1 (start), step 2 (recipe) and step 4 (consent).
+Use `docker compose down` (no `-v`) to keep the data. After `down -v`, redo step 1 (start), step 2 (recipe)
+and step 4 (consent).
+
 ## Troubleshooting
 
 The failure reason is in `jobs.error`:
