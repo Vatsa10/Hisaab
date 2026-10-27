@@ -45,6 +45,13 @@ def pg(_applied):
 
 
 @pytest.fixture
+def pg2(_applied, pg):
+    """Second independent autocommit connection (pg already truncates)."""
+    with psycopg.connect(_applied, autocommit=True) as c:
+        yield c
+
+
+@pytest.fixture
 def as_user():
     @contextmanager
     def _as_user(conn, user_id):
