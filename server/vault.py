@@ -163,7 +163,11 @@ def _pack(profile_dir: Path) -> bytes:
 
     def filt(ti: tarfile.TarInfo):
         parts = tuple(p for p in ti.name.split("/") if p not in ("", "."))
-        return None if _excluded(parts) else ti
+        if ti.issym() or ti.islnk() or _excluded(parts):
+            return None
+        if parts and (parts[-1].startswith("Singleton") or parts[-1] == "lockfile"):
+            return None
+        return ti
 
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         for child in sorted(profile_dir.iterdir()):
@@ -180,14 +184,8 @@ def _check_members(tf: tarfile.TarFile) -> list[tarfile.TarInfo]:
         if ".." in name.replace("\\", "/").split("/"):
             raise VaultError("archive member escapes the destination")
         if m.issym() or m.islnk():
-            target = m.linkname.replace("\\", "/")
-            if target.startswith("/") or (len(target) > 1 and target[1] == ":"):
-                raise VaultError("archive link has an absolute target")
-            base = posixpath.dirname(name) if m.issym() else ""
-            resolved = posixpath.normpath(posixpath.join(base, target))
-            if resolved == ".." or resolved.startswith("../"):
-                raise VaultError("archive link points outside the destination")
-        elif not (m.isfile() or m.isdir()):
+            raise VaultError("archive contains a link")
+        if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
             raise VaultError("archive contains a special file")
     return members
 

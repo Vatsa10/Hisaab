@@ -139,3 +139,43 @@ def test_blob_store_round_trip(tmp_path):
     vault.save_profile(store, key, A, "zepto", src)
     assert vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
     assert vault.delete_user_profiles(store, A) == 1
+
+
+def test_pack_skips_singleton_lockfile_and_symlinks(tmp_path):
+    src, store, key = _setup(tmp_path)
+    (src / "SingletonLock").write_bytes(b"lock")
+    (src / "Default" / "lockfile").write_bytes(b"lock")
+    try:
+        os.symlink("/tmp/.org.chromium.Chromium.x/SingletonSocket", src / "SingletonSocket")
+        os.symlink("Local State", src / "rel_link")
+    except (OSError, NotImplementedError):
+        pass  # no symlink privilege (Windows): regular-file exclusions are still checked
+    vault.save_profile(store, key, A, "zepto", src)
+    dst = tmp_path / "dst"
+    assert vault.restore_profile(store, key, A, "zepto", dst)
+    assert (dst / "Default/Cookies").read_bytes() == b"cookie-db"
+    for name in ("SingletonLock", "SingletonSocket", "rel_link", "Default/lockfile"):
+        assert not os.path.lexists(dst / name)
+
+
+def test_archive_with_any_symlink_is_refused(tmp_path):
+    store = vault.LocalStore(tmp_path / "store")
+    key = os.urandom(32)
+    store.put(vault.blob_key(A, "zepto"),
+              _evil_blob(key, lambda tf: (_file(tf, "ok"), _link(tf, "inside", "ok"))))
+    dst = tmp_path / "dst"
+    with pytest.raises(vault.VaultError):
+        vault.restore_profile(store, key, A, "zepto", dst)
+    assert not dst.exists() or not any(dst.iterdir())
+
+
+def test_chained_symlink_escape_is_refused(tmp_path):
+    store = vault.LocalStore(tmp_path / "store")
+    key = os.urandom(32)
+
+    def setup(tf):
+        _link(tf, "d/l", "..")
+        _link(tf, "l2", "d/l/..")
+    store.put(vault.blob_key(A, "zepto"), _evil_blob(key, setup))
+    with pytest.raises(vault.VaultError):
+        vault.restore_profile(store, key, A, "zepto", tmp_path / "dst")
