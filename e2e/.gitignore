@@ -1,0 +1,5 @@
+node_modules/
+test-results/
+playwright-report/
+# scripts/e2e_local.sh: service logs and the fake worker's scratch profiles
+.run/
