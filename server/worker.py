@@ -144,6 +144,7 @@ def _close(*conns) -> None:
 def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | None = None) -> None:
     """Poll for jobs forever. Any error outside run_job (e.g. a dropped DB connection) is logged,
     the connection is reopened after a backoff, and the loop continues. max_loops is for tests."""
+    log.info("worker started")
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     s = settings()
     log.info("worker %s started", worker_id)

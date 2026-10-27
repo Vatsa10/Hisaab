@@ -1,0 +1,70 @@
+# Local stack: Postgres + migrations + API + worker. Dev-only credentials; see docs/deploy-local.md.
+x-app-env: &app-env
+  DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-local-dev-jwt-secret-change-me-0123456789}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "54330:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: postgres:16
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./tests/server/bootstrap.sql:/migrations/bootstrap.sql:ro
+      - ./supabase/migrations:/migrations/supabase:ro
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        run() { psql -v ON_ERROR_STOP=1 -q -h db -U postgres -d postgres -f "$$1"; }
+        run /migrations/bootstrap.sql
+        for f in $$(ls /migrations/supabase/*.sql | sort); do echo "applying $$f"; run "$$f"; done
+        echo "migrations done"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      PROFILE_STORE_URL: file:///data/vault
+      PROFILE_MASTER_KEY: ${PROFILE_MASTER_KEY:-}
+      PROXY_URL_TEMPLATE: ${PROXY_URL_TEMPLATE:-}
+    shm_size: 1gb
+    volumes:
+      - vault:/data/vault
+
+volumes:
+  vault:

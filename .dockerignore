@@ -1,0 +1,27 @@
+# secrets and personal data
+.env
+.env.*
+!.env.example
+deploy/azure/.env.deploy
+settings.json
+expenses.db
+profiles/
+profiles*/
+logs/
+reports/
+runs/
+recipes/*.json
+recipes/*.hint.txt
+
+# not needed at runtime
+.git/
+.gitattributes
+.superpowers/
+.claude/
+tests/
+docs/
+docker-compose.yml
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
