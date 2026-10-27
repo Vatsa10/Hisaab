@@ -24,3 +24,6 @@ profiles_users/
 
 # Azure deploy secrets
 deploy/azure/.env.deploy
+
+# git worktrees used by parallel build agents
+.claude/worktrees/
