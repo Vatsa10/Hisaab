@@ -2,6 +2,8 @@
 
 A = "00000000-0000-0000-0000-00000000000a"
 B = "00000000-0000-0000-0000-00000000000b"
+# 32+ bytes: PyJWT warns (InsecureKeyLengthWarning) on shorter HS256 keys.
+TEST_JWT_SECRET = "test-secret-of-at-least-32-bytes!!"
 
 
 def order(oid, total=100.0, status="delivered", items=None):
@@ -15,13 +17,13 @@ def settings_for_tests(**_):
 
     from server import vault
     from server.config import DEV_PROFILE_KEY, Settings
-    return Settings(database_url=os.environ["TEST_DATABASE_URL"], jwt_secret="test-secret",
+    return Settings(database_url=os.environ["TEST_DATABASE_URL"], jwt_secret=TEST_JWT_SECRET,
                     jwks_url="", otp_timeout_s=5,
                     profile_store_url=os.environ.get("PROFILE_STORE_URL", "file://vault_local"),
                     profile_master_key=vault.master_key_from_env(DEV_PROFILE_KEY))
 
 
-def make_token(sub, secret="test-secret", aud="authenticated", exp_in=3600):
+def make_token(sub, secret=TEST_JWT_SECRET, aud="authenticated", exp_in=3600):
     import time
 
     import jwt

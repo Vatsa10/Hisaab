@@ -73,10 +73,11 @@ def as_user():
 @pytest.fixture
 def client(pg, monkeypatch):
     from fastapi.testclient import TestClient
+    from helpers import TEST_JWT_SECRET
 
     from server.api import app
     monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", TEST_JWT_SECRET)
     monkeypatch.delenv("SUPABASE_JWKS_URL", raising=False)
     return TestClient(app)
 
