@@ -269,4 +269,56 @@ describe("lib/queries getSpendToDate", () => {
     expect(calls).toContainEqual(["gte", ["placed_at", "2026-09-01"]]);
     expect(calls).toContainEqual(["lt", ["placed_at", "2026-09-28"]]);
   });
+
+  /**
+   * A fake that applies the query's gte/lt on `placed_at` the way Postgres compares text, so the
+   * end bound is checked against real rows: "2026-09-31" is not a date, just a string that sorts
+   * after every "2026-09-30T…" and before every "2026-10-…".
+   */
+  function filteringClient(rows: Array<{ placed_at: string; total_amount: number; status: string | null }>) {
+    const bounds: { gte?: string; lt?: string } = {};
+    const builder: Record<string, unknown> = new Proxy(
+      {},
+      {
+        get(_t, prop: string) {
+          if (prop === "then") {
+            const data = rows.filter((r) => r.placed_at >= bounds.gte! && r.placed_at < bounds.lt!);
+            return (resolve: (v: unknown) => void) => resolve({ data, error: null });
+          }
+          return (...args: unknown[]) => {
+            if ((prop === "gte" || prop === "lt") && args[0] === "placed_at") bounds[prop] = String(args[1]);
+            return builder;
+          };
+        },
+      },
+    );
+    return { client: { from: () => builder } as unknown as SupabaseClient, bounds };
+  }
+
+  const SEPT = [
+    { placed_at: "2026-09-01T00:00:00", total_amount: 1, status: "delivered" },
+    { placed_at: "2026-09-09T23:30:00", total_amount: 10, status: "delivered" },
+    { placed_at: "2026-09-10T00:10:00", total_amount: 100, status: "delivered" },
+    { placed_at: "2026-09-30T23:59:00", total_amount: 1000, status: null }, // last day of a 30-day month
+    { placed_at: "2026-10-01T00:00:00", total_amount: 10000, status: "delivered" }, // next month
+  ];
+  const FEB = [
+    { placed_at: "2026-02-01T08:00:00", total_amount: 5, status: "delivered" },
+    { placed_at: "2026-02-28T22:10:00", total_amount: 50, status: "delivered" }, // last day of February
+    { placed_at: "2026-03-01T00:05:00", total_amount: 500, status: "delivered" }, // next month
+  ];
+
+  it.each([
+    { name: "day 30, 30-day month", month: "2026-09", day: 30, rows: SEPT, lt: "2026-09-31", sum: 1111 },
+    { name: "day 31, 30-day month", month: "2026-09", day: 31, rows: SEPT, lt: "2026-09-32", sum: 1111 },
+    { name: "day 29, February", month: "2026-02", day: 29, rows: FEB, lt: "2026-02-30", sum: 55 },
+    { name: "day 30, February", month: "2026-02", day: 30, rows: FEB, lt: "2026-02-31", sum: 55 },
+    { name: "day 31, February", month: "2026-02", day: 31, rows: FEB, lt: "2026-02-32", sum: 55 },
+    { name: "day 9 (zero-padded end)", month: "2026-09", day: 9, rows: SEPT, lt: "2026-09-10", sum: 11 },
+  ])("$name: ends before $lt and keeps the last day's orders", async ({ month, day, rows, lt, sum }) => {
+    const { getSpendToDate } = await vi.importActual<typeof import("@/lib/queries")>("@/lib/queries");
+    const fake = filteringClient(rows);
+    expect(await getSpendToDate(month, day, fake.client)).toBe(sum);
+    expect(fake.bounds).toEqual({ gte: `${month}-01`, lt });
+  });
 });

@@ -169,7 +169,12 @@ export async function getTopMerchants(year: number, c?: SupabaseClient): Promise
 /**
  * Spend in `month` ("YYYY-MM") from the 1st up to and including day `dayOfMonth`, for a fair
  * month-to-date comparison ("vs this time in September"). Same rule as the views: cancelled,
- * refunded and failed orders don't count. A day past the month's end simply covers the whole month.
+ * refunded and failed orders don't count.
+ *
+ * The end bound is `"<month>-<day+1>"`, zero-padded, compared as text: `placed_at` is zero-padded
+ * ISO text, not a date column, so the bound needn't be a real date. "2026-09-31" (or "-32", or
+ * "2026-02-30") sorts after every "2026-09-30T…" and before every "2026-10-…", so a day at or past
+ * the month's end covers the whole month, last day included.
  */
 export async function getSpendToDate(month: string, dayOfMonth: number, c?: SupabaseClient): Promise<number> {
   const db = client(c);

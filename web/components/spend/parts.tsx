@@ -2,13 +2,14 @@ import type { CSSProperties, ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/cn";
+import skeleton from "./skeleton.module.css";
 
 /**
  * A grey placeholder block in the `line` neutral (#e3e5e8), dark enough to read on white cards.
- * Size it with classes; it pulses gently (reduced motion: still).
+ * Size it with classes; it pulses gently between 100% and 70% opacity (reduced motion: still).
  */
 export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
-  return <span aria-hidden="true" style={style} className={cn("block animate-pulse rounded-tile bg-line", className)} />;
+  return <span aria-hidden="true" style={style} className={cn("block rounded-tile bg-line", skeleton.pulse, className)} />;
 }
 
 /** 8px app colour dot. */

@@ -1,0 +1,17 @@
+/*
+ * Skeleton pulse that stays legible: it dips only to 70% opacity (Tailwind's animate-pulse goes to
+ * 50%, which leaves the blocks faint on white cards). Reduced motion is handled globally.
+ */
+@keyframes skeletonPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.pulse {
+  animation: skeletonPulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
