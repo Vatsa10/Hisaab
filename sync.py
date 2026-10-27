@@ -42,19 +42,21 @@ def normalize_phone(raw: str) -> str:
     return digits
 
 
-def login(site: str, phone: str | None = None, dry_run: bool = False) -> bool:
+def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=None,
+          profile_dir=None, location: dict | None = None) -> bool:
     """With a phone number the LoginAgent fills the form and asks for the OTP; otherwise (or if it gets
     stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input."""
+    prompt = prompt or input
     recipe = recipes.load(site)
-    with open_site(site, login_mode=True) as (_, page, guard, capture):
+    with open_site(site, login_mode=True, profile_dir=profile_dir, location=location) as (_, page, guard, capture):
         try:
             browser.goto(page, browser.home_url(site))
         except Exception as e:  # e.g. a bot-filter 403; the agent backs off and retries from the error page
             log.warning("%s home page failed to load: %s", site, str(e).splitlines()[0])
         done = None
         if phone:
-            location = (load_settings().get("location") or {}).get("query", "")
-            la = agent.LoginAgent(site, page, guard, capture, phone, location, dry_run)
+            address = ((location or load_settings().get("location")) or {}).get("query", "")
+            la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt)
             try:
                 done = la.run()
             except Exception as e:
@@ -67,10 +69,10 @@ def login(site: str, phone: str | None = None, dry_run: bool = False) -> bool:
             if not done["success"]:
                 print(f"\n[{site}] automatic login stopped: {agent.mask(done['note'], {'PHONE': phone})}")
         if not done or not done["success"]:
-            input(f"\nLog in to {site} in the browser window (phone + OTP).\n"
-                  "Then open your Orders / order history page and press Enter here... ")
+            prompt(f"\nLog in to {site} in the browser window (phone + OTP).\n"
+                   "Then open your Orders / order history page and press Enter here... ")
             while not agent.site_allows_host(site, page.url):  # still on an error page / elsewhere
-                input(f"The browser is on {page.url[:60]}, not {site}. Open {site}'s Orders page, then press Enter... ")
+                prompt(f"The browser is on {page.url[:60]}, not {site}. Open {site}'s Orders page, then press Enter... ")
         orders_url = recipe["orders_page_url"] if recipe else page.url
         guard.login_mode = False
         capture.clear()
@@ -187,10 +189,11 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
     return list(orders.values())
 
 
-def sync_site(site: str, since: str | None, con) -> int:
+def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None) -> list[dict]:
+    """Fast path -> nav_trace replay -> re-learn; returns the orders (no database)."""
     recipe = recipes.load(site) or learn(site)
-    cfg = SITES[site]
-    with open_site(site, allowlist=recipe.get("read_post_allowlist")) as (_, page, guard, capture):
+    with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
+                   location=location) as (_, page, guard, capture):
         orders = None
         goto(page, recipe["orders_page_url"])
         if recipe.get("fast_path_ok", True):
@@ -215,6 +218,12 @@ def sync_site(site: str, since: str | None, con) -> int:
             orders = fast_path(page, recipe, since) if recipe["fast_path_ok"] else replay(page, capture, recipe, since)
     if since:
         orders = [o for o in orders if o["placed_at"] >= since]
+    return orders
+
+
+def sync_site(site: str, since: str | None, con) -> int:
+    orders = fetch_orders(site, since)
+    cfg = SITES[site]
     n = db.upsert_orders(con, cfg.get("db_site", site), orders, cfg.get("sub_platform"))
     print(f"{site}: {n} orders stored")
     return n

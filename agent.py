@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -356,8 +357,9 @@ class Discovery:
     }
     GOAL = "Open this site's order history page and load more past orders (scroll / show more) at least twice."
 
-    def __init__(self, site, page, guard, capture):
+    def __init__(self, site, page, guard, capture, prompt: Callable[[str], str] | None = None):
         self.site, self.page, self.guard, self.capture = site, page, guard, capture
+        self._prompt = prompt
         self.refs: dict[str, dict] = {}
         self.snap: dict = {"elements": [], "aria": "", "overlay": False}
         self.trace: list[dict] = []
@@ -378,16 +380,23 @@ class Discovery:
 
     # --- actions (also exposed to GPT as tools) ---
 
+    def prompt(self, text: str) -> str:
+        """Every human-input point goes through here; builtins.input is looked up per call (patchable)."""
+        return (self._prompt or input)(text)
+
     def ask_user(self, question: str):
         """Friday's computer_ask: hand a question to the human instead of failing, then carry on."""
         self.asks += 1
         if self.asks > 3:
             return {"error": "already asked the user 3 times; finish(success=false) if still stuck"}
         try:
-            answer = input(f"\n[{self.site}] The agent needs help: {question}\n"
-                           "Answer, or fix it in the browser and press Enter (type 'stop' to give up): ").strip()
+            answer = self.prompt(f"\n[{self.site}] The agent needs help: {question}\n"
+                                 "Answer, or fix it in the browser and press Enter (type 'stop' to give up): ").strip()
         except EOFError:  # non-interactive run
             answer = ""
+        except TimeoutError:  # unattended run: nobody answered in time
+            self.done = {"success": False, "note": "ask_timeout", "url": self.page.url}
+            return {"ok": True}
         if answer.lower() == "stop":
             self.done = {"success": False, "note": "user stopped the agent", "url": self.page.url}
             return {"ok": True}
@@ -725,8 +734,9 @@ class LoginAgent(Discovery):
         "done": "The user is logged in (no Login/Sign in button, account/profile visible) and the order history is shown.",
     }
 
-    def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False):
-        super().__init__(site, page, guard, capture)
+    def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False,
+                 prompt: Callable[[str], str] | None = None):
+        super().__init__(site, page, guard, capture, prompt)
         self.secrets["PHONE"] = phone
         self.location, self.dry_run = location, dry_run
         self.phone_typed = self.otp_entered = False
@@ -767,7 +777,11 @@ class LoginAgent(Discovery):
 
     def enter_otp(self, frame=None) -> None:
         frame = frame or self.page.main_frame
-        otp = input(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ").strip()
+        try:
+            otp = self.prompt(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ").strip()
+        except TimeoutError:
+            self.done = {"success": False, "note": "otp_timeout", "url": self.page.url}
+            return
         if not otp:
             self.history.append("user skipped the OTP")
             return
@@ -797,7 +811,11 @@ class LoginAgent(Discovery):
             self.done = {"success": True, "note": "dry run: reached the phone input", "url": self.page.url}
             return {"ok": True}
         if field == "OTP":
-            otp = input(f"\n[{self.site}] Enter the OTP you received (blank to skip): ").strip()
+            try:
+                otp = self.prompt(f"\n[{self.site}] Enter the OTP you received (blank to skip): ").strip()
+            except TimeoutError:
+                self.done = {"success": False, "note": "otp_timeout", "url": self.page.url}
+                return {"error": "timed out waiting for the OTP"}
             if not otp:
                 return {"error": "user did not provide an OTP"}
             self.secrets["OTP"], value = otp, otp
