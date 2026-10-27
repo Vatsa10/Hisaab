@@ -63,6 +63,15 @@ ALLOWED_NODES = frozenset({
 })
 REFUSED_PLAN_NODES = {"ModifyTable", "LockRows"}  # backstop behind the parse-tree check
 
+# Cast targets: plain scalars only. Casting text to regclass/regproc/a row type would look things up in the catalog.
+ALLOWED_CAST_TYPES = frozenset({
+    "int2", "int4", "int8", "integer", "bigint", "smallint", "numeric", "decimal", "real", "float4", "float8",
+    "text", "varchar", "char", "bpchar", "bool", "boolean", "date", "time", "timestamp", "timestamptz", "interval",
+})
+# Column names that are also function names, where `x.name` cannot become a dangerous call: name() is a cast to the
+# `name` type that takes text, never a row.
+NOTATION_SAFE = frozenset({"name"})
+
 SCHEMA = """PostgreSQL. You see only your own rows (amounts in INR; placed_at is ISO-8601 local time text, so
 substr(placed_at, 1, 7) = 'YYYY-MM'). Tables:
 orders(site text -- blinkit|zepto|swiggy|zomato, order_id text, sub_platform text -- 'instamart' for Swiggy Instamart,
@@ -85,7 +94,9 @@ now, current_date, age, make_date, AT TIME ZONE, string functions (lower, upper,
 replace, split_part, concat, left, right, position, strpos, initcap, regexp_replace, regexp_match), math (round,
 floor, ceil, abs, greatest, least, coalesce, nullif, div, mod, power, sqrt), window functions (row_number, rank,
 dense_rank, lag, lead, first_value, last_value, ntile, percent_rank, cume_dist, percentile_cont, percentile_disc)
-and norm_name. Casts (::numeric, ::date, ::int) are fine."""
+and norm_name. Casts only to plain types (::numeric, ::int, ::bigint, ::float8, ::text, ::date, ::timestamp,
+::interval). Refer to columns as column or alias.column (aliases must not be function names such as sum or count);
+never select a whole row (write o.* or list the columns)."""
 
 ANALYST = insights.analyst_prompt(SCHEMA)
 RUN_SQL = insights.sql_tool(f"Run one read-only PostgreSQL SELECT query over your own orders; returns up to "
@@ -154,47 +165,153 @@ def _names(parts) -> list[str]:
     return [p.sval for p in parts or ()]
 
 
-def check_query(query: str) -> tuple[str | None, set[str]]:
-    """(refusal reason or None, CTE names) for one analyst query, from Postgres's own parse tree."""
+def _inferred_name(val) -> str | None:
+    """The output column name Postgres gives an unaliased select-list entry, where it is certain (a column, a function
+    call, or a cast of one of those); None otherwise. Under-approximating only makes the check stricter."""
+    if isinstance(val, ast.ColumnRef) and isinstance(val.fields[-1], ast.String):
+        return val.fields[-1].sval
+    if isinstance(val, ast.FuncCall):
+        return _names(val.funcname)[-1]
+    if isinstance(val, ast.TypeCast):
+        return _inferred_name(val.arg)
+    return None
+
+
+def _output_names(nodes) -> set[str]:
+    """Every column name the query itself defines: select-list aliases and the names Postgres infers, CTE and
+    FROM-alias column lists, and VALUES's column1..N."""
+    names = set()
+    for n in nodes:
+        if isinstance(n, ast.SelectStmt):
+            for t in n.targetList or ():
+                name = t.name or _inferred_name(t.val)
+                if name:
+                    names.add(name)
+            width = max((len(row) for row in n.valuesLists or ()), default=0)
+            names.update(f"column{i}" for i in range(1, width + 1))
+        elif isinstance(n, ast.CommonTableExpr):
+            names.update(_names(n.aliascolnames))
+        elif isinstance(n, ast.Alias):
+            names.update(_names(n.colnames))
+    return names
+
+
+def _range_names(nodes) -> set[str]:
+    """Names a FROM item is known by in the query (its alias, else the relation or CTE name)."""
+    names = set()
+    for n in nodes:
+        if isinstance(n, ast.RangeVar):
+            names.add(n.alias.aliasname if n.alias else n.relname)
+        elif isinstance(n, ast.RangeSubselect) and n.alias:
+            names.add(n.alias.aliasname)
+        elif isinstance(n, ast.CommonTableExpr):
+            names.add(n.ctename)
+    return names
+
+
+def _stars_in_select_lists(nodes) -> set[int]:
+    """ids of `*` / `t.*` ColumnRefs that are a whole select-list entry (expanded into columns, never a row value)."""
+    return {id(t.val) for n in nodes if isinstance(n, ast.SelectStmt) for t in n.targetList or ()
+            if isinstance(t.val, ast.ColumnRef) and isinstance(t.val.fields[-1], ast.A_Star)}
+
+
+def check_query(query: str, known_columns=frozenset()) -> tuple[str | None, set[str], set[str]]:
+    """(refusal reason or None, CTE names, qualified field names) for one analyst query, from Postgres's own parse
+    tree. known_columns are the real column names of ALLOWED_TABLES. The caller must still refuse a qualified field
+    that is also a function name (scoped_sql does): Postgres reads `x.f` as f(x) when x has no column f."""
     try:
         stmts = pglast.parse_sql(query)
     except pglast.parser.ParseError as e:
-        return f"syntax error: {e}", set()
+        return f"syntax error: {e}", set(), set()
     if len(stmts) != 1:
-        return "exactly one SELECT statement is allowed", set()
+        return "exactly one SELECT statement is allowed", set(), set()
     root = stmts[0].stmt
     if not isinstance(root, ast.SelectStmt):
-        return "only a SELECT (optionally WITH ... SELECT) is allowed", set()
+        return "only a SELECT (optionally WITH ... SELECT) is allowed", set(), set()
     nodes = list(_walk(root))
     ctes = {n.ctename for n in nodes if isinstance(n, ast.CommonTableExpr)}
+    known = set(known_columns) | _output_names(nodes)
+    fields: set[str] = set()
+    refusal = _check_nodes(nodes, ctes, known, _range_names(nodes), _stars_in_select_lists(nodes), fields)
+    return refusal, ctes, fields
+
+
+def _check_nodes(nodes, ctes, known, ranges, select_stars, fields) -> str | None:
     for n in nodes:
         kind = type(n).__name__
         if isinstance(n, ast.SelectStmt):
             if n.intoClause is not None:
-                return "SELECT INTO is not allowed", ctes
+                return "SELECT INTO is not allowed"
             if n.lockingClause:
-                return "row locks (FOR UPDATE / FOR SHARE) are not allowed", ctes
+                return "row locks (FOR UPDATE / FOR SHARE) are not allowed"
         if kind not in ALLOWED_NODES:
-            return f"{kind} is not allowed in an analyst query", ctes
+            return f"{kind} is not allowed in an analyst query"
         if isinstance(n, ast.FuncCall):
             parts = _names(n.funcname)
             name = parts[-1] if parts else ""
             ok = (len(parts) == 1 and name in ALLOWED_FUNCTIONS) or (
                 len(parts) == 2 and parts[0] == "pg_catalog" and name in ALLOWED_FUNCTIONS - PUBLIC_FUNCTIONS)
             if not ok:
-                return f"function {'.'.join(parts)}() is not allowed", ctes
+                return f"function {'.'.join(parts)}() is not allowed"
         elif isinstance(n, ast.RangeVar):
             qualified = n.catalogname or n.schemaname
             if n.relname in ALLOWED_TABLES and n.schemaname in (None, "public") and not n.catalogname:
                 continue
             if not qualified and n.relname in ctes:
                 continue
-            return f"table {'.'.join(p for p in (n.catalogname, n.schemaname, n.relname) if p)} is not allowed", ctes
+            return f"table {'.'.join(p for p in (n.catalogname, n.schemaname, n.relname) if p)} is not allowed"
+        elif isinstance(n, ast.ColumnRef):
+            refusal = _check_column_ref(n, known, ranges, select_stars, fields)
+            if refusal:
+                return refusal
+        elif isinstance(n, ast.A_Indirection):
+            if not all(isinstance(i, ast.A_Indices) for i in n.indirection or ()):
+                return "field selection like (x).f is not allowed; use alias.column"
+        elif isinstance(n, ast.TypeCast):
+            refusal = _check_cast(n.typeName)
+            if refusal:
+                return refusal
+        elif isinstance(n, ast.ResTarget) and n.indirection:
+            return "assignment targets are not allowed"
+        elif isinstance(n, ast.JoinExpr) and n.join_using_alias is not None:
+            return "JOIN ... USING (...) AS alias is not allowed"
         elif isinstance(n, ast.A_Expr) and len(_names(n.name)) > 1:
-            return "schema-qualified operators are not allowed", ctes
+            return "schema-qualified operators are not allowed"
         elif isinstance(n, ast.CommonTableExpr) and not isinstance(n.ctequery, ast.SelectStmt):
-            return "WITH may only contain SELECT queries", ctes
-    return None, ctes
+            return "WITH may only contain SELECT queries"
+    return None
+
+
+def _check_column_ref(n, known, ranges, select_stars, fields) -> str | None:
+    """Postgres reads `x.f` as the call f(x) when x has no column f, and a bare FROM-item name as its whole row; so a
+    qualified name must end in a real or query-defined column, and a bare name must not be a FROM item."""
+    parts = n.fields
+    if isinstance(parts[-1], ast.A_Star):
+        if id(n) not in select_stars:
+            return "a whole row (t.* or *) may only be a select-list entry"
+        return None if len(parts) <= 2 else "three-part names are not allowed; use alias.column"
+    names = [p.sval for p in parts]
+    if len(names) == 1:
+        if names[0] in ranges:  # could be the whole row of that FROM item
+            if names[0] in known:
+                return f"{names[0]!r} is both a column and a table/alias in this query; write alias.{names[0]}"
+            return f"{names[0]!r} is a table or alias; select its columns, not the whole row"
+        return None
+    if len(names) > 2:
+        return "three-part names are not allowed; use alias.column"
+    if names[1] not in known:
+        return f"{names[0]}.{names[1]} is not a known column"
+    fields.add(names[1])
+    return None
+
+
+def _check_cast(tn) -> str | None:
+    parts = _names(tn.names)
+    plain = (parts and parts[-1] in ALLOWED_CAST_TYPES and len(parts) <= 2
+             and (len(parts) == 1 or parts[0] == "pg_catalog") and not (tn.setof or tn.pct_type or tn.arrayBounds))
+    if not plain:
+        return f"cast to {'.'.join(parts) or '?'} is not allowed; cast to a plain number, text, date or time type"
+    return None
 
 
 # --- running a query ---------------------------------------------------------------------------------------
@@ -211,12 +328,19 @@ def scoped_sql(conn, user_id: str, query: str) -> dict:
     body = (query or "").strip()
     if len(body) > MAX_QUERY_CHARS:
         return {"error": f"query is longer than {MAX_QUERY_CHARS} characters"}
-    refusal, ctes = check_query(body)
-    if refusal:
-        return {"error": refusal}
     conn.execute("begin read only")
     try:
         _enter_scope(conn, uid)
+        refusal, ctes, fields = check_query(body, _known_columns(conn))
+        if refusal:
+            return {"error": refusal}
+        # `x.f` is the call f(x) when x has no column f: no qualified field may share a name with a function.
+        callable_fields = {r[0] for r in conn.execute(
+            "select distinct proname::text from pg_proc where pronamespace in "
+            "('pg_catalog'::regnamespace, 'public'::regnamespace) and proname = any(%s)", (sorted(fields),))}
+        callable_fields -= NOTATION_SAFE
+        if callable_fields:
+            return {"error": f"{sorted(callable_fields)[0]!r} is also a function name; give the column another alias"}
         # A CTE name that is also a real relation would reach that relation wherever the CTE is out of scope.
         shadowing = [r[0] for r in conn.execute(
             "select n from unnest(%s::text[]) n where to_regclass(quote_ident(n)) is not null", (sorted(ctes),))]
@@ -243,6 +367,14 @@ def scoped_sql(conn, user_id: str, query: str) -> dict:
         return {"columns": columns, "rows": [tuple(r) for r in rows[:MAX_ROWS]], "truncated": len(rows) > MAX_ROWS}
     finally:
         conn.execute("rollback")
+
+
+def _known_columns(conn) -> set[str]:
+    """Real column names of the allowlisted tables and views, read from the catalog (one small query per call, so a
+    migration that adds a column needs no restart)."""
+    return {r[0] for r in conn.execute(
+        "select attname::text from pg_attribute where attrelid = any(%s::regclass[]) and attnum > 0 "
+        "and not attisdropped", (sorted(ALLOWED_TABLES),))}
 
 
 def _enter_scope(conn, uid: str) -> None:

@@ -209,6 +209,34 @@ ESCAPES = [
     "select pg_notify('otp_x', 'y')",
     "select lo_import('/etc/passwd')",
     "select g from generate_series(1, 3) g",
+    # Functional notation: Postgres reads x.f and (x).f as f(x), with no FuncCall in the parse tree.
+    "select o.to_jsonb from orders o",
+    "select (o).row_to_json from orders o",
+    "select o.pg_typeof from orders o",
+    "select o.num_nonnulls from orders o",
+    "select o.pg_column_size from orders o",
+    "select (o.merchant).norm_name from orders o",
+    "select orders.to_jsonb from orders",
+    "select x.to_jsonb from (select 1 as y) x",
+    # ... even when the query defines an output with that name somewhere else.
+    "select o.to_jsonb, 1 as to_jsonb from orders o",
+    "select o.concat from orders o, (select concat('a') from orders) c",
+    "select (o).* from orders o",
+    "select o.public.orders from orders o",
+    # Whole rows as values.
+    "select o from orders o",
+    "select concat(o) from orders o",
+    "select count(o.*) from orders o",
+    "select (o.*)::text from orders o",
+    "select m from (select * from orders) m",
+    # Casts to anything but plain scalars reach the catalog.
+    "select 'pg_authid'::regclass",
+    "select 'set_config'::regproc",
+    "select null::jobs",
+    "select null::orders",
+    "select '1'::int[]",
+    "select 'x'::pg_catalog.regclass",
+    "select 'x'::public.text",
     # Tables outside the allowlist.
     "select * from jobs",
     "select * from profiles",
@@ -274,6 +302,19 @@ def test_ask_sql_hides_database_text_for_errors_raised_while_running(pg):
      "group by 1 having count(*) > 1", lambda rows: rows[0][:2] == ("Store", 110)),
     ("select site from orders where placed_at::date between current_date - 10000 and current_date "
      "and lower(site) in (select lower(site) from monthly_spend) limit 1", lambda rows: rows == [("zepto",)]),
+    # Qualified columns: real ones, CTE outputs, subquery aliases, column lists; o.* as a select-list entry.
+    ("select o.merchant from orders o where o.order_id = '1'", lambda rows: rows == [("Store",)]),
+    ("with c as (select sum(total_amount) as total from orders) select c.total from c",
+     lambda rows: rows == [(220.0,)]),
+    ("select x.amount from (select sum(total_amount) as amount from orders) x", lambda rows: rows == [(220.0,)]),
+    ("with c(total) as (select sum(total_amount) from orders) select c.total from c", lambda rows: rows == [(220.0,)]),
+    ("select v.n from (values (1), (2)) v(n) order by v.n", lambda rows: rows == [(1,), (2,)]),
+    ("select i.name, i.qty from order_items i", lambda rows: rows == [("Amul Milk!", None)]),
+    ("select m.orders from monthly_spend m where m.site in (select site from orders)", lambda rows: rows == [(2,)]),
+    ("select o.* from orders o where o.order_id = '1'", lambda rows: rows[0][2] == "1"),
+    ("select total_amount::numeric(10, 2), placed_at::timestamp with time zone, '7'::double precision, "
+     "'2025-01-01'::date + interval '1 month', 'x'::varchar(3), 1::bigint, true::boolean from orders limit 1",
+     lambda rows: len(rows) == 1),
 ])
 def test_ask_sql_allows_analyst_queries(pg, ask_conn, query, check):
     store.upsert_orders(pg, A, "zepto", [order("1", 100), order("2", 120, items=[{"name": "Amul Milk!"}])])
