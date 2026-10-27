@@ -21,3 +21,6 @@ __pycache__/
 
 # per-user browser profiles (server worker)
 profiles_users/
+
+# Azure deploy secrets
+deploy/azure/.env.deploy
