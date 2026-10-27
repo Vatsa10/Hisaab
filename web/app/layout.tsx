@@ -1,13 +1,23 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
+import { STARTUP_SCREENS, startupImageFile, startupImageMedia } from "@/lib/startup-images.mjs";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "Expense Agent", template: "%s · Expense Agent" },
   description: "Your Blinkit, Zepto, Swiggy and Zomato spending in one place.",
   applicationName: "Expense Agent",
-  appleWebApp: { capable: true, title: "Spend", statusBarStyle: "default" },
+  appleWebApp: {
+    capable: true,
+    title: "Spend",
+    statusBarStyle: "default",
+    // Launch images in the brand background, so iOS doesn't flash white while starting.
+    startupImage: STARTUP_SCREENS.map((s) => ({
+      url: `/splash/${startupImageFile(s)}`,
+      media: startupImageMedia(s),
+    })),
+  },
   formatDetection: { telephone: false, email: false, address: false },
   icons: {
     icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],

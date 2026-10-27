@@ -1,73 +1,75 @@
-// Generates the PWA icons in public/icons/: a full-bleed #0a7c55 square with a white rupee
-// sign (₹) drawn from strokes. No dependencies and no fonts, so the output is identical on
-// every machine. Full-bleed because iOS rounds the corners itself and Android may mask it;
-// the glyph stays inside the central 60% safe zone.
+// Generates the PWA icons (public/icons/) and the iOS launch images (public/splash/) from the
+// shared rupee glyph in lib/brand-glyph.mjs, the same geometry <BrandMark> draws as SVG.
+// No dependencies and no fonts, so the output is identical on every machine.
 //
 //   node scripts/make-icons.mjs
+//
+// Icons are full-bleed #0a7c55 squares (iOS rounds the corners itself; Android may mask them).
+// Launch images are the brand background #f6f7f9 with the mark centred, so iOS never flashes
+// white while the app starts.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
+import { insideBrandGlyph } from "../lib/brand-glyph.mjs";
+import { STARTUP_SCREENS, startupImageFile } from "../lib/startup-images.mjs";
 
-const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "public", "icons");
-const BG = [0x0a, 0x7c, 0x55];
-const FG = [0xff, 0xff, 0xff];
+const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const ACCENT = [0x0a, 0x7c, 0x55];
+const WHITE = [0xff, 0xff, 0xff];
+const CANVAS = [0xf6, 0xf7, 0xf9];
+const SS = 4; // 4x4 supersampling for smooth edges
 
-// The ₹ glyph in unit coordinates (0..1), as round-capped strokes of width W.
-const W = 0.062;
-const segments = [
-  [0.33, 0.27, 0.67, 0.27], // top bar
-  [0.33, 0.385, 0.67, 0.385], // second bar
-  [0.46, 0.5, 0.36, 0.5], // bottom of the bowl back to the left
-  [0.36, 0.5, 0.63, 0.77], // diagonal leg
-];
-// The bowl: right half of a circle joining the top bar to the bottom stroke.
-const bowl = { cx: 0.46, cy: 0.385, r: 0.115 };
+const mix = (a, b, t) => a.map((v, i) => Math.round(v * (1 - t) + b[i] * t));
 
-function distToSegment(px, py, [x1, y1, x2, y2]) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+/** Raw RGB scanlines (filter byte 0 per row) filled with one colour. */
+function canvas(width, height, rgb) {
+  const rowLen = width * 3 + 1;
+  const raw = Buffer.alloc(rowLen * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) raw.set(rgb, y * rowLen + 1 + x * 3);
+  }
+  return { raw, rowLen };
 }
 
-function distToBowl(px, py) {
-  const { cx, cy, r } = bowl;
-  if (px >= cx) return Math.abs(Math.hypot(px - cx, py - cy) - r);
-  // Left of centre the arc has ended; distance to its two end points.
-  return Math.min(Math.hypot(px - cx, py - (cy - r)), Math.hypot(px - cx, py - (cy + r)));
+/** Inside a rounded square of side 1 and corner radius r (unit coordinates). */
+function insideRoundedSquare(x, y, r) {
+  if (r <= 0) return x >= 0 && x <= 1 && y >= 0 && y <= 1;
+  const qx = Math.max(Math.abs(x - 0.5) - (0.5 - r), 0);
+  const qy = Math.max(Math.abs(y - 0.5) - (0.5 - r), 0);
+  return Math.hypot(qx, qy) <= r && Math.abs(x - 0.5) <= 0.5 && Math.abs(y - 0.5) <= 0.5;
 }
 
-function inGlyph(x, y) {
-  if (distToBowl(x, y) <= W / 2) return true;
-  return segments.some((s) => distToSegment(x, y, s) <= W / 2);
-}
-
-function render(size) {
-  const SS = 4; // 4x4 supersampling for smooth edges
-  const rowLen = size * 3 + 1;
-  const raw = Buffer.alloc(rowLen * size);
-  for (let y = 0; y < size; y++) {
-    raw[y * rowLen] = 0; // filter: none
-    for (let x = 0; x < size; x++) {
-      let hits = 0;
+/**
+ * Draw the brand tile (accent square with the white glyph) into `img` at (left, top), `size`
+ * pixels square, with corner radius `radius` as a fraction of the size (0 = full bleed).
+ */
+function drawMark(img, left, top, size, radius, background) {
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let tile = 0;
+      let glyph = 0;
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
-          if (inGlyph((x + (sx + 0.5) / SS) / size, (y + (sy + 0.5) / SS) / size)) hits++;
+          const u = (px + (sx + 0.5) / SS) / size;
+          const v = (py + (sy + 0.5) / SS) / size;
+          if (!insideRoundedSquare(u, v, radius)) continue;
+          tile++;
+          if (insideBrandGlyph(u, v)) glyph++;
         }
       }
-      const a = hits / (SS * SS);
-      const o = y * rowLen + 1 + x * 3;
-      for (let c = 0; c < 3; c++) raw[o + c] = Math.round(BG[c] * (1 - a) + FG[c] * a);
+      const n = SS * SS;
+      const onTile = mix(ACCENT, WHITE, tile ? glyph / tile : 0);
+      const rgb = mix(background, onTile, tile / n);
+      img.raw.set(rgb, (top + py) * img.rowLen + 1 + (left + px) * 3);
     }
   }
-  return raw;
 }
 
-const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+const CRC_TABLE = Array.from({ length: 256 }, (_, k) => {
+  let c = k;
+  for (let i = 0; i < 8; i++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
   return c >>> 0;
 });
 
@@ -86,26 +88,46 @@ function chunk(type, data) {
   return Buffer.concat([len, body, crc]);
 }
 
-function png(size) {
+function png(width, height, raw) {
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(size, 0);
-  ihdr.writeUInt32BE(size, 4);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 2; // colour type: RGB (opaque, as iOS wants)
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(render(size), { level: 9 })),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
     chunk("IEND", Buffer.alloc(0)),
   ]);
 }
 
-mkdirSync(OUT, { recursive: true });
+function write(rel, data) {
+  const file = join(PUBLIC, rel);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, data);
+  console.log(`wrote public/${rel.replace(/\\/g, "/")}`);
+}
+
+// Home-screen and manifest icons: full bleed.
 for (const [name, size] of [
   ["icon-192.png", 192],
   ["icon-512.png", 512],
   ["apple-touch-icon.png", 180],
 ]) {
-  writeFileSync(join(OUT, name), png(size));
-  console.log(`wrote public/icons/${name} (${size}x${size})`);
+  const img = canvas(size, size, ACCENT);
+  drawMark(img, 0, 0, size, 0, ACCENT);
+  write(join("icons", name), png(size, size, img.raw));
+}
+
+// Launch images: the 56pt login mark scaled to 96pt, centred on the brand background.
+const MARK_PT = 96;
+const MARK_RADIUS = 16 / 56; // same proportion as the login tile (rounded-logo on a 56px mark)
+for (const screen of STARTUP_SCREENS) {
+  const w = screen.width * screen.dpr;
+  const h = screen.height * screen.dpr;
+  const size = MARK_PT * screen.dpr;
+  const img = canvas(w, h, CANVAS);
+  drawMark(img, Math.round((w - size) / 2), Math.round((h - size) / 2), size, MARK_RADIUS, CANVAS);
+  write(join("splash", startupImageFile(screen)), png(w, h, img.raw));
 }

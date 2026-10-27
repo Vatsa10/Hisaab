@@ -14,7 +14,9 @@ export interface ButtonStyle {
 const BASE =
   "inline-flex select-none items-center justify-center gap-2 rounded-control font-semibold " +
   "transition-[background-color,box-shadow,transform,opacity] duration-150 ease-out-quart " +
-  "active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50";
+  "active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 " +
+  // Busy (loading) buttons are disabled too, but keep full colour; only truly disabled ones dim.
+  "aria-busy:pointer-events-auto aria-busy:cursor-progress aria-busy:opacity-100";
 
 const VARIANTS: Record<ButtonVariant, string> = {
   primary: "bg-accent text-white hover:bg-accent-pressed active:bg-accent-pressed",
@@ -26,7 +28,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
 // Every size keeps at least a 44px hit area.
 const SIZES: Record<ButtonSize, string> = {
   md: "min-h-11 px-4 text-body",
-  lg: "min-h-12 px-5 text-[1.0625rem]",
+  lg: "min-h-12 px-5 text-headline",
 };
 
 /** Button classes, for links (next/link) that should look like buttons. */

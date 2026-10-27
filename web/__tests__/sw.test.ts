@@ -19,9 +19,13 @@ function makeCaches() {
     const store = stores.get(name)!;
     return {
       match: async (req: { url: string } | string) => store.get(typeof req === "string" ? req : req.url)?.clone(),
+      // Cache API semantics: put replaces a match by removing it and appending, keys() is in insertion order.
       put: async (req: { url: string }, res: Response) => {
+        store.delete(req.url);
         store.set(req.url, res);
       },
+      keys: async () => [...store.keys()].map((url) => ({ url })),
+      delete: async (req: { url: string } | string) => store.delete(typeof req === "string" ? req : req.url),
       addAll: async () => {},
     };
   };
@@ -112,6 +116,39 @@ describe("service worker", () => {
     handlers.fetch!(offline.event);
     const cached = (await offline.respondWith.mock.calls[0]![0]) as Response;
     expect(await cached.text()).toBe("<p>live</p>");
+  });
+
+  it("drops cached pages when a sign-in lands on the auth callback, without intercepting it", async () => {
+    fetchImpl.mockResolvedValueOnce(new Response("<p>user A</p>", { status: 200 }));
+    const { handlers, caches } = boot(fetchImpl as unknown as typeof fetch);
+    const nav = fetchEvent(`${ORIGIN}/spend`, { mode: "navigate" });
+    handlers.fetch!(nav.event);
+    await nav.respondWith.mock.calls[0]![0];
+    await Promise.all(nav.event.waitUntil.mock.calls.map((c) => c[0]));
+    expect([...caches.stores.keys()].some((k) => k.startsWith("pages-"))).toBe(true);
+
+    const cb = fetchEvent(`${ORIGIN}/auth/callback?code=abc`, { mode: "navigate" });
+    handlers.fetch!(cb.event);
+    expect(cb.respondWith).not.toHaveBeenCalled();
+    await Promise.all(cb.event.waitUntil.mock.calls.map((c) => c[0]));
+    expect([...caches.stores.keys()].some((k) => k.startsWith("pages-"))).toBe(false);
+  });
+
+  it("keeps at most 30 cached pages, dropping the oldest", async () => {
+    fetchImpl.mockImplementation(async () => new Response("<p>page</p>", { status: 200 }));
+    const { handlers, caches } = boot(fetchImpl as unknown as typeof fetch);
+    for (let i = 0; i < 33; i++) {
+      const nav = fetchEvent(`${ORIGIN}/orders/swiggy/${i}`, { mode: "navigate" });
+      handlers.fetch!(nav.event);
+      await nav.respondWith.mock.calls[0]![0];
+      await Promise.all(nav.event.waitUntil.mock.calls.map((c) => c[0]));
+    }
+    const pages = [...caches.stores.entries()].find(([k]) => k.startsWith("pages-"))![1];
+    expect(pages.size).toBe(30);
+    expect(pages.has(`${ORIGIN}/orders/swiggy/0`)).toBe(false);
+    expect(pages.has(`${ORIGIN}/orders/swiggy/2`)).toBe(false);
+    expect(pages.has(`${ORIGIN}/orders/swiggy/3`)).toBe(true);
+    expect(pages.has(`${ORIGIN}/orders/swiggy/32`)).toBe(true);
   });
 
   it("shows an offline page when a navigation was never cached", async () => {

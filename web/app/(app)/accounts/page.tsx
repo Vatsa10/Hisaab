@@ -21,14 +21,14 @@ export default async function AccountsPage() {
         <ul className="divide-y divide-line-soft px-4">
           {APPS.map((app) => (
             <li key={app.id} className="flex min-h-14 items-center gap-3">
-              <span aria-hidden="true" className={cn("size-7 shrink-0 rounded-lg", app.dotClass)} />
+              <span aria-hidden="true" className={cn("size-7 shrink-0 rounded-tile", app.dotClass)} />
               <span className="flex-1 font-medium">{app.name}</span>
               <span className="text-label text-ink-muted">Not connected</span>
             </li>
           ))}
         </ul>
       </Card>
-      <p className="mt-2 px-1 text-label text-ink-muted">
+      <p className="mt-2 text-label text-ink-muted">
         Instamart orders come in with your Swiggy account.
       </p>
 

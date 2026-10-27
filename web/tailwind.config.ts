@@ -5,6 +5,8 @@ import type { Config } from "tailwindcss";
 const rgb = (name: string) => `rgb(var(--${name}) / <alpha-value>)`;
 
 const config: Config = {
+  // iOS keeps :hover "stuck" after a tap; only apply hover styles where hover really exists.
+  future: { hoverOnlyWhenSupported: true },
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}"],
   theme: {
     extend: {
@@ -39,6 +41,7 @@ const config: Config = {
         label: ["0.8125rem", { lineHeight: "1.125rem" }], // 13px: secondary lines
         body: ["0.9375rem", { lineHeight: "1.375rem" }], // 15px
         field: ["1rem", { lineHeight: "1.5rem" }], // 16px: inputs (no iOS zoom on focus)
+        headline: ["1.0625rem", { lineHeight: "1.5rem", fontWeight: "600" }], // 17px: card / sheet titles, large buttons
         title: ["1.5rem", { lineHeight: "1.875rem", letterSpacing: "-0.01em", fontWeight: "700" }],
         figure: ["1.875rem", { lineHeight: "2.25rem", letterSpacing: "-0.02em", fontWeight: "700" }],
       },
@@ -47,6 +50,8 @@ const config: Config = {
         control: "12px",
         field: "10px",
         sheet: "20px",
+        tile: "8px", // inner segments and small tiles (concentric inside control + 4px)
+        logo: "16px", // brand mark tile
       },
       boxShadow: {
         card: "0 1px 2px rgb(17 24 39 / 0.06)",
@@ -61,11 +66,15 @@ const config: Config = {
       },
       keyframes: {
         "sheet-in": { from: { transform: "translateY(100%)" }, to: { transform: "translateY(0)" } },
+        "sheet-out": { from: { transform: "translateY(0)" }, to: { transform: "translateY(100%)" } },
         "fade-in": { from: { opacity: "0" }, to: { opacity: "1" } },
+        "fade-out": { from: { opacity: "1" }, to: { opacity: "0" } },
       },
       animation: {
         "sheet-in": "sheet-in 280ms cubic-bezier(0.25, 1, 0.5, 1)",
+        "sheet-out": "sheet-out 200ms cubic-bezier(0.5, 0, 0.75, 0) forwards",
         "fade-in": "fade-in 200ms ease-out",
+        "fade-out": "fade-out 200ms ease-in forwards",
       },
     },
   },

@@ -30,11 +30,11 @@ export function TextField({ label, hint, error, trailing, id, className, ...inpu
       <div
         className={cn(
           "flex min-h-12 items-center rounded-field border bg-surface transition-[border-color,box-shadow] duration-150",
-          "focus-within:ring-2",
+          "focus-within:ring-[3px]",
           // An invalid field stays red while focused, so the error is not hidden by the focus ring.
           error
-            ? "border-danger focus-within:ring-danger/20"
-            : "border-line-field focus-within:border-accent focus-within:ring-accent/20",
+            ? "border-danger focus-within:ring-danger/25"
+            : "border-line-field focus-within:border-accent focus-within:ring-accent/25",
         )}
       >
         <input

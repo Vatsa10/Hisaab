@@ -12,6 +12,9 @@ const auth = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/supabase/client", () => ({ getSupabaseBrowserClient: () => ({ auth }) }));
 
+const pwa = vi.hoisted(() => ({ clearPageCache: vi.fn(async () => {}) }));
+vi.mock("@/lib/pwa", () => pwa);
+
 import { LoginForm } from "@/components/auth/LoginForm";
 
 const session = { access_token: "t" };
@@ -39,6 +42,34 @@ describe("LoginForm", () => {
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(auth.signInWithPassword).toHaveBeenCalledWith({ email: "a@b.co", password: "secret1" });
     expect(router.replace).toHaveBeenCalledWith("/orders");
+  });
+
+  it("drops another account's cached pages before entering the app", async () => {
+    auth.signInWithPassword.mockResolvedValue({ data: { session }, error: null });
+    render(<LoginForm next="/spend" />);
+    await userEvent.type(screen.getByLabelText("Email"), "a@b.co");
+    await userEvent.type(screen.getByLabelText("Password"), "secret1");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(pwa.clearPageCache).toHaveBeenCalledOnce();
+    expect(pwa.clearPageCache.mock.invocationCallOrder[0]!).toBeLessThan(
+      router.replace.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("keeps the submit button at full colour while busy (only real disabled dims)", async () => {
+    auth.signInWithPassword.mockReturnValue(new Promise(() => {}));
+    render(<LoginForm next="/spend" />);
+    await userEvent.type(screen.getByLabelText("Email"), "a@b.co");
+    await userEvent.type(screen.getByLabelText("Password"), "secret1");
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const btn = screen.getByRole("button", { name: "Sign in" });
+    expect(btn).toHaveAttribute("aria-busy", "true");
+    expect(btn.className).toContain("aria-busy:opacity-100");
+  });
+
+  it("makes the account switch a 44px-tall tablist", () => {
+    render(<LoginForm next="/spend" />);
+    for (const tab of screen.getAllByRole("tab")) expect(tab.className).toContain("min-h-11");
   });
 
   it("explains a wrong password without echoing it", async () => {

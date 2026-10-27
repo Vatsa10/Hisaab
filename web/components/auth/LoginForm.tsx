@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { TextField } from "@/components/ui/TextField";
 import { cn } from "@/lib/cn";
+import { clearPageCache } from "@/lib/pwa";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type Mode = "signin" | "signup";
@@ -106,6 +107,8 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
         setMode("signin");
         return;
       }
+      // A different account may have used this device: never show its cached pages.
+      await clearPageCache();
       router.replace(next);
       router.refresh();
     } catch (err) {
@@ -161,7 +164,7 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
             tabIndex={mode === m ? 0 : -1}
             onClick={() => switchMode(m)}
             className={cn(
-              "min-h-10 rounded-[9px] text-label font-semibold transition-[background-color,color,box-shadow] duration-150",
+              "min-h-11 rounded-tile text-label font-semibold transition-[background-color,color,box-shadow] duration-150",
               mode === m ? "bg-surface text-ink shadow-card" : "text-ink-muted hover:text-ink",
             )}
           >
@@ -206,7 +209,7 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
               onClick={() => setShowPassword((s) => !s)}
               aria-label={showPassword ? "Hide password" : "Show password"}
               aria-pressed={showPassword}
-              className="mr-1 min-h-11 shrink-0 rounded-[8px] px-3 text-label font-semibold text-accent active:opacity-60"
+              className="mr-1 min-h-11 shrink-0 rounded-tile px-3 text-label font-semibold text-accent active:opacity-60"
             >
               {showPassword ? "Hide" : "Show"}
             </button>

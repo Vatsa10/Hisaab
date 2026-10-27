@@ -26,6 +26,25 @@ describe("safeNextPath", () => {
     }
   });
 
+  it("rejects paths that URL parsers turn into another host (tab, CR, LF stripped)", () => {
+    for (const bad of ["/\t/evil.example", "/\n/evil.example", "/\r/evil.example", "/%09/evil.example"]) {
+      expect(safeNextPath(bad), JSON.stringify(bad)).toBe(HOME_PATH);
+    }
+    // what a browser would do with the first one, for the record
+    expect(new URL("/\t/evil.example", "https://app.example").host).toBe("evil.example");
+  });
+
+  it("rejects any whitespace or control character and encoded slashes or backslashes", () => {
+    for (const bad of ["/orders x", "/orders\u0000", "/orders\u007f", "/%2F/evil.example", "/%5Cevil.example", "/%0a/evil.example"]) {
+      expect(safeNextPath(bad), JSON.stringify(bad)).toBe(HOME_PATH);
+    }
+  });
+
+  it("returns the normalised same-origin path, query and hash", () => {
+    expect(safeNextPath("/orders?month=2026-07#top")).toBe("/orders?month=2026-07#top");
+    expect(safeNextPath("/orders/../ask")).toBe("/ask");
+  });
+
   it("uses /spend as home", () => {
     expect(HOME_PATH).toBe("/spend");
   });

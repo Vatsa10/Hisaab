@@ -31,7 +31,7 @@ never go in any `NEXT_PUBLIC_*` variable or anywhere in `web/`.
 | `pnpm --dir web typecheck` | `tsc --noEmit` |
 | `pnpm --dir web build` | Production build |
 | `pnpm --dir web start` | Serve the production build on :3000 |
-| `pnpm --dir web icons` | Regenerate `public/icons/*.png` (dependency-free script) |
+| `pnpm --dir web icons` | Regenerate `public/icons/*.png` and the iOS launch images `public/splash/*.png` from `lib/brand-glyph.mjs` (dependency-free) |
 
 ### Building without Supabase
 
@@ -58,11 +58,19 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 pnpm --dir web build
   `getSupabaseServerClient()` (anon key + RLS). Actions call the FastAPI service through
   `apiFetch(path, init)` (`lib/api.ts`), which adds `Authorization: Bearer <access token>` and
   throws `ApiError(status, detail)`; status `0` means the server was unreachable.
-- **PWA**: `app/manifest.ts` (standalone, theme `#0a7c55`, background `#f6f7f9`), iOS meta
-  tags and apple-touch-icon in `app/layout.tsx`, and `public/sw.js`, registered in production
-  only. The worker handles same-origin navigations (network first, last good copy offline) and
-  `/_next/static` + `/icons` (cache first). It never intercepts or caches the API, Supabase,
-  non-GET requests or `/auth/*`. Signing out clears the cached pages.
+- **PWA**: `app/manifest.ts` (name "Expense Agent", short_name "Spend", standalone, theme
+  `#0a7c55`, background `#f6f7f9`), iOS meta tags, apple-touch-icon and
+  `apple-touch-startup-image` launch images (iPhone 12 mini to 15 Pro Max, portrait, listed in
+  `lib/startup-images.mjs`) in `app/layout.tsx`, and `public/sw.js`, registered in production
+  only. The worker handles same-origin navigations (network first, last good copy offline, at
+  most 30 pages, oldest dropped) and `/_next/static` + `/icons` (cache first). It never
+  intercepts or caches the API, Supabase, non-GET requests or `/auth/*`. Cached pages are
+  dropped on every sign-in (password: `lib/pwa.ts#clearPageCache`; Google / email link: the
+  worker on `/auth/callback`) and on sign-out, so one account's pages never show to another.
+- **Redirects**: `?next=` is only honoured through `lib/routes.ts#safeNextPath`, which resolves
+  it against a sentinel origin, requires that origin, rejects whitespace/control characters
+  (raw or percent-encoded), backslashes and encoded `//`, and returns the normalised
+  path + query + hash.
 - **Privacy**: phone numbers and OTPs are never written to localStorage, sessionStorage,
   IndexedDB or the Cache API, and nothing logs cookies, tokens, OTPs or phone numbers.
 
@@ -80,10 +88,13 @@ build screens from these, not raw hex values.
 | `up` / `up-soft` | `#c2410c` / `#fff7ed` | spending went up |
 | `danger` / `danger-soft` | `#b42318` / `#fef3f2` | errors, sign out |
 | `app-zepto` `app-blinkit` `app-swiggy` `app-instamart` `app-zomato` | brand colours | app dots and tiles |
-| `rounded-card` / `rounded-control` / `rounded-field` / `rounded-t-sheet` | 14 / 12 / 10 / 20px | |
+| `rounded-card` / `rounded-control` / `rounded-field` / `rounded-tile` / `rounded-logo` / `rounded-t-sheet` | 14 / 12 / 10 / 8 / 16 / 20px | `tile` is concentric inside `control` with a 4px gap |
 | `shadow-card`, `shadow-sheet` | tinted shadows | |
-| `text-caption` `text-label` `text-body` `text-field` `text-title` `text-figure` | 11 / 13 / 15 / 16 / 24 / 30px | |
+| `text-caption` `text-label` `text-body` `text-field` `text-headline` `text-title` `text-figure` | 11 / 13 / 15 / 16 / 17 (600) / 24 / 30px | `headline`: card and sheet titles, large buttons |
 | `px-safe`, `pt-safe`, `pb-safe` | `env(safe-area-inset-*)` | notch and home indicator |
+
+Hover styles apply only on devices that really hover (`future.hoverOnlyWhenSupported`), so
+taps on iPhone never leave a stuck hover state.
 
 Font: the system stack `-apple-system, "SF Pro Text", "Segoe UI", sans-serif` (SF Pro on iPhone).
 Light theme only, as in the approved mockups.
@@ -93,11 +104,16 @@ Components (`components/ui/`), all typed and server-safe unless noted:
 - `Card` (`as`, `padding`): white 14px-radius surface.
 - `Button` (`variant` primary | secondary | ghost | danger, `size` md | lg, `fullWidth`,
   `loading`, `icon`) and `buttonClassName()` for button-styled `next/link`s. Always 44px+ tall.
+  A loading button is disabled + `aria-busy` but keeps full colour; only truly disabled ones dim.
 - `Money` (`amount`): `formatINR` with tabular digits.
 - `TabBar` (client): Spend · Orders · Cart · Ask · Accounts, fixed bottom, safe-area padded,
   `aria-current="page"` on the active tab.
 - `Sheet` (client; `open`, `onClose`, `title`, `description`, `footer`): bottom-sheet modal
-  dialog with focus trap, Escape / backdrop / close button to dismiss.
+  dialog with focus trap. Escape, backdrop, close button, or dragging the handle down (past
+  80px or a quick flick) plays a 200ms slide-out and then calls `onClose` (immediately with
+  reduced motion), so `onClose` should just set `open` to false.
+- `BrandMark` (`size`): the green tile with the rupee glyph, drawn from `lib/brand-glyph.mjs`,
+  the same geometry the icon script rasterises.
 - `TextField` (`label`, `hint`, `error`, `trailing`): label above, 48px input at 16px, error
   announced below. Pass `inputMode="numeric"` + `autoComplete="one-time-code"` for OTPs.
 - `PageHeader` (`title`, `eyebrow`, `subtitle`, `action`) and `EmptyState` (`title`, `icon`,
