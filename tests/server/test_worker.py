@@ -280,3 +280,15 @@ def test_broken_listen_connection_does_not_break_the_next_connect_job(pg, pg2, m
     worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, s)
     assert pg.execute("select status, error from jobs where id=%s", (second,)).fetchone() == ("done", None)
     assert len(opened) == 2 and all(c.closed for c in opened)
+
+
+def test_run_job_does_not_overwrite_a_reclaimed_job(pg, pg2, monkeypatch):
+    jid = jobs.enqueue(pg, A, "sync", "zepto")
+    job = jobs.claim(pg, "w1", ("sync",))
+
+    def slow_fetch(*a, **k):  # meanwhile the job was declared stale and another worker took it
+        pg2.execute("update jobs set status='running', worker_id='w2', started_at=now() where id=%s", (jid,))
+        return [order("1")]
+    monkeypatch.setattr(worker.sync, "fetch_orders", slow_fetch)
+    worker.run_job(job, pg, settings_for_tests())
+    assert pg.execute("select status, worker_id, finished_at from jobs").fetchone() == ("running", "w2", None)

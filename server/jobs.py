@@ -16,6 +16,7 @@ class Job:
     type: str
     site: str
     payload: dict
+    worker_id: str | None = None
 
 
 def enqueue(conn, user_id: str, type: str, site: str, payload: dict | None = None) -> str:
@@ -65,7 +66,7 @@ def claim(conn, worker_id: str, types: tuple[str, ...]) -> Job | None:
                     raise
                 skipped.append(row[0])
                 continue
-            return Job(id=str(r[0]), user_id=str(r[1]), type=r[2], site=r[3], payload=r[4])
+            return Job(id=str(r[0]), user_id=str(r[1]), type=r[2], site=r[3], payload=r[4], worker_id=worker_id)
     return None
 
 
@@ -73,19 +74,39 @@ def set_progress(conn, job_id: str, **progress) -> None:
     conn.execute("UPDATE jobs SET progress = progress || %s WHERE id=%s", (Jsonb(progress), job_id))
 
 
-def finish(conn, job_id: str, error: str | None = None) -> None:
-    """Mark done/failed and drop the phone number from the payload."""
-    conn.execute(
-        "UPDATE jobs SET status=%s, error=%s, finished_at=now(), payload = payload - 'phone' WHERE id=%s",
-        ("failed" if error else "done", error, job_id),
-    )
+def finish(conn, job_id: str, error: str | None = None, worker_id: str | None = None) -> None:
+    """Mark done/failed and drop the phone number from the payload. With worker_id, only a job that is still
+    running under that worker is touched, so a worker whose job was declared stale and re-claimed by another
+    worker cannot overwrite it."""
+    query = "UPDATE jobs SET status=%s, error=%s, finished_at=now(), payload = payload - 'phone' WHERE id=%s"
+    params = ["failed" if error else "done", error, job_id]
+    if worker_id is not None:
+        query += " AND status='running' AND worker_id=%s"
+        params.append(worker_id)
+    conn.execute(query, params)
 
 
 def requeue_stale(conn, older_than_s: int = 600) -> int:
-    """Reset running jobs started more than older_than_s seconds ago back to queued."""
-    cur = conn.execute(
-        "UPDATE jobs SET status='queued', worker_id=NULL, started_at=NULL "
-        "WHERE status='running' AND started_at < now() - make_interval(secs => %s)",
-        (older_than_s,),
-    )
-    return cur.rowcount
+    """Handle running jobs started more than older_than_s seconds ago (their worker is presumed dead).
+    A connect job cannot be resumed (its OTP exchange is gone): it fails with "worker_lost", its phone is
+    dropped and a connection left "syncing" becomes "error". Every other job goes back to queued.
+    Returns how many jobs were handled."""
+    with conn.transaction():
+        lost = conn.execute(
+            """WITH lost AS (
+                 UPDATE jobs SET status='failed', error='worker_lost', finished_at=now(), payload = payload - 'phone'
+                 WHERE status='running' AND type='connect' AND started_at < now() - make_interval(secs => %s)
+                 RETURNING user_id, site),
+               conns AS (
+                 UPDATE connections c SET status='error' FROM lost
+                 WHERE c.user_id=lost.user_id AND c.site=lost.site AND c.status='syncing'
+                 RETURNING 1)
+               SELECT count(*) FROM lost""",
+            (older_than_s,),
+        ).fetchone()[0]
+        requeued = conn.execute(
+            "UPDATE jobs SET status='queued', worker_id=NULL, started_at=NULL "
+            "WHERE status='running' AND type <> 'connect' AND started_at < now() - make_interval(secs => %s)",
+            (older_than_s,),
+        ).rowcount
+    return lost + requeued

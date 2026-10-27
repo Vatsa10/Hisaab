@@ -98,7 +98,7 @@ def run_job(job: jobs.Job, conn, s: Settings) -> None:
             status = "error"
         if status:
             store.set_connection(conn, job.user_id, db_site, status=status)
-        jobs.finish(conn, job.id, error=error)
+        jobs.finish(conn, job.id, error=error, worker_id=job.worker_id)
 
     listen_conn = None
     try:
@@ -112,7 +112,7 @@ def run_job(job: jobs.Job, conn, s: Settings) -> None:
                 return fail("login_failed", "error")
             store.set_connection(conn, job.user_id, db_site, status="connected")
         _do_sync(job, conn, db_site, sub_platform)
-        jobs.finish(conn, job.id)
+        jobs.finish(conn, job.id, worker_id=job.worker_id)
     except browser.SessionExpired:
         fail("needs_login", "needs_login")
     except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
@@ -165,7 +165,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 except Exception as e:
                     phone = (job.payload or {}).get("phone")
                     log.error("job %s crashed: %s", job.id, _clean_error(e, phone))
-                    jobs.finish(conn, job.id, error=_clean_error(e, phone))
+                    jobs.finish(conn, job.id, error=_clean_error(e, phone), worker_id=worker_id)
                 failures = 0
             except Exception as e:
                 failures += 1

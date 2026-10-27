@@ -87,3 +87,33 @@ def test_claim_survives_a_unique_violation_race(pg, pg2):
     assert not t.is_alive() and result == {"job": None}
     assert pg.execute("select type, status from jobs order by type").fetchall() == \
         [("connect", "running"), ("sync", "queued")]
+
+
+def test_requeue_stale_fails_dead_connect_jobs(pg):
+    from server import store
+    connect = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210", "x": 1})
+    sync_job = jobs.enqueue(pg, A, "sync", "blinkit")
+    jobs.claim(pg, "w1", ("connect",))
+    jobs.claim(pg, "w1", ("sync",))
+    store.set_connection(pg, A, "zepto", status="syncing")
+    pg.execute("update jobs set started_at = now() - interval '11 minutes'")
+    assert jobs.requeue_stale(pg, 600) == 2
+    row = pg.execute("select status, error, payload, finished_at is not null from jobs where id=%s",
+                     (connect,)).fetchone()
+    assert row == ("failed", "worker_lost", {"x": 1}, True)
+    assert pg.execute("select status from jobs where id=%s", (sync_job,)).fetchone() == ("queued",)
+    assert pg.execute("select status from connections where site='zepto'").fetchone() == ("error",)
+    assert jobs.claim(pg, "w2", ("connect",)) is None
+
+
+def test_stale_worker_cannot_finish_a_reclaimed_job(pg):
+    jid = jobs.enqueue(pg, A, "sync", "zepto")
+    first = jobs.claim(pg, "w1", ("sync",))
+    assert first.worker_id == "w1"
+    pg.execute("update jobs set started_at = now() - interval '11 minutes'")
+    jobs.requeue_stale(pg, 600)
+    assert jobs.claim(pg, "w2", ("sync",)).id == jid
+    jobs.finish(pg, jid, error="late failure", worker_id="w1")  # the old worker wakes up
+    assert pg.execute("select status, error, worker_id from jobs").fetchone() == ("running", None, "w2")
+    jobs.finish(pg, jid, worker_id="w2")
+    assert pg.execute("select status, error from jobs").fetchone() == ("done", None)
