@@ -55,6 +55,15 @@ def set_connection(conn, user_id: str, site: str, **fields) -> None:
     )
 
 
+def get_connection(conn, user_id: str, site: str) -> dict | None:
+    """A user's connection row for a site (status, orders_page_url, ...), or None."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        row = cur.execute("SELECT * FROM connections WHERE user_id=%s AND site=%s", (user_id, site)).fetchone()
+    if row is not None:
+        row["user_id"] = str(row["user_id"])
+    return row
+
+
 def get_profile(conn, user_id: str) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
         row = cur.execute("SELECT * FROM profiles WHERE user_id=%s", (user_id,)).fetchone()

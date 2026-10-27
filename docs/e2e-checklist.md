@@ -56,6 +56,10 @@ python cli.py publish-recipe zepto
 
 Expected: `published zepto recipe as version 1` (a number; it increases on each re-publish).
 
+Published recipes are shared by every user, so `publish-recipe` drops `Referer`/`Origin`/`Cookie` headers and
+refuses (printing only the JSON paths) when a value looks tied to your account: a `/users/<x>`, `/user/<x>` or
+`/profile/<x>` segment, or 8+ digits in a URL path. Make those values generic, or re-run with `--force` after review.
+
 Check:
 
 ```bash

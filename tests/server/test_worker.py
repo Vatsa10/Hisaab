@@ -849,3 +849,27 @@ def test_drain_and_stale_settings(monkeypatch):
     assert (settings().drain_s, settings().stale_job_s) == (540, 300)
     monkeypatch.setenv("DRAIN_S", "60")
     assert settings().drain_s == 60
+
+
+# ---------------------------------------------------------------- per-user orders page (final review)
+
+def test_sync_uses_the_users_own_orders_page(pg, monkeypatch):
+    seen = []
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: seen.append(k["orders_page_url"]) or [])
+    worker.run_job(_sync_job(pg, "zomato"), pg, settings_for_tests())
+    store.set_connection(pg, A, "zomato", orders_page_url="https://www.zomato.com/users/me-1/ordering")
+    worker.run_job(_sync_job(pg, "zomato"), pg, settings_for_tests())
+    assert seen == [None, "https://www.zomato.com/users/me-1/ordering"]
+
+
+def test_connect_then_sync_uses_the_url_found_at_login(pg, monkeypatch):
+    seen = []
+
+    def login(site, phone=None, **k):
+        k["on_orders_url"]("https://www.zomato.com/users/me-2/ordering")
+        return True
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: seen.append(k["orders_page_url"]) or [])
+    jobs.enqueue(pg, A, "connect", "zomato", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert seen == ["https://www.zomato.com/users/me-2/ordering"]

@@ -64,3 +64,12 @@ def test_recipe_put_get_and_version(pg):
     assert store.get_recipe(pg, "zepto", kind="search") is None
     assert store.put_recipe(pg, "zepto", {"s": 1}, kind="search") == 1
     assert pg.execute("select healthy from recipes where site='zepto' and kind='orders'").fetchone() == (True,)
+
+
+def test_get_connection(pg):
+    assert store.get_connection(pg, A, "zomato") is None
+    store.set_connection(pg, A, "zomato", status="connected", orders_page_url="https://www.zomato.com/users/me/ordering")
+    row = store.get_connection(pg, A, "zomato")
+    assert row["user_id"] == A and row["site"] == "zomato" and row["status"] == "connected"
+    assert row["orders_page_url"] == "https://www.zomato.com/users/me/ordering"
+    assert store.get_connection(pg, A, "zepto") is None

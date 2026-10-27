@@ -107,7 +107,8 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
         if agent.shows_login_button(agent.snapshot(page)["elements"]):
             raise SessionExpired("the site still shows a Login button")
         if on_orders_url:  # a worker run keeps the URL per user; the global hint file is CLI-only
-            on_orders_url(orders_url)
+            # where the browser actually is: the site may redirect a generic orders URL to a per-user one
+            on_orders_url(page.url)
         elif not recipe:
             recipes.RECIPES.mkdir(exist_ok=True)
             recipes.hint_path(site).write_text(orders_url, encoding="utf-8")
@@ -218,10 +219,12 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
 
 def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None,
                  allow_learn: bool = True, proxy_server: str | None = None,
-                 recipe_loader: Callable[[str], dict | None] | None = None) -> list[dict]:
+                 recipe_loader: Callable[[str], dict | None] | None = None,
+                 orders_page_url: str | None = None) -> list[dict]:
     """Fast path -> nav_trace replay -> re-learn; returns the orders (no database).
     allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead.
-    recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file."""
+    recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file.
+    orders_page_url (the user's own orders page, found at login) replaces the shared recipe's one."""
     recipe = (recipe_loader or recipes.load)(site)
     if not recipe:
         if not allow_learn:
@@ -230,7 +233,7 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
     with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
                    location=location, proxy_server=proxy_server) as (_, page, guard, capture):
         orders = None
-        goto(page, recipe["orders_page_url"])
+        goto(page, orders_page_url or recipe["orders_page_url"])
         if recipe.get("fast_path_ok", True):
             try:
                 orders = fast_path(page, recipe, since)

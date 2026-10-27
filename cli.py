@@ -226,9 +226,54 @@ def reset(site: str):
         print(f"removed {p}")
 
 
+# A published recipe is shared by every user: it must not carry the account it was learned on.
+IDENTITY_HEADERS = {"referer", "origin", "cookie"}
+_ACCOUNT_SEGMENT = re.compile(r"/(?:users|user|profile)/[^/?#]+", re.I)
+_LONG_DIGITS = re.compile(r"\d{8,}")
+
+
+def _strip_identity_headers(obj):
+    """A copy of obj with referer/origin/cookie (any case) removed from every "headers" mapping."""
+    if isinstance(obj, dict):
+        return {k: ({h: v for h, v in val.items() if h.lower() not in IDENTITY_HEADERS}
+                    if k.lower() == "headers" and isinstance(val, dict) else _strip_identity_headers(val))
+                for k, val in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_identity_headers(v) for v in obj]
+    return obj
+
+
+def _url_path(s: str) -> str | None:
+    """The path of an http(s) URL or of a "/..." path, else None."""
+    from urllib.parse import urlsplit
+    if re.match(r"https?://", s, re.I):
+        try:
+            return urlsplit(s).path
+        except ValueError:
+            return s
+    return re.split(r"[?#]", s, maxsplit=1)[0] if s.startswith("/") else None
+
+
+def _account_specific(obj, where: str = "$") -> list[str]:
+    """JSON paths of string values that look tied to one account: a /users/<x>, /user/<x> or /profile/<x>
+    segment, or a run of 8+ digits in a URL path."""
+    if isinstance(obj, dict):
+        return [p for k, v in obj.items() for p in _account_specific(v, f"{where}.{k}")]
+    if isinstance(obj, list):
+        return [p for i, v in enumerate(obj) for p in _account_specific(v, f"{where}[{i}]")]
+    if isinstance(obj, str):
+        path = _url_path(obj)
+        if _ACCOUNT_SEGMENT.search(obj if path is None else path) or (path and _LONG_DIGITS.search(path)):
+            return [where]
+    return []
+
+
 @app.command("publish-recipe")
-def publish_recipe(site: str):
-    """Admin: publish the locally learned recipes/<site>.json to Postgres (DATABASE_URL) for the cloud worker."""
+def publish_recipe(site: str,
+                   force: bool = typer.Option(False, "--force",
+                                              help="Publish even if values look account-specific (after review).")):
+    """Admin: publish the locally learned recipes/<site>.json to Postgres (DATABASE_URL) for the cloud worker.
+    Referer/Origin/Cookie headers are dropped; values that look tied to your account are refused unless --force."""
     import psycopg
 
     from server import store
@@ -236,6 +281,16 @@ def publish_recipe(site: str):
     if recipe is None:
         typer.secho(f"no learned recipe for {site}: run `python cli.py learn {site}` first", fg="red")
         raise typer.Exit(1)
+    recipe = _strip_identity_headers(recipe)
+    flagged = _account_specific(recipe)
+    if flagged:
+        typer.secho(f"{site} recipe has values that look specific to your account (shared recipes are readable "
+                    "by every user):", fg="yellow" if force else "red")
+        for p in flagged:
+            typer.echo(f"  {p}")
+        if not force:
+            typer.echo(f"Edit recipes/{site}.json to use generic URLs, or re-run with --force after review.")
+            raise typer.Exit(1)
     url = os.environ.get("DATABASE_URL", "")
     if not url:
         typer.secho("DATABASE_URL is not set", fg="red")

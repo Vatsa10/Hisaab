@@ -190,9 +190,11 @@ def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
 
 def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profile_dir: Path,
              proxy_server: str | None) -> None:
+    own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
     orders = sync.fetch_orders(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                                allow_learn=False, proxy_server=proxy_server,
-                               recipe_loader=lambda site: store.get_recipe(conn, site))
+                               recipe_loader=lambda site: store.get_recipe(conn, site),
+                               orders_page_url=own.get("orders_page_url"))
     n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
     jobs.set_progress(conn, job.id, stage="synced", orders_found=n)
     store.set_connection(conn, job.user_id, db_site, status="connected",
