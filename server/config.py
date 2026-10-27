@@ -1,7 +1,7 @@
 """Service settings, read from the environment at call time (never cached at import)."""
 import base64
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Fixed key for local development only (file:// vault); never used unless ALLOW_DEV_PROFILE_KEY=1.
 DEV_PROFILE_KEY = base64.b64encode(b"expense-agent-dev-profile-key-32"[:32]).decode()
@@ -9,15 +9,16 @@ DEV_PROFILE_KEY = base64.b64encode(b"expense-agent-dev-profile-key-32"[:32]).dec
 
 @dataclass(frozen=True)
 class Settings:
-    database_url: str = ""
-    jwt_secret: str = ""
+    # Secrets are left out of repr so a logged or printed Settings never carries them.
+    database_url: str = field(default="", repr=False)
+    jwt_secret: str = field(default="", repr=False)
     jwks_url: str = ""
     consent_version: str = "2026-10-27"
     otp_timeout_s: int = 180
     stale_job_s: int = 2400
     profile_store_url: str = "file://vault_local"
-    profile_master_key: bytes | None = None
-    proxy_url_template: str = ""
+    profile_master_key: bytes | None = field(default=None, repr=False)
+    proxy_url_template: str = field(default="", repr=False)
     heartbeat_s: int = 30
 
 
