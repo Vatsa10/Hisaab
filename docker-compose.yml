@@ -74,6 +74,7 @@ services:
       <<: *app-env
       PROFILE_STORE_URL: file:///data/vault
       PROFILE_MASTER_KEY: ${PROFILE_MASTER_KEY:-}
+      ALLOW_DEV_PROFILE_KEY: "1"  # local file:// vault only: fixed dev key when PROFILE_MASTER_KEY is empty
       PROXY_URL_TEMPLATE: ${PROXY_URL_TEMPLATE:-}
     shm_size: 1gb
     volumes:

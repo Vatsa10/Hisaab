@@ -9,12 +9,16 @@ def order(oid, total=100.0, status="delivered", items=None):
             "status": status, "merchant": "Store", "items": items or [], "raw": {"id": oid}}
 
 
-def settings_for_tests():
+def settings_for_tests(**_):
+    """Settings for worker tests; the autouse vault_env fixture points the vault at a fresh temp dir."""
     import os
 
-    from server.config import Settings
+    from server import vault
+    from server.config import DEV_PROFILE_KEY, Settings
     return Settings(database_url=os.environ["TEST_DATABASE_URL"], jwt_secret="test-secret",
-                    jwks_url="", otp_timeout_s=5)
+                    jwks_url="", otp_timeout_s=5,
+                    profile_store_url=os.environ.get("PROFILE_STORE_URL", "file://vault_local"),
+                    profile_master_key=vault.master_key_from_env(DEV_PROFILE_KEY))
 
 
 def make_token(sub, secret="test-secret", aud="authenticated", exp_in=3600):

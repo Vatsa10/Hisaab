@@ -98,3 +98,12 @@ def pg_listen(_applied):
     """Autocommit connection dedicated to LISTEN/NOTIFY."""
     with psycopg.connect(_applied, autocommit=True) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def vault_env(tmp_path, monkeypatch):
+    """Every server test gets its own profile vault and profile root (never the repo's)."""
+    monkeypatch.setenv("PROFILE_STORE_URL", (tmp_path / "vault").as_uri())
+    monkeypatch.setenv("PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.delenv("PROXY_URL_TEMPLATE", raising=False)
+    return tmp_path

@@ -306,3 +306,277 @@ def test_worker_passes_empty_location_without_profile_coordinates(pg, monkeypatc
     jobs.enqueue(pg, A, "sync", "zepto")
     worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
     assert seen == [{}, {}, {"query": "Somewhere, City, State", "lat": 12.9, "lon": 77.6}]
+
+
+# ---------------------------------------------------------------- vault, proxy relay, heartbeat (Task 7)
+
+import os
+import socket
+from pathlib import Path
+
+from server import vault
+from server.config import DEV_PROFILE_KEY
+
+KEY = vault.master_key_from_env(DEV_PROFILE_KEY)
+
+
+def _store():
+    return vault.store_from_url(os.environ["PROFILE_STORE_URL"])
+
+
+def _sync_job(pg, site="zepto"):
+    jobs.enqueue(pg, A, "sync", site)
+    return jobs.claim(pg, "w", ("sync",))
+
+
+def test_startup_wipes_leftover_profiles(pg, monkeypatch):
+    root = Path(os.environ["PROFILE_ROOT"])
+    (root / "dead-job" / "Default").mkdir(parents=True)
+    (root / "dead-job" / "Default" / "Cookies").write_text("secret")
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=1)
+    assert not (root / "dead-job").exists()
+
+
+def test_successful_job_saves_encrypted_profile(pg, monkeypatch):
+    seen = {}
+
+    def fetch(site, since, **k):
+        seen["dir"] = Path(k["profile_dir"])
+        (seen["dir"] / "Cookies").write_text("SESSION-COOKIE-PLAINTEXT")
+        return [order("1")]
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    key = vault.blob_key(A, "zepto")
+    blob = _store().get(key)
+    assert blob and b"SESSION-COOKIE-PLAINTEXT" not in blob
+    assert pg.execute("select profile_blob_key from connections").fetchone() == (key,)
+    assert not seen["dir"].exists()
+    out = Path(os.environ["PROFILE_ROOT"]).parent / "restored"
+    assert vault.restore_profile(_store(), KEY, A, "zepto", out) is True
+    assert (out / "Cookies").read_text() == "SESSION-COOKIE-PLAINTEXT"
+
+
+def test_job_restores_previous_profile(pg, monkeypatch):
+    def first(site, since, **k):
+        (Path(k["profile_dir"]) / "Cookies").write_text("v1")
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", first)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    seen = {}
+
+    def second(site, since, **k):
+        seen["cookies"] = (Path(k["profile_dir"]) / "Cookies").read_text()
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", second)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert seen["cookies"] == "v1"
+
+
+def test_instamart_job_uses_swiggy_profile_name(pg, monkeypatch):
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: [])
+    worker.run_job(_sync_job(pg, "instamart"), pg, settings_for_tests())
+    assert _store().get(vault.blob_key(A, "swiggy")) is not None
+    assert _store().get(vault.blob_key(A, "instamart")) is None
+
+
+def test_crash_mid_job_keeps_last_good_profile(pg, monkeypatch):
+    def good(site, since, **k):
+        (Path(k["profile_dir"]) / "Cookies").write_text("good")
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", good)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    before = _store().get(vault.blob_key(A, "zepto"))
+    seen = {}
+
+    def crash(site, since, **k):
+        seen["dir"] = Path(k["profile_dir"])
+        (seen["dir"] / "Cookies").write_text("half-written")
+        raise RuntimeError("chrome died")
+    monkeypatch.setattr(worker.sync, "fetch_orders", crash)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert _store().get(vault.blob_key(A, "zepto")) == before
+    assert not seen["dir"].exists()
+    assert pg.execute("select error from jobs order by created_at desc limit 1").fetchone() == ("RuntimeError: chrome died",)
+
+
+def test_corrupt_profile_marks_needs_login(pg, monkeypatch):
+    _store().put(vault.blob_key(A, "zepto"), b"x" * 64)
+    store.set_connection(pg, A, "zepto", status="connected")
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: pytest.fail("must not sync"))
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert pg.execute("select status from connections").fetchone() == ("needs_login",)
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "needs_login")
+
+
+def test_corrupt_profile_connect_job_starts_empty(pg, monkeypatch):
+    _store().put(vault.blob_key(A, "zepto"), b"x" * 64)
+    seen = {}
+
+    def login(site, phone=None, **k):
+        seen["files"] = list(Path(k["profile_dir"]).iterdir())
+        return True
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [])
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert seen["files"] == []
+    assert pg.execute("select status from jobs").fetchone() == ("done",)
+
+
+def _closed_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_proxy_unavailable_fails_fast(pg, monkeypatch):
+    s = dataclasses.replace(settings_for_tests(),
+                            proxy_url_template=f"http://user-{{session}}:topsecret@127.0.0.1:{_closed_port()}")
+    store.set_connection(pg, A, "zepto", status="connected")
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: pytest.fail("must not sync"))
+    t0 = time.monotonic()
+    worker.run_job(_sync_job(pg), pg, s)
+    assert time.monotonic() - t0 < 30
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "proxy_unavailable")
+    assert pg.execute("select status from connections").fetchone() == ("connected",)
+
+
+def test_proxy_session_id_created_once(pg, monkeypatch):
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [])
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    first = pg.execute("select proxy_session_id from connections").fetchone()[0]
+    assert first and len(first) == 12 and int(first, 16) >= 0
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert pg.execute("select proxy_session_id from connections").fetchone() == (first,)
+
+
+def test_proxy_relay_url_is_passed_to_the_browser(pg, monkeypatch):
+    log = {}
+
+    class FakeRelay:
+        def __init__(self, upstream):
+            log["upstream"] = upstream
+            self.url = "http://127.0.0.1:5555"
+
+        def __enter__(self):
+            log["entered"] = True
+            return self
+
+        def __exit__(self, *e):
+            log["exited"] = True
+
+        def check(self, *a, **k):
+            log["checked"] = True
+    monkeypatch.setattr(worker, "Relay", FakeRelay)
+    s = dataclasses.replace(settings_for_tests(), proxy_url_template="http://u-{session}:pw@gw.example.com:7000")
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: log.update(k=k) or [])
+    worker.run_job(_sync_job(pg), pg, s)
+    sid = pg.execute("select proxy_session_id from connections").fetchone()[0]
+    assert log["upstream"] == f"http://u-{sid}:pw@gw.example.com:7000"
+    assert log["k"]["proxy_server"] == "http://127.0.0.1:5555"
+    assert log["checked"] and log["exited"]
+
+
+def test_no_proxy_template_passes_no_proxy(pg, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: seen.update(k) or [])
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert seen["proxy_server"] is None
+
+
+def test_heartbeat_runs_during_job(pg, monkeypatch):
+    s = dataclasses.replace(settings_for_tests(), heartbeat_s=1)
+    job = _sync_job(pg)
+    pg.execute("update jobs set heartbeat_at = now() - interval '1 hour'")
+
+    def slow(site, since, **k):
+        time.sleep(2.5)
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", slow)
+    worker.run_job(job, pg, s)
+    assert pg.execute("select heartbeat_at > now() - interval '1 minute' from jobs").fetchone() == (True,)
+    assert not [t for t in threading.enumerate() if t.name == "job-heartbeat"]
+
+
+def test_orders_url_stored_on_connection(pg, monkeypatch):
+    def login(site, phone=None, **k):
+        k["on_orders_url"]("https://www.zepto.com/orders")
+        return True
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [])
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert pg.execute("select orders_page_url from connections").fetchone() == ("https://www.zepto.com/orders",)
+
+
+def test_worker_passes_recipes_from_postgres(pg, monkeypatch):
+    store.put_recipe(pg, "zepto", {"orders_page_url": "https://www.zepto.com/orders"})
+    seen = {}
+
+    def fetch(site, since, **k):
+        seen["r"] = k["recipe_loader"]("zepto")
+        seen["none"] = k["recipe_loader"]("zomato")
+        return []
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    worker.run_job(_sync_job(pg), pg, settings_for_tests())
+    assert seen["r"] == {"orders_page_url": "https://www.zepto.com/orders"} and seen["none"] is None
+
+
+def test_runs_dir_is_temporary_and_removed(pg, monkeypatch):
+    seen = {}
+
+    def login(site, phone=None, **k):
+        seen["runs"] = Path(k["runs_dir"])
+        assert seen["runs"].is_dir()
+        return True
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [])
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert not seen["runs"].exists()
+
+
+def test_sigterm_during_connect_fails_job_with_worker_shutdown(pg, monkeypatch):
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+
+    def login(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(worker.sync, "login", login)
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    worker.main("w1", poll_s=0.01, max_loops=3)
+    assert pg.execute("select status, error, payload ? 'phone' from jobs").fetchone() == ("failed", "worker_shutdown", False)
+    assert pg.execute("select status from connections").fetchone() == ("error",)
+
+
+def test_sigterm_during_sync_leaves_job_running(pg, monkeypatch):
+    jobs.enqueue(pg, A, "sync", "zepto")
+
+    def fetch(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    worker.main("w1", poll_s=0.01, max_loops=3)
+    assert pg.execute("select status from jobs").fetchone() == ("running",)
+
+
+def test_settings_require_master_key_for_remote_store(monkeypatch):
+    from server.config import settings
+    monkeypatch.setenv("PROFILE_STORE_URL", "DefaultEndpointsProtocol=https;AccountName=x")
+    monkeypatch.delenv("PROFILE_MASTER_KEY", raising=False)
+    with pytest.raises(ValueError, match="PROFILE_MASTER_KEY"):
+        settings(for_worker=True)
+    assert settings().profile_master_key is None  # the API never needs it
+
+
+def test_settings_file_store_needs_key_or_dev_flag(monkeypatch):
+    from server.config import settings
+    monkeypatch.setenv("PROFILE_STORE_URL", "file:///tmp/v")
+    monkeypatch.delenv("PROFILE_MASTER_KEY", raising=False)
+    monkeypatch.delenv("ALLOW_DEV_PROFILE_KEY", raising=False)
+    with pytest.raises(ValueError, match="ALLOW_DEV_PROFILE_KEY"):
+        settings(for_worker=True)
+    monkeypatch.setenv("ALLOW_DEV_PROFILE_KEY", "1")
+    assert len(settings(for_worker=True).profile_master_key) == 32
+
