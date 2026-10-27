@@ -144,3 +144,72 @@ def test_fetch_orders_drift_does_not_rediscover(monkeypatch):
     monkeypatch.setattr(sync, "replay", fail)
     with pytest.raises(sync.RecipeError, match="drift"):
         sync.fetch_orders("zepto", None, allow_learn=False)
+
+
+SAVED = {"query": "Sunrise Apts, Akota, Vadodara, Gujarat", "lat": 22.3, "lon": 73.2}
+
+
+def test_home_url_city_comes_from_given_location(monkeypatch):
+    monkeypatch.setattr(browser, "load_settings", lambda: {"location": SAVED})
+    assert browser.home_url("zomato") == "https://www.zomato.com/vadodara/restaurants"  # CLI: saved settings
+    assert browser.home_url("zomato", {}) == "https://www.zomato.com/"  # given but empty: no city
+    other = {"query": "Flat 2, Indiranagar, Bengaluru, Karnataka", "lat": 12.9, "lon": 77.6}
+    assert browser.home_url("zomato", other) == "https://www.zomato.com/bangalore/restaurants"
+    assert browser.home_url("zomato", {"query": None, "lat": 1.0, "lon": 2.0}) == "https://www.zomato.com/"
+
+
+class _Recorder:
+    """Accepts any method call and records it."""
+
+    def __init__(self, calls, name):
+        self._calls, self._name = calls, name
+
+    def __getattr__(self, attr):
+        def method(*a, **k):
+            self._calls.append((f"{self._name}.{attr}", a))
+            return {"targetInfos": []} if attr == "send" else None
+        return method
+
+
+def _fake_chrome(monkeypatch):
+    import contextlib
+    from types import SimpleNamespace
+    calls = []
+    ctx = _Recorder(calls, "context")
+    ctx.pages = [SimpleNamespace(url="about:blank")]
+    pw = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=lambda url: SimpleNamespace(
+        contexts=[ctx], new_browser_cdp_session=lambda: _Recorder(calls, "cdp"))))
+    monkeypatch.setattr(browser, "find_chrome", lambda: "chrome")
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda *a, **k: _Dead())
+    monkeypatch.setattr(browser, "_wait_for_cdp", lambda *a, **k: None)
+    monkeypatch.setattr(browser, "sync_playwright", lambda: contextlib.nullcontext(pw))
+    monkeypatch.setattr(browser, "load_settings", lambda: {"location": SAVED})
+    return calls
+
+
+@pytest.mark.parametrize("location, granted", [(None, True), ({}, False),
+                                               ({"query": "x", "lat": 1.0, "lon": 2.0}, True)])
+def test_open_site_location_none_vs_empty(monkeypatch, tmp_path, location, granted):
+    calls = _fake_chrome(monkeypatch)
+    with browser.open_site("zepto", profile_dir=tmp_path / "p", location=location):
+        pass
+    geo = [a for name, a in calls if name == "context.set_geolocation"]
+    assert bool(geo) == granted
+    if location is None:
+        assert geo == [({"latitude": 22.3, "longitude": 73.2},)]  # CLI default: the saved location
+    elif granted:
+        assert geo == [({"latitude": 1.0, "longitude": 2.0},)]
+
+
+def test_recover_blocked_reloads_the_given_home(monkeypatch):
+    from types import SimpleNamespace
+
+    import agent
+    went = []
+    monkeypatch.setattr(agent, "goto", lambda page, url: went.append(url))
+    monkeypatch.setattr(browser, "load_settings", lambda: {"location": SAVED})
+    page = SimpleNamespace(url="https://www.zomato.com/", wait_for_timeout=lambda ms: None)
+    la = LoginAgent("zomato", page, None, None, "9000000000", home="https://www.zomato.com/")
+    la.blocked_page = lambda: False
+    la.recover_blocked()
+    assert went == ["https://www.zomato.com/"]

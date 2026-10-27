@@ -71,3 +71,33 @@ def test_ask_user_asks_with_kind_question(monkeypatch):
     with pytest.raises(sync.OtpTimeout) as e:
         sync.login("zepto", "9876543210", prompt=prompt, location={})
     assert kinds == ["question"] and e.value.kind == "question"
+
+
+SAVED = {"query": "Sunrise Apts, Akota, Vadodara, Gujarat", "lat": 22.3, "lon": 73.2}
+
+
+def test_empty_location_does_not_leak_the_cli_location(monkeypatch):
+    seen = fake_login_env(monkeypatch, _ends("stuck"), settings_location=SAVED)
+    assert sync.login("zomato", "9876543210", prompt=_never_called, location={}) is False
+    assert seen["agents"][0].location == ""
+    assert seen["goto"] == ["https://www.zomato.com/"]
+    assert seen["agents"][0].home == "https://www.zomato.com/"  # where it backs off to on a blocked page
+    assert seen["open_site"][0]["location"] == {}
+
+
+def test_given_location_drives_address_and_city(monkeypatch):
+    seen = fake_login_env(monkeypatch, _ends("stuck"), settings_location=SAVED)
+    mine = {"query": "Flat 2, Indiranagar, Bengaluru, Karnataka", "lat": 12.9, "lon": 77.6}
+    assert sync.login("zomato", "9876543210", prompt=_never_called, location=mine) is False
+    assert seen["agents"][0].location == mine["query"]
+    assert seen["goto"] == ["https://www.zomato.com/bangalore/restaurants"]
+
+
+def test_cli_without_location_uses_saved_settings(monkeypatch):
+    seen = fake_login_env(monkeypatch, _ends("stuck"), settings_location=SAVED)
+    monkeypatch.setattr("builtins.input", lambda text="": "")
+    monkeypatch.setattr(sync.agent, "site_allows_host", lambda site, url: True)
+    sync.login("zomato", "9876543210")
+    assert seen["agents"][0].location == SAVED["query"]
+    assert seen["goto"][0] == "https://www.zomato.com/vadodara/restaurants"
+    assert seen["open_site"][0]["location"] is None

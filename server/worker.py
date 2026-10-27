@@ -56,11 +56,12 @@ def _profile_dir(user_id: str, site: str) -> Path:
     return Path(os.getenv("PROFILE_ROOT", "profiles_users")) / user_id / browser.SITES[site]["profile"]
 
 
-def _location(conn, user_id: str) -> dict | None:
+def _location(conn, user_id: str) -> dict:
+    """The user's delivery location, or {} (never None: None would mean the CLI owner's saved location)."""
     p = store.get_profile(conn, user_id)
     if p and p.get("lat") is not None and p.get("lon") is not None:
-        return {"query": p.get("address"), "lat": p["lat"], "lon": p["lon"]}
-    return None
+        return {"query": p.get("address") or "", "lat": p["lat"], "lon": p["lon"]}
+    return {}
 
 
 def _clean_error(e: Exception, phone: str | None) -> str:

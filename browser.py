@@ -41,20 +41,28 @@ ZOMATO_CITY_ALIASES = {"bengaluru": "bangalore", "delhi": "ncr", "new-delhi": "n
                        "gurgaon": "ncr", "noida": "ncr", "ghaziabad": "ncr", "faridabad": "ncr"}
 
 
-def city_slug() -> str | None:
-    """City from the saved address 'society, area, city, state' -> 'vadodara'."""
-    loc = load_settings().get("location") or {}
-    parts = [p.strip() for p in loc.get("query", "").split(",") if p.strip()]
+def effective_location(location: dict | None) -> dict:
+    """None means "not given": the CLI's saved location (settings.json). A dict is used as is, so {} means
+    "no location" - a per-user run must never fall back to the CLI owner's address."""
+    if location is None:
+        return load_settings().get("location") or {}
+    return location
+
+
+def city_slug(location: dict | None = None) -> str | None:
+    """City from the address 'society, area, city, state' -> 'vadodara' (location as in effective_location)."""
+    loc = effective_location(location)
+    parts = [p.strip() for p in (loc.get("query") or "").split(",") if p.strip()]
     if len(parts) < 3 or re.fullmatch(r"-?[\d.]+", parts[-1]):
         return None
     slug = re.sub(r"[^a-z0-9]+", "-", parts[-2].lower()).strip("-")
     return ZOMATO_CITY_ALIASES.get(slug, slug)
 
 
-def home_url(site: str) -> str:
+def home_url(site: str, location: dict | None = None) -> str:
     home = SITES[site]["home"]
     if "{city}" in home:
-        city = city_slug()
+        city = city_slug(location)
         return home.format(city=city) if city else home.split("{city}")[0]
     return home
 
@@ -232,7 +240,8 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
               profile_dir: Path | None = None, location: dict | None = None):
     """Yield (context, page, guard, capture) for a site's persistent profile.
 
-    profile_dir / location override the per-site profile folder and the saved delivery location (per-user runs).
+    profile_dir / location override the per-site profile folder and the saved delivery location (per-user runs);
+    location None uses the saved one, {} means no location (no geolocation grant or override).
 
     Chrome is started as a normal browser (no --enable-automation, so no "controlled by automated
     test software" mode that bot filters like Swiggy's reject) and Playwright attaches over CDP.
@@ -241,7 +250,7 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
     profile = (profile_dir or PROFILES / cfg["profile"]).resolve()
     profile.mkdir(parents=True, exist_ok=True)
     guard, capture = Guard(allowlist, login_mode), Capture()
-    loc = location or load_settings().get("location")
+    loc = effective_location(location)
     port = _free_port()
     proc = subprocess.Popen(
         [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
@@ -260,7 +269,8 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
             for ctx_id in {t["browserContextId"] for t in cdp.send("Target.getTargets")["targetInfos"]
                            if t.get("browserContextId")}:
                 cdp.send("Browser.setDownloadBehavior", {"behavior": "deny", "browserContextId": ctx_id})
-            if loc:  # "Detect my location" resolves to the saved address without a permission prompt
+            if loc.get("lat") is not None and loc.get("lon") is not None:
+                # "Detect my location" resolves to the saved address without a permission prompt
                 context.grant_permissions(["geolocation"])
                 context.set_geolocation({"latitude": loc["lat"], "longitude": loc["lon"]})
             guard.install(context)

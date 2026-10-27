@@ -292,3 +292,17 @@ def test_run_job_does_not_overwrite_a_reclaimed_job(pg, pg2, monkeypatch):
     monkeypatch.setattr(worker.sync, "fetch_orders", slow_fetch)
     worker.run_job(job, pg, settings_for_tests())
     assert pg.execute("select status, worker_id, finished_at from jobs").fetchone() == ("running", "w2", None)
+
+
+def test_worker_passes_empty_location_without_profile_coordinates(pg, monkeypatch):
+    seen = []
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: seen.append(k["location"]) or [order("1")])
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    pg.execute("insert into profiles (user_id, address) values (%s, 'Somewhere, City, State')", (A,))
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    pg.execute("update profiles set lat=12.9, lon=77.6 where user_id=%s", (A,))
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert seen == [{}, {}, {"query": "Somewhere, City, State", "lat": 12.9, "lon": 77.6}]

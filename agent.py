@@ -357,9 +357,11 @@ class Discovery:
     }
     GOAL = "Open this site's order history page and load more past orders (scroll / show more) at least twice."
 
-    def __init__(self, site, page, guard, capture, prompt: Callable[[str, str], str] | None = None):
+    def __init__(self, site, page, guard, capture, prompt: Callable[[str, str], str] | None = None,
+                 home: str | None = None):
         self.site, self.page, self.guard, self.capture = site, page, guard, capture
         self._prompt = prompt
+        self.home = home  # start page for recovery; None: home_url from the CLI's saved location
         self.refs: dict[str, dict] = {}
         self.snap: dict = {"elements": [], "aria": "", "overlay": False}
         self.trace: list[dict] = []
@@ -553,7 +555,7 @@ class Discovery:
             log.warning("[%s] site returned an error/blocked page; retrying in %ds", self.site, wait_s)
             self.page.wait_for_timeout(wait_s * 1000)
             try:
-                goto(self.page, home_url(self.site))
+                goto(self.page, self.home or home_url(self.site))
             except Exception:
                 continue
             if not self.blocked_page():
@@ -741,8 +743,8 @@ class LoginAgent(Discovery):
     }
 
     def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False,
-                 prompt: Callable[[str, str], str] | None = None):
-        super().__init__(site, page, guard, capture, prompt)
+                 prompt: Callable[[str, str], str] | None = None, home: str | None = None):
+        super().__init__(site, page, guard, capture, prompt, home)
         self.secrets["PHONE"] = phone
         self.location, self.dry_run = location, dry_run
         self.phone_typed = self.otp_entered = False

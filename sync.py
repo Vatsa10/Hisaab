@@ -9,7 +9,7 @@ import agent
 import db
 import recipes
 import browser
-from browser import LOGIN_URL, SITES, SessionExpired, fetch_in_page, load_settings, open_site
+from browser import LOGIN_URL, SITES, SessionExpired, fetch_in_page, open_site
 
 log = logging.getLogger("sync")
 
@@ -63,15 +63,16 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
     out raises OtpTimeout; any other failure returns False."""
     unattended = prompt is not None
     recipe = recipes.load(site)
+    home = browser.home_url(site, location)  # location None: the CLI's saved one; {}: none
     with open_site(site, login_mode=True, profile_dir=profile_dir, location=location) as (_, page, guard, capture):
         try:
-            browser.goto(page, browser.home_url(site))
+            browser.goto(page, home)
         except Exception as e:  # e.g. a bot-filter 403; the agent backs off and retries from the error page
             log.warning("%s home page failed to load: %s", site, str(e).splitlines()[0])
         done = None
         if phone:
-            address = ((location or load_settings().get("location")) or {}).get("query", "")
-            la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt)
+            address = browser.effective_location(location).get("query") or ""
+            la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt, home=home)
             try:
                 done = la.run()
             except Exception as e:
