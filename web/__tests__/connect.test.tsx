@@ -327,6 +327,19 @@ describe("ConnectFlow", () => {
     expect(screen.getByText("Resend in 2:00")).toBeInTheDocument();
   });
 
+  it.each([
+    ["30 s ago", "2026-10-27T10:00:30.000Z", "Resend in 2:30"],
+    ["in the future (phone clock behind): capped at the full window", "2026-10-27T10:02:00.000Z", "Resend in 3:00"],
+  ])("counts the resend timer from the worker's prompt_at %s", (_, promptAt, label) => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date("2026-10-27T10:01:00Z"));
+    render(<ConnectFlow app={swiggy} consented attachJobId="j9" onClose={vi.fn()} onConnectNext={vi.fn()} />);
+    push(
+      job({ id: "j9", started_at: "2026-10-27T09:59:00Z", progress: { stage: "otp_needed", prompt_at: promptAt } }),
+    );
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
   it("syncing shows an indeterminate bar and Finding your orders…", async () => {
     await startFlow();
     push(job({ progress: { stage: "syncing" } }));
@@ -509,7 +522,7 @@ describe("AccountsScreen", () => {
       address: "Surmandir Society, Gorwa, Vadodara",
       lat: 22.33,
       lon: 73.16,
-      display: "Gorwa, Vadodara, Vadodara Taluka, Gujarat, 390016, India",
+      display: "Gorwa, Vadodara", // PUT /profile already trims the geocoder's place to "area, city"
     });
     await userEvent.click(screen.getByRole("button", { name: "Save address" }));
     expect(await screen.findByText("Pinned near Gorwa, Vadodara")).toBeInTheDocument();

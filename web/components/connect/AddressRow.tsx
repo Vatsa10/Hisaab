@@ -3,11 +3,10 @@
 import { useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { Sheet } from "@/components/ui/Sheet";
+import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
 import { TextField } from "@/components/ui/TextField";
 import { ApiError, apiFetch } from "@/lib/api";
 import { PinIcon } from "./icons";
-import { closeSheetFrom } from "./sheetControls";
 import { useKeyboardInset } from "./useKeyboardInset";
 
 export interface Profile {
@@ -60,7 +59,7 @@ export interface AddressRowProps {
  */
 export function AddressRow({ profile, onSaved }: AddressRowProps) {
   const formId = useId();
-  const formRef = useRef<HTMLFormElement>(null);
+  const sheetRef = useRef<SheetHandle>(null);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -98,7 +97,8 @@ export function AddressRow({ profile, onSaved }: AddressRowProps) {
         place: typeof res.place === "string" ? res.place : shortPlace(res.display),
       });
       // Slide the sheet out like its close button does.
-      if (!closeSheetFrom(formRef.current)) setOpen(false);
+      if (sheetRef.current) sheetRef.current.close();
+      else setOpen(false);
     } catch (err) {
       setError(saveProblem(err));
     } finally {
@@ -132,6 +132,7 @@ export function AddressRow({ profile, onSaved }: AddressRowProps) {
       </Card>
 
       <Sheet
+        ref={sheetRef}
         open={open}
         onClose={() => setOpen(false)}
         title="Delivery address"
@@ -143,7 +144,7 @@ export function AddressRow({ profile, onSaved }: AddressRowProps) {
           </Button>
         }
       >
-        <form id={formId} ref={formRef} onSubmit={save} noValidate>
+        <form id={formId} onSubmit={save} noValidate>
           <TextField
             label="Address"
             value={draft}

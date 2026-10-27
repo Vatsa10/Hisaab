@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
-import { Sheet } from "@/components/ui/Sheet";
+import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
 import { ApiError, apiFetch } from "@/lib/api";
 import type { AppInfo } from "@/lib/apps";
 import { firstOrderMonth, isTerminal, watchJob, type Job } from "@/lib/jobs";
@@ -12,7 +12,6 @@ import { AlertIcon } from "./icons";
 import { OtpStep } from "./OtpStep";
 import { PhoneStep } from "./PhoneStep";
 import { QuestionStep } from "./QuestionStep";
-import { closeSheetFrom, focusSheetTitleIfLost } from "./sheetControls";
 import { IndeterminateBar, SyncProgress } from "./SyncProgress";
 import { useKeyboardInset } from "./useKeyboardInset";
 
@@ -132,7 +131,7 @@ export function ConnectFlow({
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const phoneRef = useRef<string | null>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<SheetHandle>(null);
   const mounted = useRef(true);
 
   // "Connect <next app>" reuses this sheet: start over for the new app.
@@ -168,12 +167,20 @@ export function ConnectFlow({
       const stage = next.progress.stage;
       if (stage === "otp_needed" && !isTerminal(next) && !otpTimed) {
         otpTimed = true;
-        // The worker's 180 s window starts when it asked. Seen live: now. Already asking when we
-        // first looked (a resumed job): when the prompt was published if the worker records it,
-        // otherwise when the job started (never later than the ask, so the timer never overstays).
+        // The worker's 180 s window starts when it asked, and it says when (prompt_at, UTC). A
+        // prompt_at "in the future" means this phone's clock runs behind the server's: never
+        // count more than the full window. Without prompt_at (an older worker): seen live, now;
+        // already asking when we first looked (a resumed job), when the job started (never later
+        // than the ask, so the timer never overstays).
         const prompted = parseTime(next.progress.prompt_at);
         const seenLive = previousStage !== null && previousStage !== "otp_needed";
-        setOtpStartedAt(prompted ?? (seenLive ? Date.now() : (parseTime(next.started_at) ?? Date.now())));
+        setOtpStartedAt(
+          prompted !== null
+            ? Math.min(prompted, Date.now())
+            : seenLive
+              ? Date.now()
+              : (parseTime(next.started_at) ?? Date.now()),
+        );
       }
       previousStage = stage;
     });
@@ -242,7 +249,8 @@ export function ConnectFlow({
   }
 
   function done() {
-    if (!closeSheetFrom(bodyRef.current)) onClose();
+    if (sheetRef.current) sheetRef.current.close();
+    else onClose();
   }
 
   async function relay(path: "otp" | "answer", value: string): Promise<string | null> {
@@ -290,7 +298,7 @@ export function ConnectFlow({
 
   // Never leave focus on <body> when a step replaces the control that had it.
   useEffect(() => {
-    focusSheetTitleIfLost(bodyRef.current);
+    sheetRef.current?.focusTitleIfLost();
   }, [viewKey]);
 
   let title: string;
@@ -396,6 +404,7 @@ export function ConnectFlow({
 
   return (
     <Sheet
+      ref={sheetRef}
       open
       onClose={onClose}
       title={title}
@@ -403,7 +412,7 @@ export function ConnectFlow({
       footer={footer}
       className="mb-[var(--kb-inset,0px)] !max-h-[calc(90dvh-var(--kb-inset,0px))]"
     >
-      <div ref={bodyRef}>{body}</div>
+      {body}
     </Sheet>
   );
 }

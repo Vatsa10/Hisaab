@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/Button";
 import { brandGlyphPathData } from "@/lib/brand-glyph.mjs";
 import { Card } from "@/components/ui/Card";
 import { Money } from "@/components/ui/Money";
-import { Sheet } from "@/components/ui/Sheet";
+import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
+import { createRef } from "react";
 
 describe("Money", () => {
   it("renders an Indian-grouped rupee amount with tabular digits", () => {
@@ -100,6 +101,43 @@ describe("Sheet", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
 
+  describe("focus", () => {
+    function renderWithField() {
+      const ref = createRef<SheetHandle>();
+      render(
+        <Sheet ref={ref} open onClose={() => {}} title="Connect Zepto">
+          <input aria-label="Phone number" />
+        </Sheet>,
+      );
+      return ref;
+    }
+
+    it("focusTitleIfLost() moves focus from <body> to the title, and leaves focus inside the sheet alone", () => {
+      const ref = renderWithField();
+      const field = screen.getByLabelText("Phone number");
+      field.focus();
+      act(() => ref.current!.focusTitleIfLost());
+      expect(document.activeElement).toBe(field);
+      field.blur();
+      expect(document.activeElement).toBe(document.body);
+      act(() => ref.current!.focusTitleIfLost());
+      expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Connect Zepto" }));
+    });
+
+    it("keeps Shift+Tab and Tab inside the sheet when the (tabindex=-1) title has focus", () => {
+      const ref = renderWithField();
+      const title = screen.getByRole("heading", { name: "Connect Zepto" });
+      (document.activeElement as HTMLElement).blur(); // the panel had focus; drop it to <body>
+      act(() => ref.current!.focusTitleIfLost());
+      expect(document.activeElement).toBe(title);
+      fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+      expect(document.activeElement).toBe(screen.getByLabelText("Phone number")); // the last focusable
+      title.focus();
+      fireEvent.keyDown(document, { key: "Tab" });
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" })); // the first
+    });
+  });
+
   describe("closing", () => {
     beforeEach(() => {
       vi.useFakeTimers();
@@ -172,6 +210,23 @@ describe("Sheet", () => {
       act(() => vi.advanceTimersByTime(400));
       expect(onClose).not.toHaveBeenCalled();
       expect(screen.getByRole("dialog")).toHaveAttribute("data-state", "open");
+    });
+
+    it("close() from the ref plays the same exit animation and calls onClose once", () => {
+      const onClose = vi.fn();
+      const ref = createRef<SheetHandle>();
+      render(
+        <Sheet ref={ref} open onClose={onClose} title="Before you connect">
+          body
+        </Sheet>,
+      );
+      act(() => ref.current!.close());
+      expect(screen.getByRole("dialog")).toHaveAttribute("data-state", "closing");
+      act(() => ref.current!.close()); // a second call during the exit is ignored
+      act(() => vi.advanceTimersByTime(199));
+      expect(onClose).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onClose).toHaveBeenCalledOnce();
     });
 
     it("dismisses on a fast downward flick under the distance threshold", () => {

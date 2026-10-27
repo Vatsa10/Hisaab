@@ -109,6 +109,27 @@ def test_fake_orders_deterministic_recent_and_shaped(site):
         assert all(i["price"] is None for o in a for i in o["items"])
 
 
+def test_fake_fetch_reports_progress_in_batches(monkeypatch):
+    monkeypatch.delenv("FAKE_PAGE_DELAY_S", raising=False)
+    seen = []
+    out = fake_sites.fetch_orders("zepto", None, on_progress=lambda c, a: seen.append((c, a)))
+    assert [c for c, _ in seen] == [8, 16, 24, 28] and len(out) == 28
+    final_spend = sum(o["total_amount"] for o in out if o["status"] not in ("cancelled", "refunded", "failed"))
+    assert seen[-1][1] == pytest.approx(final_spend)
+    assert all(a1 <= a2 for (_, a1), (_, a2) in zip(seen, seen[1:]))
+
+
+def test_fake_fetch_waits_between_pages_only_when_asked(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(fake_sites.time, "sleep", sleeps.append)
+    monkeypatch.delenv("FAKE_PAGE_DELAY_S", raising=False)
+    fake_sites.fetch_orders("zepto", None, on_progress=lambda c, a: None)
+    assert sleeps == []
+    monkeypatch.setenv("FAKE_PAGE_DELAY_S", "0.5")
+    fake_sites.fetch_orders("zepto", None, on_progress=lambda c, a: None)
+    assert sleeps == [0.5, 0.5, 0.5]  # between the 4 pages, none before the first
+
+
 def test_fake_swiggy_mixes_instamart_rows():
     subs = {o["sub_platform"] for o in fake_sites.fetch_orders("swiggy", None)}
     assert subs == {None, "instamart"}

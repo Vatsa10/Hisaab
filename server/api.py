@@ -235,6 +235,28 @@ def refresh(site: str, user: str = Depends(current_user), conn=Depends(get_conn)
     return {"job_id": job_id}
 
 
+PLACE_MAX_LEN = 60
+
+
+def short_place(display) -> str | None:
+    """The geocoder's place text in a short "area, city" form: its first two distinct parts, without pincodes
+    or the country ("Alkapuri, Vadodara, Vadodara Taluka, Gujarat, 390007, India" -> "Alkapuri, Vadodara")."""
+    if not isinstance(display, str):
+        return None
+    parts: list[str] = []
+    for raw in display.split(","):
+        part = raw.strip()
+        if not part or part.isdigit() or part.lower() == "india" or part in parts:
+            continue
+        parts.append(part)
+        if len(parts) == 2:
+            break
+    text = ", ".join(parts)
+    if len(text) > PLACE_MAX_LEN:
+        text = text[:PLACE_MAX_LEN - 1].rstrip(" ,") + "…"
+    return text or None
+
+
 @app.put("/profile")
 def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depends(get_conn)):
     try:
@@ -251,7 +273,8 @@ def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depen
              address=excluded.address, lat=excluded.lat, lon=excluded.lon""",
         (user, body.display_name or None, body.address, lat, lon),
     )
-    return {"address": body.address, "lat": lat, "lon": lon}
+    # display: where the geocoder put the pin, short ("area, city"); None for a pasted "lat,lon".
+    return {"address": body.address, "lat": lat, "lon": lon, "display": short_place(loc.get("display"))}
 
 
 @app.post("/ask")

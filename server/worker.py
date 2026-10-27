@@ -40,7 +40,8 @@ PROMPT_STAGES = {"otp": ("otp_needed", "otp_received"), "question": ("question_n
 def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
     """Return a prompt(text, kind="otp") callable that publishes the question on the job's progress and waits
     for the answer relayed via NOTIFY otp_<job id>. kind is "otp" or "question"; both use the same channel.
-    Raises sync.OtpTimeout(kind) when nothing arrives within timeout_s."""
+    The progress also carries prompt_at (ISO-8601 UTC), when the wait began, so the app can count the same
+    timeout_s window down exactly. Raises sync.OtpTimeout(kind) when nothing arrives within timeout_s."""
     channel = "otp_" + job_id.replace("-", "")
 
     def prompt(text: str, kind: str = "otp") -> str:
@@ -48,7 +49,8 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
         # LISTEN first so a NOTIFY sent right after the app sees the question is not missed.
         listen_conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
         try:
-            jobs.set_progress(job_conn, job_id, stage=waiting, question=text)
+            prompt_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            jobs.set_progress(job_conn, job_id, stage=waiting, question=text, prompt_at=prompt_at)
             deadline = time.monotonic() + timeout_s
             while (remaining := deadline - time.monotonic()) > 0:
                 for note in listen_conn.notifies(timeout=remaining, stop_after=1):
@@ -201,7 +203,29 @@ def _ensure_proxy_session(conn, user_id: str, site: str) -> str:
 
 
 _categorize_skip_logged = False
-_NOT_COUNTED = ("cancelled", "refunded", "failed")  # same statuses the spend views leave out
+_NOT_COUNTED = sync.NOT_COUNTED  # same statuses the spend views leave out
+PROGRESS_EVERY_S = 1.0  # at most one "found so far" write per second during a sync
+
+
+def throttled(write: Callable[[int, float], None], min_interval_s: float = PROGRESS_EVERY_S,
+              clock: Callable[[], float] = time.monotonic) -> Callable[[int, float], None]:
+    """Wrap write(count, amount) so it runs for the first call and then at most once per min_interval_s; calls in
+    between are dropped (the final count is written when the sync ends). A failing write is logged by class only
+    and never fails the sync."""
+    last: float | None = None
+
+    def on_progress(count: int, amount: float) -> None:
+        nonlocal last
+        now = clock()
+        if last is not None and now - last < min_interval_s:
+            return
+        last = now
+        try:
+            write(count, amount)
+        except Exception as e:
+            log.warning("progress write failed (%s)", type(e).__name__)
+
+    return on_progress
 
 
 def _categorize(conn) -> None:
@@ -223,10 +247,13 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
              proxy_server: str | None, fetch: Callable | None = None) -> None:
     own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
     jobs.set_progress(conn, job.id, stage="syncing")
+    # The app shows "Found so far" from these, live; throttled so a fast fetch does not flood Realtime.
+    found_so_far = throttled(lambda count, amount: jobs.set_progress(
+        conn, job.id, stage="syncing", orders_found=count, amount_found=round(float(amount), 2)))
     orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                    allow_learn=False, proxy_server=proxy_server,
                    recipe_loader=lambda site: store.get_recipe(conn, site),
-                   orders_page_url=own.get("orders_page_url"))
+                   orders_page_url=own.get("orders_page_url"), on_progress=found_so_far)
     n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
     total = conn.execute(
         "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "

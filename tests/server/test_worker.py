@@ -31,6 +31,21 @@ def test_prompt_otp_times_out(pg, pg_listen):
     assert pg.execute("select progress->>'stage' from jobs").fetchone() == ("otp_needed",)
 
 
+@pytest.mark.parametrize("kind,stage", [("otp", "otp_needed"), ("question", "question_needed")])
+def test_prompt_publishes_prompt_at_in_utc(pg, pg_listen, kind, stage):
+    from datetime import datetime, timedelta, timezone
+
+    jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    before = datetime.now(timezone.utc)
+    with pytest.raises(sync.OtpTimeout):
+        worker.make_prompt(pg_listen, pg, jid, timeout_s=1)("Enter OTP", kind)
+    got_stage, prompt_at = pg.execute("select progress->>'stage', progress->>'prompt_at' from jobs").fetchone()
+    assert got_stage == stage
+    assert prompt_at and prompt_at.endswith("Z")
+    at = datetime.fromisoformat(prompt_at.replace("Z", "+00:00"))
+    assert at.tzinfo is not None and before - timedelta(seconds=1) <= at <= datetime.now(timezone.utc)
+
+
 def test_prompt_question_publishes_question_needed(pg, pg_listen):
     jid = jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
     with pytest.raises(sync.OtpTimeout) as e:
@@ -974,3 +989,59 @@ def test_fake_mode_still_categorizes(pg, monkeypatch):
     jobs.enqueue(pg, A, "sync", "zepto")
     worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
     assert calls == [1]
+
+
+# --- live "found so far" during a sync (Plan 3 Task 8, fix round 2) ---
+
+def test_throttled_writes_first_then_at_most_once_per_interval():
+    now = [100.0]
+    writes = []
+    on_progress = worker.throttled(lambda c, a: writes.append((c, a)), min_interval_s=1.0, clock=lambda: now[0])
+    on_progress(8, 10.0)          # first call always writes
+    now[0] += 0.4
+    on_progress(16, 20.0)         # dropped: within the interval
+    now[0] += 0.7
+    on_progress(24, 30.0)         # 1.1 s after the last write
+    now[0] += 0.99
+    on_progress(28, 40.0)         # dropped
+    assert writes == [(8, 10.0), (24, 30.0)]
+
+
+def test_throttled_swallows_a_failing_write(caplog):
+    def boom(c, a):
+        raise RuntimeError("db gone")
+
+    worker.throttled(boom)(1, 1.0)  # no exception
+    assert "progress write failed (RuntimeError)" in caplog.text
+
+
+def test_sync_writes_found_so_far_while_fetching(pg, monkeypatch):
+    mid = []
+
+    def fetch(site, since, on_progress=None, **k):
+        on_progress(2, 150.756)
+        mid.append(pg.execute("select progress from jobs").fetchone()[0])
+        on_progress(3, 200.0)  # same second: throttled away
+        mid.append(pg.execute("select progress from jobs").fetchone()[0])
+        return [order("1", total=100.5), order("2", total=50.25), order("3", total=10)]
+
+    monkeypatch.setattr(worker.sync, "fetch_orders", fetch)
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert mid[0] == {"stage": "syncing", "orders_found": 2, "amount_found": 150.76}
+    assert mid[1] == mid[0]
+    prog = pg.execute("select progress from jobs").fetchone()[0]
+    assert prog["stage"] == "synced" and prog["orders_found"] == 3 and prog["amount_found"] == 160.75
+
+
+def test_fake_mode_sync_reports_progress_batches(pg, monkeypatch):
+    writes = []
+    real_set = jobs.set_progress
+    monkeypatch.delenv("FAKE_PAGE_DELAY_S", raising=False)
+    monkeypatch.setattr(worker, "_fake_mode", lambda: True)
+    monkeypatch.setattr(worker, "throttled", lambda write, *a, **k: write)  # see every page
+    monkeypatch.setattr(worker.jobs, "set_progress",
+                        lambda conn, jid, **p: writes.append(p.get("orders_found")) or real_set(conn, jid, **p))
+    jobs.enqueue(pg, A, "sync", "zepto")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert writes == [None, 8, 16, 24, 28, 28]  # syncing, four pages, then synced

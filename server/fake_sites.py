@@ -1,12 +1,17 @@
 """Fake delivery-app backends for local end-to-end runs (WORKER_FAKE=1): no browser, no network.
 
 Nothing here logs or stores the phone, the OTP or any answer."""
+import os
 import random
+import time
 from datetime import datetime, timedelta
+
+import sync
 
 FAKE_OTP = "123456"
 MONTHS = 6
 ORDER_COUNT = 28
+PAGE_SIZE = 8  # orders per fake "page", so progress arrives in a few batches like a real paginated fetch
 CANCELLED_EVERY = 11
 RESTAURANTS = {
     "zomato": ["Behrouz Biryani", "Faasos", "Burger Singh", "Domino's Pizza", "Chaayos"],
@@ -43,9 +48,30 @@ def _order(rng, site, n, placed, grocery, instamart):
             "raw": {"id": oid, "fake": True}}
 
 
-def fetch_orders(site, since=None, **_) -> list[dict]:
+def page_delay_s() -> float:
+    """Pause between fake pages (FAKE_PAGE_DELAY_S, default 0), so a local run can watch the count climb."""
+    try:
+        return max(0.0, float(os.getenv("FAKE_PAGE_DELAY_S", "0") or 0))
+    except ValueError:
+        return 0.0
+
+
+def fetch_orders(site, since=None, on_progress=None, **_) -> list[dict]:
     """Deterministic synthetic orders for the last 6 months (seeded by site). Swiggy returns food orders plus
-    Instamart grocery rows (sub_platform='instamart'); the 'instamart' site returns only the latter."""
+    Instamart grocery rows (sub_platform='instamart'); the 'instamart' site returns only the latter.
+    on_progress(count, amount) is called after each "page" of PAGE_SIZE orders, as the real fetch does."""
+    out = _all_orders(site)
+    if since:
+        out = [o for o in out if o["placed_at"] >= str(since)[:19]]
+    delay = page_delay_s()
+    for end in range(PAGE_SIZE, len(out) + PAGE_SIZE, PAGE_SIZE):
+        if delay and end > PAGE_SIZE:
+            time.sleep(delay)
+        sync.report_progress(on_progress, out[:end])
+    return out
+
+
+def _all_orders(site) -> list[dict]:
     rng = random.Random(f"fake-orders-{site}")
     now = datetime.now()
     span_days = MONTHS * 30
@@ -62,6 +88,4 @@ def fetch_orders(site, since=None, **_) -> list[dict]:
             out.append(_order(rng, site, n, placed, True, False))
         else:
             out.append(_order(rng, site, n, placed, site == "swiggy" and n % 3 == 0, site == "swiggy" and n % 3 == 0))
-    if since:
-        out = [o for o in out if o["placed_at"] >= str(since)[:19]]
     return out

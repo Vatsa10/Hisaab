@@ -4,11 +4,13 @@ import {
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useRef,
   useState,
   useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type Ref,
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/cn";
@@ -24,6 +26,18 @@ export interface SheetProps {
   /** Pinned under the scrollable body, e.g. the sheet's primary action. */
   footer?: ReactNode;
   className?: string;
+  /** Imperative controls for content that drives the sheet (e.g. a "Done" button). */
+  ref?: Ref<SheetHandle>;
+}
+
+export interface SheetHandle {
+  /** Close the way the X button does: the exit animation, then onClose (once). */
+  close: () => void;
+  /**
+   * After content swaps a step, move focus to the title if it fell out of the sheet (e.g. to <body>
+   * because the focused button unmounted). Focus that is still inside the sheet is left alone.
+   */
+  focusTitleIfLost: () => void;
 }
 
 const FOCUSABLE =
@@ -51,9 +65,10 @@ type Closing = false | "animate" | "drag";
  * iOS-style bottom sheet: a modal dialog that slides up over a dimmed page. Escape, the close
  * button, a tap on the backdrop, or dragging the handle down (past ~80px, or a quick flick)
  * dismiss it: the sheet slides out in 200ms and then calls onClose (at once when reduced motion
- * is preferred). Focus moves into the sheet, is kept there, and returns to the opener.
+ * is preferred). Focus moves into the sheet, is kept there, and returns to the opener. A `ref`
+ * exposes `close()` (the same animated close) and `focusTitleIfLost()`.
  */
-export function Sheet({ open, onClose, title, description, children, footer, className }: SheetProps) {
+export function Sheet({ open, onClose, title, description, children, footer, className, ref }: SheetProps) {
   const isClient = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const titleId = useId();
   const descId = useId();
@@ -95,6 +110,21 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
     [finish],
   );
 
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  useImperativeHandle(
+    ref,
+    () => ({
+      close: () => requestClose(),
+      focusTitleIfLost: () => {
+        const panel = panelRef.current;
+        const active = document.activeElement;
+        if (!panel || (active && active !== document.body && panel.contains(active))) return;
+        titleRef.current?.focus({ preventScroll: true });
+      },
+    }),
+    [requestClose],
+  );
+
   useEffect(() => {
     if (!open || !isClient) return;
     const opener = document.activeElement as HTMLElement | null;
@@ -118,10 +148,13 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
         e.preventDefault();
         return;
       }
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) {
+      // Focus may sit on something the selector skips (the panel itself, or the tabindex=-1 title):
+      // treat that like the start of the cycle, so neither direction can leave the sheet.
+      const at = items.indexOf(document.activeElement as HTMLElement);
+      if (e.shiftKey && at <= 0) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && (at === -1 || at === items.length - 1)) {
         e.preventDefault();
         first.focus();
       }
@@ -204,7 +237,8 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
         </div>
         <div className="flex items-start gap-2 pl-5 pr-1.5">
           <div className="min-w-0 flex-1 pt-2.5">
-            <h2 id={titleId} className="text-headline">
+            {/* tabIndex -1: a place to land focus after a step change, not a tab stop or a control. */}
+            <h2 id={titleId} ref={titleRef} tabIndex={-1} className="text-headline focus:outline-none">
               {title}
             </h2>
             {description ? (

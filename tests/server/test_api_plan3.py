@@ -75,7 +75,7 @@ def test_profile_geocodes_and_upserts(client, token_a, pg, monkeypatch):
     r = client.put("/profile", json={"address": "  HSR Layout, Bengaluru, Karnataka ", "display_name": "Asha"},
                    headers=token_a)
     assert r.status_code == 200
-    assert r.json() == {"address": "HSR Layout, Bengaluru, Karnataka", "lat": 12.97, "lon": 77.59}
+    assert r.json() == {"address": "HSR Layout, Bengaluru, Karnataka", "lat": 12.97, "lon": 77.59, "display": None}
     assert seen == ["HSR Layout, Bengaluru, Karnataka"]
     assert pg.execute("select user_id::text, display_name, address, lat, lon from profiles").fetchall() == [
         (A, "Asha", "HSR Layout, Bengaluru, Karnataka", 12.97, 77.59)]
@@ -84,9 +84,29 @@ def test_profile_geocodes_and_upserts(client, token_a, pg, monkeypatch):
     monkeypatch.setattr(browser, "resolve_location", lambda text: {"query": text, "lat": 19.07, "lon": 72.87})
     r = client.put("/profile", json={"address": "Bandra West, Mumbai, Maharashtra"}, headers=token_a)
     assert r.status_code == 200 and r.json() == {"address": "Bandra West, Mumbai, Maharashtra", "lat": 19.07,
-                                                 "lon": 72.87}
+                                                 "lon": 72.87, "display": None}
     assert pg.execute("select user_id::text, display_name, address, lat, lon from profiles").fetchall() == [
         (A, "Asha", "Bandra West, Mumbai, Maharashtra", 19.07, 72.87)]
+
+
+def test_profile_returns_the_geocoders_place_short(client, token_a, monkeypatch):
+    long_display = "Alkapuri, Vadodara, Vadodara Taluka, Vadodara District, Gujarat, 390007, India"
+    monkeypatch.setattr(browser, "resolve_location",
+                        lambda text: {"query": text, "lat": 22.31, "lon": 73.17, "display": long_display})
+    r = client.put("/profile", json={"address": "Alkapuri, Vadodara"}, headers=token_a)
+    assert r.status_code == 200 and r.json()["display"] == "Alkapuri, Vadodara"
+
+
+@pytest.mark.parametrize("display,short", [
+    ("390007, Alkapuri, Alkapuri, Vadodara, India", "Alkapuri, Vadodara"),
+    ("Vadodara", "Vadodara"),
+    (None, None),
+    ("", None),
+    ("A" * 80 + ", City", "A" * 59 + "…"),
+])
+def test_short_place(display, short):
+    from server.api import short_place
+    assert short_place(display) == short
 
 
 def test_profile_not_found_is_422_and_stores_nothing(client, token_a, pg, monkeypatch):

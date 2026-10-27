@@ -16,6 +16,25 @@ log = logging.getLogger("sync")
 
 MAX_PAGES = 200
 MAX_REPLAY_SCROLLS = 30
+# Statuses that are not spending (the spend views leave them out too).
+NOT_COUNTED = ("cancelled", "refunded", "failed")
+
+# on_progress(count, amount): orders found so far and their spend (non-cancelled totals), after each page.
+Progress = Callable[[int, float], None]
+
+
+def report_progress(on_progress: Progress | None, orders) -> None:
+    """Tell on_progress how many orders (and how much spend) have been found so far. A failing callback is
+    logged by class only and never stops the fetch."""
+    if on_progress is None:
+        return
+    orders = list(orders)
+    amount = sum(float(o.get("total_amount") or 0) for o in orders
+                 if str(o.get("status") or "").lower() not in NOT_COUNTED)
+    try:
+        on_progress(len(orders), amount)
+    except Exception as e:
+        log.warning("progress callback failed (%s)", type(e).__name__)
 
 
 class RecipeError(Exception):
@@ -132,8 +151,8 @@ def _stop(batch: list[dict], since: str | None) -> bool:
     return bool(since) and min(o["placed_at"] for o in batch) < since
 
 
-def fast_path(page, recipe: dict, since: str | None) -> list[dict]:
-    """Call the learned endpoint from inside the page and paginate."""
+def fast_path(page, recipe: dict, since: str | None, on_progress: Progress | None = None) -> list[dict]:
+    """Call the learned endpoint from inside the page and paginate (on_progress after each page)."""
     req, seen, out = recipes.first_request(recipe), set(), []
     for n in range(MAX_PAGES):
         data = fetch_in_page(page, req)
@@ -146,6 +165,7 @@ def fast_path(page, recipe: dict, since: str | None) -> list[dict]:
         seen.update(o["order_id"] for o in batch)
         out += batch
         log.info("page %d: %d orders", n + 1, len(batch))
+        report_progress(on_progress, out)
         if _stop(batch, since):
             break
         req = recipes.next_request(req, recipe["pagination"], data, len(raw))
@@ -165,8 +185,9 @@ def _find_target(page, target: dict) -> str | None:
     return None
 
 
-def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
-    """Deterministically replay nav_trace and extract orders from passively captured responses."""
+def replay(page, capture, recipe: dict, since: str | None, on_progress: Progress | None = None) -> list[dict]:
+    """Deterministically replay nav_trace and extract orders from passively captured responses
+    (on_progress each time new orders arrive)."""
     capture.clear()
     for step in recipe.get("nav_trace") or []:
         if step["action"] == "navigate":
@@ -195,9 +216,12 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
         hits = agent.captured_for(recipe, capture.items)
         if any(c["status"] in (401, 403) for c in hits):
             raise SessionExpired("order API returned 401/403")
+        before = len(orders)
         for c in hits[seen_responses:]:
             for o in recipes.valid_orders(recipes.extract_orders(c["json"], recipe["field_map"])):
                 orders[o["order_id"]] = o
+        if len(orders) != before:
+            report_progress(on_progress, orders.values())
         idle = idle + 1 if len(hits) == seen_responses else 0
         seen_responses = len(hits)
         if idle >= 2 or (orders and _stop(list(orders.values()), since)):
@@ -220,8 +244,9 @@ def replay(page, capture, recipe: dict, since: str | None) -> list[dict]:
 def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None,
                  allow_learn: bool = True, proxy_server: str | None = None,
                  recipe_loader: Callable[[str], dict | None] | None = None,
-                 orders_page_url: str | None = None) -> list[dict]:
+                 orders_page_url: str | None = None, on_progress: Progress | None = None) -> list[dict]:
     """Fast path -> nav_trace replay -> re-learn; returns the orders (no database).
+    on_progress(count, amount) is called after each page of orders (fast path, replay or after a re-learn).
     allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead.
     recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file.
     orders_page_url (the user's own orders page, found at login) replaces the shared recipe's one."""
@@ -236,14 +261,14 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
         goto(page, orders_page_url or recipe["orders_page_url"])
         if recipe.get("fast_path_ok", True):
             try:
-                orders = fast_path(page, recipe, since)
+                orders = fast_path(page, recipe, since, on_progress)
             except SessionExpired:
                 raise
             except Exception as e:
                 log.warning("%s fast path failed: %s", site, e)
         if not orders:
             try:
-                orders = replay(page, capture, recipe, since)
+                orders = replay(page, capture, recipe, since, on_progress)
             except SessionExpired:
                 raise
             except Exception as e:
@@ -255,7 +280,8 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
             capture.clear()
             recipe = agent.discover(site, page, guard, capture)
             recipes.save(site, recipe)
-            orders = fast_path(page, recipe, since) if recipe["fast_path_ok"] else replay(page, capture, recipe, since)
+            orders = (fast_path(page, recipe, since, on_progress) if recipe["fast_path_ok"]
+                      else replay(page, capture, recipe, since, on_progress))
     if since:
         orders = [o for o in orders if o["placed_at"] >= since]
     return orders
