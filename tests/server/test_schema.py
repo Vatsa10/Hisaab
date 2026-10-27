@@ -15,9 +15,9 @@ def test_user_cannot_write_orders(pg, as_user):
 
 
 def test_one_active_job_per_user_site_type(pg):
-    pg.execute("insert into jobs(user_id, type, site) values (%s,'connect','swiggy')", (A,))
+    pg.execute("insert into jobs(user_id, type, site, profile) values (%s,'connect','swiggy','swiggy')", (A,))
     with pytest.raises(psycopg.errors.UniqueViolation):
-        pg.execute("insert into jobs(user_id, type, site) values (%s,'connect','swiggy')", (A,))
+        pg.execute("insert into jobs(user_id, type, site, profile) values (%s,'connect','swiggy','swiggy')", (A,))
 
 
 def test_recipes_readable_by_any_user(pg, as_user):

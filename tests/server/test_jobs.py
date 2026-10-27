@@ -141,3 +141,11 @@ def test_shared_profile_blocks_second_running_job(pg):
     jobs.enqueue(pg, A, "sync", "swiggy"); jobs.enqueue(pg, A, "sync", "instamart")
     assert jobs.claim(pg, "w1", ("sync",)) is not None
     assert jobs.claim(pg, "w2", ("sync",)) is None
+
+
+def test_job_without_profile_is_rejected(pg):
+    import psycopg
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        pg.execute("insert into jobs (user_id, type, site) values (%s, 'sync', 'zepto')", (A,))
+    jid = jobs.enqueue(pg, A, "sync", "instamart")
+    assert pg.execute("select profile from jobs where id=%s", (jid,)).fetchone() == ("swiggy",)
