@@ -22,6 +22,12 @@ __pycache__/
 # per-user browser profiles (server worker)
 profiles_users/
 
+# local file:// profile vault (encrypted with the public dev key when ALLOW_DEV_PROFILE_KEY=1)
+vault_local/
+
+# Supabase CLI scratch state
+supabase/.temp/
+
 # Azure deploy secrets
 deploy/azure/.env.deploy
 

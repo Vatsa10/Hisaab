@@ -238,8 +238,21 @@ The worker's `DATABASE_URL` must be a direct or session-mode connection: it wait
 `LISTEN`, which Supabase's transaction pooler (port 6543) does not support. Use the direct
 connection (port 5432) or the session pooler.
 
-The worker claims `connect` and `sync` jobs, keeps each user's browser profile under `PROFILE_ROOT`
-(default `profiles_users/`), and relays OTPs sent to `POST /jobs/<id>/otp`.
+The worker claims `connect` and `sync` jobs and relays OTPs sent to `POST /jobs/<id>/otp`. Each
+user's Chrome profile is stored encrypted in the vault at `PROFILE_STORE_URL` (default
+`file://vault_local`; an Azure Storage connection string in the cloud). For a job the worker
+restores it into a per-job directory `PROFILE_ROOT/<job id>/` (default `profiles_users/`), and
+deletes that plaintext directory when the job ends (and any leftovers at start-up).
+
+Locally the worker refuses to start without a key: set `PROFILE_MASTER_KEY` (32 bytes, base64), or
+`ALLOW_DEV_PROFILE_KEY=1` to use the fixed development key with a `file://` vault. That key is in
+this repository, so dev-key blobs are **not secret**: anyone with the `vault_local/` files can
+decrypt them. Use it only for test accounts, and never with a non-`file://` vault (refused anyway).
+
+```bash
+export ALLOW_DEV_PROFILE_KEY=1          # or: export PROFILE_MASTER_KEY=<base64 of 32 random bytes>
+python -m server.worker
+```
 
 ## Tests
 

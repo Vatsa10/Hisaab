@@ -24,6 +24,8 @@ docker-compose.yml
 .pytest_cache/
 .ruff_cache/
 *.pyc
+vault_local/
+supabase/.temp/
 
 # MUST stay the last non-comment line: the Azure deploy guard fails if any "!" negation follows it
 deploy/azure/.env.deploy
