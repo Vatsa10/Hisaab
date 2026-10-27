@@ -1,0 +1,15 @@
+# dependencies and build output
+node_modules/
+.next/
+out/
+coverage/
+next-env.d.ts
+*.tsbuildinfo
+
+# local env (Supabase URL / anon key / API URL) - never commit
+.env
+.env*.local
+
+# playwright scratch
+test-results/
+playwright-report/

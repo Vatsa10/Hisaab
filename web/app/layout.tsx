@@ -1,0 +1,37 @@
+import type { Metadata, Viewport } from "next";
+import type { ReactNode } from "react";
+import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: { default: "Expense Agent", template: "%s · Expense Agent" },
+  description: "Your Blinkit, Zepto, Swiggy and Zomato spending in one place.",
+  applicationName: "Expense Agent",
+  appleWebApp: { capable: true, title: "Spend", statusBarStyle: "default" },
+  formatDetection: { telephone: false, email: false, address: false },
+  icons: {
+    icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  // Next 15 emits only `mobile-web-app-capable`; older iOS still reads the Apple name.
+  other: { "apple-mobile-web-app-capable": "yes" },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  // Matches the page background so Safari's bars blend in; the manifest carries the brand green.
+  themeColor: "#f6f7f9",
+};
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en-IN">
+      <body>
+        {children}
+        <ServiceWorkerRegistrar />
+      </body>
+    </html>
+  );
+}
