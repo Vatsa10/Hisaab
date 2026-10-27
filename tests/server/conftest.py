@@ -63,3 +63,26 @@ def as_user():
         finally:
             conn.execute("rollback")
     return _as_user
+
+
+@pytest.fixture
+def client(pg, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from server.api import app
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", "test-secret")
+    monkeypatch.delenv("SUPABASE_JWKS_URL", raising=False)
+    return TestClient(app)
+
+
+@pytest.fixture
+def token_a():
+    from helpers import A, auth_header
+    return auth_header(A)
+
+
+@pytest.fixture
+def token_b():
+    from helpers import B, auth_header
+    return auth_header(B)
