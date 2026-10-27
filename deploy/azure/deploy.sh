@@ -34,17 +34,22 @@ done
 LOCATION="${LOCATION:-centralindia}"
 PREFIX="${PREFIX:-expagent}"
 
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-elif command -v python >/dev/null 2>&1; then
-  PY=python
-else
-  echo "python3 or python is required on PATH" >&2
+PY=""
+for cand in python3 python; do
+  # Run it: the Windows Store python3 alias is a stub that exists but fails.
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys' >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  echo "a working python3 or python is required on PATH" >&2
   exit 1
 fi
 
 # The whole repo is the build context; make sure the secrets file cannot be uploaded.
-if ! grep -Eq '^/?(\*\*/)?(deploy/azure/\.env\.deploy|deploy/azure/\.env\*|deploy/azure|deploy|\*\*/\.env\.deploy|\.env\.deploy|\*\*/\.env\*|\.env\*)/?\s*$' "$ROOT/.dockerignore" 2>/dev/null; then
+. "$HERE/guard.sh"
+if ! dockerignore_excludes_env_deploy "$ROOT/.dockerignore"; then
   echo "refusing to build: $ROOT/.dockerignore must exclude deploy/azure/.env.deploy" >&2
   exit 1
 fi
