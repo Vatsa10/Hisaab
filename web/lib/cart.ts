@@ -485,16 +485,16 @@ export function watchCartRequest(
     );
   };
 
-  const channel: RealtimeChannel = client
-    .channel(`cart-${id}-${++channelSeq}`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "cart_requests", filter: `id=eq.${id}` }, () =>
-      refetch(),
-    )
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "cart_results", filter: `request_id=eq.${id}` },
-      () => refetch(),
-    )
+  // Inserts and updates only: delete events can't be row-filtered, and a refetch on wake covers them.
+  let channel: RealtimeChannel = client.channel(`cart-${id}-${++channelSeq}`);
+  for (const event of ["INSERT", "UPDATE"] as const) {
+    channel = channel
+      .on("postgres_changes", { event, schema: "public", table: "cart_requests", filter: `id=eq.${id}` }, () => refetch())
+      .on("postgres_changes", { event, schema: "public", table: "cart_results", filter: `request_id=eq.${id}` }, () =>
+        refetch(),
+      );
+  }
+  channel = channel
     .subscribe((status) => {
       if (status === "SUBSCRIBED") refetch();
     });

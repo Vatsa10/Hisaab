@@ -195,9 +195,12 @@ describe("watchCartRequest", () => {
     const onChange = vi.fn();
     const stop = watchCartRequest("r1", onChange, fake.client as never);
 
-    expect(fake.subs.map((s) => [s.filter.table, s.filter.filter])).toEqual([
-      ["cart_requests", "id=eq.r1"],
-      ["cart_results", "request_id=eq.r1"],
+    // Inserts and updates only, never deletes (they can't be row-filtered).
+    expect(fake.subs.map((s) => [s.filter.event, s.filter.table, s.filter.filter])).toEqual([
+      ["INSERT", "cart_requests", "id=eq.r1"],
+      ["INSERT", "cart_results", "request_id=eq.r1"],
+      ["UPDATE", "cart_requests", "id=eq.r1"],
+      ["UPDATE", "cart_results", "request_id=eq.r1"],
     ]);
 
     fake.join();
