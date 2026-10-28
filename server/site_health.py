@@ -13,10 +13,9 @@ from server.config import SITE_NAMES, Settings
 
 
 class SiteCooling(Exception):
-    def __init__(self, site: str, until: datetime, message: str):
+    def __init__(self, site: str, until: datetime, message: str, retry_after_s: int):
         super().__init__(message)
-        self.site, self.until, self.message = site, until, message
-        self.retry_after_s = max(1, math.ceil((until - usage.as_utc(None)).total_seconds()))  # raise_if_cooling sets it from its own `now`
+        self.site, self.until, self.message, self.retry_after_s = site, until, message, retry_after_s
 
 
 def _app(site: str) -> str:
@@ -32,6 +31,8 @@ def record_throttle(conn, site: str, kind: str, retry_after_s: float | None, s: 
     now = usage.as_utc(now)
     group = list(sites.same_profile(site))
     with conn.transaction():
+        # Every row of a host group is written together, so they agree; take the most recently updated one
+        # (and lock it) as the group's current state.
         row = conn.execute("SELECT level, updated_at, events FROM site_backoff WHERE site = ANY(%s) "
                            "ORDER BY updated_at DESC LIMIT 1 FOR UPDATE", (group,)).fetchone()
         level, events = 0, 0
@@ -71,10 +72,9 @@ def raise_if_cooling(conn, site: str, now: datetime | None = None) -> None:
     if until is None:
         return
     minutes = max(1, math.ceil((until - now).total_seconds() / 60))
-    e = SiteCooling(site, until, f"{_app(site)} is limiting requests right now. "
-                                 f"Try again in about {minutes} minutes.")
-    e.retry_after_s = max(1, math.ceil((until - now).total_seconds()))
-    raise e
+    raise SiteCooling(site, until, f"{_app(site)} is limiting requests right now. "
+                                   f"Try again in about {minutes} minutes.",
+                      max(1, math.ceil((until - now).total_seconds())))
 
 
 def to_http(e: SiteCooling) -> HTTPException:
@@ -85,7 +85,7 @@ def to_http(e: SiteCooling) -> HTTPException:
 
 # Failures the user or the platform caused, not the site: never counted for or against the budget.
 NOT_SITE_FAULTS = ("needs_login", "worker_lost", "worker_shutdown", "site_busy", "too_many_attempts",
-                   "login_failed", "cancelled")
+                   "login_failed")
 
 _ORDERS_SQL = """
 SELECT j.site, count(*)::int AS total, count(*) FILTER (WHERE j.status = 'failed')::int AS failed
@@ -93,7 +93,7 @@ FROM jobs j LEFT JOIN recipes r ON r.site = j.site AND r.kind = 'orders'
 WHERE j.type = 'sync' AND j.status IN ('done', 'failed')
   AND j.finished_at >= greatest(%(since)s::timestamptz, coalesce(r.paused_changed_at, '-infinity'))
   AND j.finished_at <= %(now)s
-  AND NOT (j.status = 'failed' AND (j.error = ANY(%(ignored)s) OR j.error LIKE '%%\\_timeout'))
+  AND NOT (j.status = 'failed' AND (j.error = ANY(%(ignored)s)))
 GROUP BY j.site"""
 
 _RESULTS_SQL = """

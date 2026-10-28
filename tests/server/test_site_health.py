@@ -194,3 +194,38 @@ def test_food_failures_pause_menu_recipe_not_orders(pg):
     assert site_health.check_error_budget(pg, S, NOW) == [("swiggy", "menu")]
     assert not recipe_admin.is_paused(pg, "swiggy", "orders")
     assert recipe_admin.is_paused(pg, "swiggy", "menu")
+
+
+def test_exactly_at_budget_does_not_pause(pg):
+    _recipe(pg)
+    _syncs(pg, 7, ["RuntimeError: x"] * 3)
+    assert site_health.failure_stats(pg, NOW, 24)[0]["pct"] == 30
+    assert site_health.check_error_budget(pg, S, NOW) == []
+    assert not recipe_admin.is_paused(pg, "zepto")
+
+
+def test_timeout_errors_are_site_faults(pg):
+    _recipe(pg)
+    _syncs(pg, 6, ["otp_timeout"] * 4)
+    assert site_health.check_error_budget(pg, S, NOW) == [("zepto", "orders")]
+
+
+def test_pause_trigger_stamps_and_blocks_earlier_failures(pg):
+    """The real recipes_paused_changed trigger (DB now()), not a hand-set stamp."""
+    _recipe(pg)
+    assert pg.execute("select paused_changed_at from recipes").fetchone() == (None,)
+    recipe_admin.pause_site(pg, "zepto", "orders", "n")
+    assert pg.execute("select paused_changed_at is not null and paused_changed_at <= now() from recipes"
+                      ).fetchone() == (True,)
+    pg.execute("update recipes set health_note='x'")
+    first = pg.execute("select paused_changed_at from recipes").fetchone()[0]
+    recipe_admin.resume_site(pg, "zepto", "orders")
+    stamp, db_now = pg.execute("select paused_changed_at, now() from recipes").fetchone()
+    assert stamp >= first
+    for _ in range(10):
+        pg.execute("insert into jobs(user_id,type,site,profile,status,error,finished_at) "
+                   "values (%s,'sync','zepto','zepto','failed','RuntimeError: x',%s)",
+                   (A, db_now - timedelta(hours=1)))
+    later = db_now + timedelta(seconds=1)
+    assert site_health.failure_stats(pg, later, 24) == []
+    assert site_health.check_error_budget(pg, S, later) == []
