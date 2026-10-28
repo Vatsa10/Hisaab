@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ApiError, apiFetch } from "@/lib/api";
@@ -36,6 +37,12 @@ export function ConsentBody({ app }: ConsentBodyProps) {
         ))}
       </ul>
       <p className="text-label text-ink-muted">You&apos;ll only see this once for each app.</p>
+      <Link
+        href="/privacy"
+        className="-my-1 inline-flex min-h-11 items-center self-start text-label font-semibold text-accent underline-offset-4 hover:underline"
+      >
+        How we handle your data
+      </Link>
     </div>
   );
 }

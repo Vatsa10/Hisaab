@@ -4,7 +4,7 @@
 export const HOME_PATH = "/spend";
 export const LOGIN_PATH = "/login";
 
-const PUBLIC_PATHS = [LOGIN_PATH, "/auth"];
+const PUBLIC_PATHS = [LOGIN_PATH, "/auth", "/privacy"];
 
 export function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));

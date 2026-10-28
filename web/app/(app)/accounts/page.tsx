@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { NotificationsCard } from "@/components/account/NotificationsCard";
 import { SignOutButton } from "@/components/auth/SignOutButton";
 import { AccountsScreen, type ConsentRow } from "@/components/connect/AccountsScreen";
@@ -13,7 +14,8 @@ export const metadata: Metadata = { title: "Accounts" };
  * Accounts: the first paint comes from the server (the user's own rows, through RLS), then
  * AccountsScreen keeps connections and jobs live over Realtime.
  */
-export default async function AccountsPage() {
+export default async function AccountsPage({ searchParams }: { searchParams: Promise<{ reconnect?: string }> }) {
+  const { reconnect } = await searchParams;
   const supabase = await getSupabaseServerClient();
   const { data } = await supabase.auth.getUser();
   const email = data.user?.email;
@@ -37,9 +39,22 @@ export default async function AccountsPage() {
         initialConsents={(consents.data as ConsentRow[] | null) ?? []}
         initialProfile={(profile.data as Profile | null) ?? null}
         initialJobs={(jobs.data as Job[] | null) ?? []}
+        reconnect={reconnect}
       />
 
       <NotificationsCard />
+
+      <Card as="section" aria-label="Privacy" padding="none" className="mt-6">
+        <Link
+          href="/privacy"
+          className="flex min-h-14 items-center justify-between px-4 font-medium transition-colors duration-150 active:bg-canvas"
+        >
+          <span>Privacy</span>
+          <span aria-hidden="true" className="text-label font-semibold text-ink-muted">
+            ›
+          </span>
+        </Link>
+      </Card>
 
       <Card as="section" aria-label="Your account" className="mt-6">
         <p className="text-label text-ink-muted">Signed in as</p>

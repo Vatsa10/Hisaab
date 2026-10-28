@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { BrandMark } from "@/components/ui/BrandMark";
 import { authErrorCode, authErrorMessage } from "@/lib/authErrors";
@@ -10,9 +11,9 @@ export const metadata: Metadata = { title: "Sign in" };
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string; error?: string; email?: string }>;
+  searchParams: Promise<{ next?: string; error?: string; email?: string; deleted?: string }>;
 }) {
-  const { next, error, email } = await searchParams;
+  const { next, error, email, deleted } = await searchParams;
   const configured = hasSupabaseEnv();
 
   return (
@@ -26,7 +27,13 @@ export default async function LoginPage({
 
       {configured ? (
         <LoginForm next={safeNextPath(next)} initialError={error && !authErrorCode(error) ? authErrorMessage(error, email) : undefined}
-          initialNotice={error && authErrorCode(error) ? authErrorMessage(error, email) : undefined}
+          initialNotice={
+            error && authErrorCode(error)
+              ? authErrorMessage(error, email)
+              : deleted === "1"
+                ? "Your account and all its data are deleted."
+                : undefined
+          }
         />
       ) : (
         <p role="alert" className="mt-8 rounded-card bg-up-soft p-4 text-label text-up">
@@ -34,6 +41,15 @@ export default async function LoginPage({
           NEXT_PUBLIC_SUPABASE_ANON_KEY (see web/README.md) and rebuild.
         </p>
       )}
+
+      <p className="mt-auto pt-8 text-center">
+        <Link
+          href="/privacy"
+          className="inline-flex min-h-11 items-center px-3 text-label font-medium text-ink-muted underline-offset-4 hover:underline"
+        >
+          Privacy
+        </Link>
+      </p>
     </main>
   );
 }

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DataCard } from "@/components/account/DataCard";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ApiError, apiFetch } from "@/lib/api";
@@ -24,6 +25,8 @@ export interface AccountsScreenProps {
   initialProfile: Profile | null;
   /** The user's queued or running jobs when the page was rendered. */
   initialJobs: Job[];
+  /** `?reconnect=<site>`: open that app's connect flow on arrival (phone step, or consent if missing). */
+  reconnect?: string;
 }
 
 function refreshProblem(e: unknown, app: AppInfo): string {
@@ -43,7 +46,7 @@ const byId = (id: string): AppInfo | undefined => APPS.find((a) => a.id === id);
  * "Refresh now" for connected apps, and the delivery address. Connection rows update live over
  * Realtime, so a connect started on another device shows up here without a reload.
  */
-export function AccountsScreen({ initialConnections, initialConsents, initialProfile, initialJobs }: AccountsScreenProps) {
+export function AccountsScreen({ initialConnections, initialConsents, initialProfile, initialJobs, reconnect }: AccountsScreenProps) {
   const [connections, setConnections] = useState<Connection[]>(initialConnections);
   const [consented, setConsented] = useState<ReadonlySet<string>>(
     () => new Set(initialConsents.filter((c) => c.text_version === CONSENT_VERSION).map((c) => c.site)),
@@ -53,7 +56,10 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
   const [jobs, setJobs] = useState<Record<string, Job>>(() =>
     Object.fromEntries(initialJobs.filter((j) => !isTerminal(j)).map((j) => [j.site, j])),
   );
-  const [flow, setFlow] = useState<{ site: SiteId; jobId?: string } | null>(null);
+  const [flow, setFlow] = useState<{ site: SiteId; jobId?: string } | null>(() => {
+    const app = reconnect ? byId(reconnect) : undefined;
+    return app ? { site: app.id } : null;
+  });
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -219,6 +225,8 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
 
       <AddressRow profile={profile} onSaved={setProfile} />
 
+      <DataCard connected={APPS.filter((a) => rowState(connectionFor.get(a.id), false) === "synced")} />
+
       {flow && flowApp ? (
         <ConnectFlow
           app={flowApp}
@@ -226,7 +234,10 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
           onConsented={(app) => setConsented((s) => new Set(s).add(app.id))}
           attachJobId={flow.jobId}
           onJobStarted={(app, id) => track(app, id, "connect")}
-          onClose={() => setFlow(null)}
+          onClose={() => {
+            setFlow(null);
+            if (reconnect) window.history.replaceState(null, "", "/accounts");
+          }}
           onConnectNext={(app) => setFlow({ site: app.id })}
           nextApp={nextAfter(flowApp.id)}
         />
