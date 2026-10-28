@@ -34,6 +34,13 @@ describe("ReloginBanner", () => {
     act(() => live.push!([conn("zepto", "needs_login"), conn("blinkit", "connected"), conn("swiggy", "needs_login")]));
     expect(screen.getByText("Zepto and Swiggy logged you out.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Reconnect" })).toHaveAttribute("href", "/accounts?reconnect=zepto");
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("banner lists three apps with commas and and", () => {
+    render(<ReloginBanner />);
+    act(() => live.push!([conn("zepto", "needs_login"), conn("blinkit", "needs_login"), conn("swiggy", "needs_login")]));
+    expect(screen.getByText("Zepto, Blinkit and Swiggy logged you out.")).toBeInTheDocument();
   });
 
   it("banner names a single app", () => {

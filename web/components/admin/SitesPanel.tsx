@@ -175,12 +175,20 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
         {s.last_ok_at ? ` · last ok ${relativeTime(s.last_ok_at, now)}` : ""}
       </p>
       {jobs > 0 ? (
-        <p className="mt-1 text-label tabular-nums text-ink-muted">
+        <p
+          className={`mt-1 text-label tabular-nums ${
+            failures / jobs >= 0.5 ? "font-semibold text-up" : "text-ink-muted"
+          }`}
+        >
           Failures ({WINDOW_HOURS} h): {failures} of {jobs} ({Math.round((failures / jobs) * 100)}%)
         </p>
       ) : null}
       {s.paused ? (
-        <p className="mt-2 text-label text-danger">Paused automatically after repeated failures. Resume once the site is back.</p>
+        <p className="mt-2 text-label text-danger">
+          {s.paused_reason === "auto"
+            ? "Paused automatically after repeated failures. Resume once the site is back."
+            : "Paused. Resume once the site is back."}
+        </p>
       ) : null}
       {s.health_note ? (
         <p className={`mt-2 text-label ${s.paused ? "text-danger" : s.healthy ? "text-ink-muted" : "text-up"}`}>

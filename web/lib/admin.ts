@@ -43,6 +43,8 @@ export interface SiteHealth {
   last_ok_at: string | null;
   /** The calling admin's own connection for this site is connected (needed to learn). */
   admin_connected: boolean;
+  /** Why the site is paused; the server supplies it later (P7 T13). Absent is treated as manual. */
+  paused_reason?: "auto" | "manual";
   cooldown_until?: string | null;
   backoff_level?: number;
   failures_window?: number;
