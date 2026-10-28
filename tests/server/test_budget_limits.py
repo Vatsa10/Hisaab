@@ -195,3 +195,64 @@ def test_naive_now_is_taken_as_utc():
     naive = datetime(2026, 10, 27, 18, 0)
     assert limits.seconds_until_reset(naive, "Asia/Kolkata") == 1800
     assert usage.today(naive, "Asia/Kolkata") == date(2026, 10, 27)
+
+
+def test_usage_record_cart_fills(pg):
+    d = date(2026, 10, 27)
+    usage.record(pg, A, d, cart_fills=2)
+    usage.record(pg, A, d, cart_fills=1, syncs=1)
+    assert pg.execute("select cart_fills, syncs from usage where user_id = %s", (A,)).fetchone() == (3, 1)
+
+
+def test_consume_cart_fill_stops_at_five(pg, s):
+    now = datetime(2026, 10, 27, 6, 0, tzinfo=timezone.utc)
+    assert limits.cart_fills_left(pg, A, now, s) == 5
+    assert [limits.consume_cart_fill(pg, A, now, s) for _ in range(5)] == [4, 3, 2, 1, 0]
+    with pytest.raises(limits.LimitExceeded) as e:
+        limits.consume_cart_fill(pg, A, now, s)
+    assert (e.value.kind, e.value.limit) == ("fill", 5)
+    assert e.value.retry_after_s == limits.seconds_until_reset(now, s.app_tz)
+    assert e.value.message == "You can fill 5 carts a day. Try again tomorrow."
+    assert pg.execute("select cart_fills, cart_checks from usage where user_id = %s", (A,)).fetchone() == (5, 0)
+    assert limits.cart_fills_left(pg, A, now, s) == 0
+    assert limits.cart_fills_left(pg, B, now, s) == 5
+
+
+def test_consume_cart_fill_is_atomic(pg, _applied, s):
+    now = datetime(2026, 10, 27, 6, 0, tzinfo=timezone.utc)
+    usage.record(pg, A, usage.today(now), cart_fills=4)
+    results = []
+    barrier = threading.Barrier(2)
+
+    def go():
+        with psycopg.connect(_applied, autocommit=True) as c:
+            barrier.wait(timeout=10)
+            try:
+                results.append(limits.consume_cart_fill(c, A, now, s))
+            except limits.LimitExceeded:
+                results.append("limit")
+
+    ts = [threading.Thread(target=go) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert sorted(map(str, results)) == ["0", "limit"]
+    assert pg.execute("select cart_fills from usage where user_id = %s", (A,)).fetchone() == (5,)
+
+
+def test_consume_cart_fill_when_budget_paused(pg, s):
+    now = datetime(2026, 12, 27, 6, 0, tzinfo=timezone.utc)
+    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values ('2026-12','paused',5000,5000)")
+    with pytest.raises(limits.BudgetPaused) as e:
+        limits.consume_cart_fill(pg, A, now, s)
+    assert (e.value.kind, e.value.resumes_on) == ("fill", date(2027, 1, 1))
+    assert e.value.message == "Filling carts is paused until 1 January."
+    assert pg.execute("select count(*) from usage").fetchone() == (0,)
+
+
+def test_refund_cart_fill_never_below_zero(pg):
+    d = date(2026, 10, 27)
+    usage.record(pg, A, d, cart_fills=1)
+    limits.refund_cart_fill(pg, A, d)
+    limits.refund_cart_fill(pg, A, d)
+    limits.refund_cart_fill(pg, B, d)               # no row: nothing happens
+    assert pg.execute("select user_id::text, cart_fills from usage").fetchall() == [(A, 0)]

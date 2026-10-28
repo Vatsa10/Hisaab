@@ -36,6 +36,11 @@ class Settings:
     # Daily limits and sync cadence
     refresh_per_app_per_day: int = 3
     cart_checks_per_day: int = 10
+    # Cart fills (Plan 6)
+    cart_fills_per_day: int = 5
+    cart_fill_max_age_s: int = 1800  # prices older than this are re-checked before a fill
+    cart_location_max_m: float = 500
+    fill_confirm_window_s: int = 600  # how long "Fill at these prices" stays on offer
     sync_interval_h: int = 24
     paused_sync_interval_h: int = 72
     app_tz: str = "Asia/Kolkata"
@@ -72,6 +77,9 @@ class Settings:
 
 SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "instamart": "Instamart",
               "zomato": "Zomato"}
+# "Open <app> to pay" (Plan 6 R11): home pages that iOS universal links open in the app. Never checkout or pay.
+OPEN_APP_URLS = {"zepto": "https://www.zepto.com/", "blinkit": "https://blinkit.com/",
+                 "instamart": "https://www.swiggy.com/instamart"}
 
 
 def _master_key(env, store_url: str, for_worker: bool) -> bytes | None:
@@ -136,6 +144,10 @@ def settings(for_worker: bool = False) -> Settings:
         jev_tokens_per_call=int(env("JEV_TOKENS_PER_CALL", "1000")),
         refresh_per_app_per_day=int(env("REFRESH_PER_APP_PER_DAY", "3")),
         cart_checks_per_day=int(env("CART_CHECKS_PER_DAY", "10")),
+        cart_fills_per_day=int(env("CART_FILLS_PER_DAY", "5")),
+        cart_fill_max_age_s=int(env("CART_FILL_MAX_AGE_S", "1800")),
+        cart_location_max_m=float(env("CART_LOCATION_MAX_M", "500")),
+        fill_confirm_window_s=int(env("FILL_CONFIRM_WINDOW_S", "600")),
         sync_interval_h=int(env("SYNC_INTERVAL_H", "24")),
         paused_sync_interval_h=int(env("PAUSED_SYNC_INTERVAL_H", "72")),
         app_tz=env("APP_TZ", "") or "Asia/Kolkata",

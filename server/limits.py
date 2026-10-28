@@ -73,6 +73,42 @@ def consume_cart_check(conn, user_id: str, now: datetime | None, s: Settings) ->
     return limit - row[0]
 
 
+def cart_fills_left(conn, user_id: str, now: datetime | None, s: Settings) -> int:
+    row = conn.execute("select cart_fills from usage where user_id = %s and day = %s",
+                       (user_id, usage.today(now, s.app_tz))).fetchone()
+    return max(0, s.cart_fills_per_day - (row[0] if row else 0))
+
+
+def fill_paused(now: datetime | None, s: Settings) -> BudgetPaused:
+    """The budget pause as it applies to cart fills (Plan 6 R7)."""
+    resumes = _first_of_next_month(now, s.app_tz)
+    return BudgetPaused("fill", resumes, f"Filling carts is paused until {resumes.day} {resumes:%B}.")
+
+
+def consume_cart_fill(conn, user_id: str, now: datetime | None, s: Settings) -> int:
+    """Use one cart fill atomically; returns how many are left today. Fills never use cart checks (Plan 6 R7)."""
+    if budget.is_paused(conn, now, s.app_tz):
+        raise fill_paused(now, s)
+    limit = s.cart_fills_per_day
+    row = None
+    if limit > 0:
+        row = conn.execute(
+            "insert into usage (user_id, day, cart_fills) values (%s, %s, 1) "
+            "on conflict (user_id, day) do update set cart_fills = usage.cart_fills + 1 "
+            "where usage.cart_fills < %s returning cart_fills",
+            (user_id, usage.today(now, s.app_tz), limit)).fetchone()
+    if row is None:
+        raise LimitExceeded("fill", limit, seconds_until_reset(now, s.app_tz),
+                            f"You can fill {limit} carts a day. Try again tomorrow.")
+    return limit - row[0]
+
+
+def refund_cart_fill(conn, user_id: str, day: date) -> None:
+    """Give back one fill on that IST day (a fill that added nothing); never below zero."""
+    conn.execute("update usage set cart_fills = greatest(cart_fills - 1, 0) where user_id = %s and day = %s",
+                 (user_id, day))
+
+
 def to_http(e: LimitExceeded | BudgetPaused) -> HTTPException:
     if isinstance(e, LimitExceeded):
         return HTTPException(status_code=429, detail=e.message, headers={"Retry-After": str(e.retry_after_s)})

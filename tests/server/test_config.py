@@ -202,3 +202,29 @@ def test_new_settings_read_from_env_and_hide_secrets(monkeypatch):
     s = settings()
     assert (s.ask_database_url, s.cors_origins, s.anthropic_api_key, s.anthropic_model) == \
         ("", ("http://localhost:3000",), "", "claude-haiku-5-5")
+
+
+def test_settings_fill_tunables_from_env(monkeypatch):
+    from server import config
+    for k, v in {"CART_FILLS_PER_DAY": "3", "CART_FILL_MAX_AGE_S": "900", "CART_LOCATION_MAX_M": "250.5",
+                 "FILL_CONFIRM_WINDOW_S": "300"}.items():
+        monkeypatch.setenv(k, v)
+    s = config.settings()
+    assert (s.cart_fills_per_day, s.cart_fill_max_age_s, s.cart_location_max_m, s.fill_confirm_window_s) == \
+        (3, 900, 250.5, 300)
+    for k in ("CART_FILLS_PER_DAY", "CART_FILL_MAX_AGE_S", "CART_LOCATION_MAX_M", "FILL_CONFIRM_WINDOW_S"):
+        monkeypatch.delenv(k)
+    s = config.settings()
+    assert (s.cart_fills_per_day, s.cart_fill_max_age_s, s.cart_location_max_m, s.fill_confirm_window_s) == \
+        (5, 1800, 500.0, 600)
+    assert config.OPEN_APP_URLS == {"zepto": "https://www.zepto.com/", "blinkit": "https://blinkit.com/",
+                                    "instamart": "https://www.swiggy.com/instamart"}
+
+
+def test_compose_sets_fill_tunables():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    for line in ('CART_FILLS_PER_DAY: "${CART_FILLS_PER_DAY:-5}"', 'CART_FILL_MAX_AGE_S: "${CART_FILL_MAX_AGE_S:-1800}"',
+                 'CART_LOCATION_MAX_M: "${CART_LOCATION_MAX_M:-500}"',
+                 'FILL_CONFIRM_WINDOW_S: "${FILL_CONFIRM_WINDOW_S:-600}"'):
+        assert line in text
