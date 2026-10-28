@@ -23,6 +23,15 @@ export function PickSheet({ requestId, mode, pick, onClose, onChosen }: PickShee
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // A new pick (another item or app) starts with nothing chosen, so a choice made for one pick
+  // can never be sent for the next. Reset during render, keyed on the pick itself.
+  const [shownPick, setShownPick] = useState<CartPick | null>(pick);
+  if (pick !== shownPick) {
+    setShownPick(pick);
+    setChosen(null);
+    setError(null);
+  }
+
   async function save() {
     if (!pick || !chosen || saving) return;
     setSaving(true);

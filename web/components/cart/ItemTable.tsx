@@ -3,6 +3,8 @@ import { siteName, type CartCell, type CartSite, type CartTable } from "@/lib/ca
 
 export interface ItemTableProps {
   table: CartTable;
+  /** The cheapest app (summary.best_site); its total is the one highlighted. */
+  cheapestSite: CartSite | null;
   onPick: (idx: number, site: CartSite) => void;
 }
 
@@ -21,7 +23,7 @@ function ColumnName({ site }: { site: CartSite }) {
   );
 }
 
-function Cell({ cell, onPick }: { cell: CartCell | undefined; onPick: () => void }) {
+function Cell({ cell, highlight, onPick }: { cell: CartCell | undefined; highlight: boolean; onPick: () => void }) {
   if (!cell) return <td className="px-1 py-2 text-right text-ink-muted">n/a</td>;
   if (cell.status === "pick" || cell.price_label === "Pick") {
     return (
@@ -40,7 +42,7 @@ function Cell({ cell, onPick }: { cell: CartCell | undefined; onPick: () => void
     <td
       className={cn(
         "px-1 py-2 text-right tabular-nums",
-        cell.cheapest && "font-bold text-accent",
+        highlight && cell.cheapest && "font-bold text-accent",
         MUTED.has(cell.price_label) && "text-ink-muted",
       )}
     >
@@ -50,8 +52,10 @@ function Cell({ cell, onPick }: { cell: CartCell | undefined; onPick: () => void
 }
 
 /** Every item's price on every app (mockup B); the cheapest price per row is green and bold. */
-export function ItemTable({ table, onPick }: ItemTableProps) {
+export function ItemTable({ table, cheapestSite, onPick }: ItemTableProps) {
   const cols = table.columns;
+  // With one priced app there is nothing to compare: highlighting would mark every cell.
+  const compare = cols.length > 1;
   return (
     <div className="rounded-card bg-surface px-3 py-2 shadow-card">
       <table className="w-full table-fixed border-collapse text-label">
@@ -80,7 +84,7 @@ export function ItemTable({ table, onPick }: ItemTableProps) {
                 {row.label}
               </th>
               {cols.map((c) => (
-                <Cell key={c} cell={row.cells[c]} onPick={() => onPick(row.idx, c)} />
+                <Cell key={c} cell={row.cells[c]} highlight={compare} onPick={() => onPick(row.idx, c)} />
               ))}
             </tr>
           ))}
@@ -88,11 +92,20 @@ export function ItemTable({ table, onPick }: ItemTableProps) {
             <th scope="row" className="py-2 pr-1 text-left">
               Total + fees
             </th>
-            {cols.map((c, i) => (
-              <td key={c} className={cn("px-1 py-2 text-right tabular-nums", i === 0 && "text-accent")}>
-                {table.totals[c] ?? "—"}
-              </td>
-            ))}
+            {cols.map((c) => {
+              const total = table.totals[c];
+              return (
+                <td
+                  key={c}
+                  className={cn(
+                    "px-1 py-2 text-right tabular-nums",
+                    !total ? "font-normal text-ink-muted" : compare && c === cheapestSite && "text-accent",
+                  )}
+                >
+                  {total ?? "n/a"}
+                </td>
+              );
+            })}
           </tr>
         </tbody>
       </table>

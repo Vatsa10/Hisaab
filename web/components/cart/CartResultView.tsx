@@ -147,7 +147,7 @@ export function CartResultView({ id }: { id: string }) {
           <div id={tableId}>
             {tableOpen ? (
               <div className="mt-1 animate-fade-in">
-                <ItemTable table={summary.table} onPick={(idx, site) => openPick(site, idx)} />
+                <ItemTable table={summary.table} cheapestSite={summary.best_site} onPick={(idx, site) => openPick(site, idx)} />
                 <SplitLine split={summary.split} />
               </div>
             ) : null}

@@ -396,6 +396,86 @@ describe("pick one", () => {
     expect(JSON.parse(init.body)).toEqual({ idx: 3, site: "instamart", product_id: "p2" });
     expect(screen.queryByRole("button", { name: /to pick/ })).toBeNull();
   });
+
+  it("a second pick starts with nothing chosen and sends its own product", async () => {
+    const curd = {
+      idx: 5,
+      site: "instamart" as const,
+      label: "Curd 400g",
+      candidates: [
+        { product_id: "c1", name: "Amul Masti Dahi", size_label: "400 g", price_label: "₹36", packs: 1 },
+        { product_id: "c2", name: "Nestle a+ Dahi", size_label: "400 g", price_label: "₹40", packs: 1 },
+      ],
+    };
+    const first = grocerySummary();
+    first.cards[2] = { ...first.cards[2]!, to_pick: 2, stock_line: "2 to pick" };
+    first.picks = [first.picks[0]!, curd];
+    const second = grocerySummary();
+    second.picks = [curd];
+    second.cards[2] = { ...second.cards[2]!, to_pick: 1, total_label: "₹458" };
+    const done = grocerySummary();
+    done.picks = [];
+    done.cards[2] = { ...done.cards[2]!, to_pick: 0, total_label: "₹452" };
+    api.apiFetch.mockResolvedValueOnce({ summary: second }).mockResolvedValueOnce({ summary: done });
+
+    renderView();
+    show(request({ summary: first }));
+    fireEvent.click(screen.getByRole("button", { name: /2 to pick/ }));
+    let sheet = await screen.findByRole("dialog");
+    fireEvent.click(within(sheet).getByRole("radio", { name: /Modern Sandwich Bread/ }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Use this" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: /1 to pick/ }));
+    sheet = await screen.findByRole("dialog");
+    expect(within(sheet).getByText(/Curd 400g/)).toBeInTheDocument();
+    expect(within(sheet).getAllByRole("radio").every((r) => !(r as HTMLInputElement).checked)).toBe(true);
+    expect(within(sheet).getByRole("button", { name: "Use this" })).toBeDisabled();
+    fireEvent.click(within(sheet).getByRole("radio", { name: /Nestle a\+ Dahi/ }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Use this" }));
+    await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(api.apiFetch.mock.calls[1]![1].body)).toEqual({ idx: 5, site: "instamart", product_id: "c2" });
+  });
+
+  it("pick count is not repeated when the stock line already has it", () => {
+    const s = grocerySummary();
+    s.cards[2] = { ...s.cards[2]!, stock_line: "1 out of stock · 1 to pick", to_pick: 1 };
+    renderView();
+    show(request({ summary: s }));
+    const c = screen.getAllByRole("article")[2]!;
+    expect(c.textContent?.match(/to pick/g)).toHaveLength(1);
+    expect(within(c).getByText(/1 out of stock/)).toBeInTheDocument();
+    expect(within(c).getByRole("button", { name: "1 to pick ›" })).toBeInTheDocument();
+  });
+});
+
+describe("item table highlights", () => {
+  it("totals highlight the cheapest app from the data and show a missing total as n/a", () => {
+    const s = grocerySummary();
+    s.best_site = "blinkit";
+    s.table.columns = ["zepto", "blinkit", "instamart"];
+    s.table.totals = { zepto: "₹470", blinkit: "₹449" };
+    renderView();
+    show(request({ summary: s }));
+    fireEvent.click(screen.getByRole("button", { name: "See item prices" }));
+    const totals = within(screen.getByRole("table")).getByRole("row", { name: /Total \+ fees/ });
+    const [z, b, i] = within(totals).getAllByRole("cell");
+    expect(z).not.toHaveClass("text-accent");
+    expect(b).toHaveClass("text-accent");
+    expect(i).toHaveTextContent("n/a");
+    expect(i).toHaveClass("text-ink-muted");
+  });
+
+  it("one priced app highlights nothing", () => {
+    renderView("f1");
+    show(request({ id: "f1", mode: "food", summary: foodSummary() }));
+    fireEvent.click(screen.getByRole("button", { name: "See item prices" }));
+    const table = screen.getByRole("table");
+    for (const cell of within(table).getAllByRole("cell")) {
+      expect(cell).not.toHaveClass("text-accent");
+      expect(cell).not.toHaveClass("font-bold");
+    }
+  });
 });
 
 describe("states", () => {

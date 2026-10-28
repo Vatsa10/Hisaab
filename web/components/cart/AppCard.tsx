@@ -11,6 +11,35 @@ export interface AppCardProps {
   onPick: () => void;
 }
 
+// "1 out of stock · 1 to pick": the server's stock line may already carry the pick count.
+const TO_PICK = /(?:\s*·\s*)?\d+\s+to pick\s*$/;
+
+/**
+ * The stock line, with "{n} to pick ›" as the button that opens the pick sheet. When the
+ * server's line already says "n to pick", that part becomes the button instead of repeating it.
+ * The button keeps a 44px hit area without adding height to the line (negative margins).
+ */
+function StockLine({ line, toPick, onPick }: { line: string | null; toPick: number; onPick: () => void }) {
+  const rest = toPick > 0 && line ? line.replace(TO_PICK, "") : line;
+  return (
+    <p className="text-ink-muted">
+      {rest}
+      {toPick > 0 ? (
+        <>
+          {rest ? " · " : null}
+          <button
+            type="button"
+            onClick={onPick}
+            className="-mx-1.5 -my-3 inline-flex min-h-11 items-center rounded-tile px-1.5 font-semibold text-accent hover:bg-accent/5 active:bg-accent/10"
+          >
+            {toPick} to pick ›
+          </button>
+        </>
+      ) : null}
+    </p>
+  );
+}
+
 /** One app's total with fees (mockup A). Prices and every line come from the server summary. */
 export function AppCard({ card, mode, offersNote, onPick }: AppCardProps) {
   const ok = card.status === "ok";
@@ -55,7 +84,9 @@ export function AppCard({ card, mode, offersNote, onPick }: AppCardProps) {
           ) : null}
           {card.member_note ? <p className="font-medium text-accent-strong">{card.member_note}</p> : null}
           {card.fee_hint ? <p className="text-ink-muted">{card.fee_hint}</p> : null}
-          {card.stock_line ? <p className="text-ink-muted">{card.stock_line}</p> : null}
+          {card.stock_line || card.to_pick > 0 ? (
+            <StockLine line={card.stock_line} toPick={card.to_pick} onPick={onPick} />
+          ) : null}
           {mode === "food" && offersNote ? <p className="text-ink-muted">{offersNote}</p> : null}
           {card.swaps.length ? (
             <ul className="flex flex-wrap gap-1.5 pt-1">
@@ -65,15 +96,6 @@ export function AppCard({ card, mode, offersNote, onPick }: AppCardProps) {
                 </li>
               ))}
             </ul>
-          ) : null}
-          {card.to_pick > 0 ? (
-            <button
-              type="button"
-              onClick={onPick}
-              className="-mx-2 -my-1 inline-flex min-h-11 items-center rounded-tile px-2 font-semibold text-accent hover:bg-accent/5 active:bg-accent/10"
-            >
-              {card.to_pick} to pick ›
-            </button>
           ) : null}
         </div>
       ) : (
