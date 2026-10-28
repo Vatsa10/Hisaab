@@ -132,8 +132,8 @@ describe("ConnectFlow", () => {
     const otp = screen.getByLabelText(/code/i, { selector: "input" });
     expect(otp).toHaveAttribute("inputmode", "numeric");
     expect(otp).toHaveAttribute("autocomplete", "one-time-code");
-    expect(otp).toHaveAttribute("pattern", "\\d{6}");
-    expect(otp).toHaveAttribute("maxlength", "6");
+    expect(otp).toHaveAttribute("pattern", "\\d{4,8}");
+    expect(otp).toHaveAttribute("maxlength", "8");
     expect(document.querySelectorAll('input[autocomplete="one-time-code"]')).toHaveLength(1);
   });
 
@@ -152,12 +152,25 @@ describe("ConnectFlow", () => {
     await waitFor(() => expect(otp).toHaveValue(""));
   });
 
-  it("does not submit fewer than 6 digits", async () => {
+  it("does not auto-submit a 4-digit code, but Verify sends it", async () => {
     await startFlow();
     push(job({ progress: { stage: "otp_needed" } }));
-    fireEvent.change(screen.getByLabelText(/code/i, { selector: "input" }), { target: { value: "12a34" } });
-    expect(screen.getByLabelText(/code/i, { selector: "input" })).toHaveValue("1234");
+    const otp = screen.getByLabelText(/code/i, { selector: "input" });
+    const verify = screen.getByRole("button", { name: "Verify" });
+    fireEvent.change(otp, { target: { value: "123" } });
+    expect(verify).toBeDisabled();
+    fireEvent.change(otp, { target: { value: "12a34" } });
+    expect(otp).toHaveValue("1234");
     expect(api.apiFetch).toHaveBeenCalledTimes(1); // only the connect call
+    expect(verify).toBeEnabled();
+    api.apiFetch.mockResolvedValueOnce(undefined);
+    fireEvent.click(verify);
+    await waitFor(() =>
+      expect(api.apiFetch).toHaveBeenCalledWith("/jobs/j1/otp", {
+        method: "POST",
+        body: JSON.stringify({ otp: "1234" }),
+      }),
+    );
   });
 
   it("renders question prompt", async () => {

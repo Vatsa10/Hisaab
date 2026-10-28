@@ -15,8 +15,8 @@ export interface OtpStepProps {
 }
 
 /**
- * One 6-digit field, filled by hand, by paste or by iOS's "From Messages" suggestion
- * (autocomplete="one-time-code"). It submits itself at 6 digits. The code is cleared from state
+ * One 4 to 8 digit field, filled by hand, by paste or by iOS's "From Messages" suggestion
+ * (autocomplete="one-time-code"). It submits itself at 6 digits (other lengths use Verify). The code is cleared from state
  * right after it is sent and is never stored or logged.
  */
 export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: OtpStepProps) {
@@ -46,7 +46,7 @@ export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: Ot
   }, [startedAt, expired]);
 
   async function send(otp: string) {
-    if (busyRef.current || otp.length !== 6) return;
+    if (busyRef.current || otp.length < 4) return;
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -59,7 +59,7 @@ export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: Ot
   }
 
   function onChange(raw: string) {
-    const digits = raw.replace(/\D/g, "").slice(0, 6);
+    const digits = raw.replace(/\D/g, "").slice(0, 8);
     setCode(digits);
     if (error) setError(null);
     if (digits.length === 6) void send(digits);
@@ -75,7 +75,7 @@ export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: Ot
     <form onSubmit={onFormSubmit} noValidate className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
         <label htmlFor={id} className="text-label font-medium">
-          6-digit code
+          Verification code
         </label>
         <input
           id={id}
@@ -83,8 +83,8 @@ export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: Ot
           type="text"
           inputMode="numeric"
           autoComplete="one-time-code"
-          pattern="\d{6}"
-          maxLength={6}
+          pattern="\d{4,8}"
+          maxLength={8}
           enterKeyHint="done"
           autoFocus
           spellCheck={false}
@@ -103,7 +103,7 @@ export function OtpStep({ startedAt, onSubmit, onResend, resending = false }: Ot
         ) : null}
       </div>
 
-      <Button type="submit" size="lg" fullWidth loading={busy} disabled={code.length !== 6}>
+      <Button type="submit" size="lg" fullWidth loading={busy} disabled={code.length < 4}>
         Verify
       </Button>
 
