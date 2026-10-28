@@ -72,9 +72,9 @@ create table menu_cache (
 
 -- Food recipes: restaurant search and menu reads.
 alter table recipes drop constraint recipes_kind_check,
-  add constraint recipes_kind_check check (kind in ('orders','search','cart','restaurants','menu'));
+  add constraint recipes_kind_check check (kind in ('orders','search','cart','restaurants','menu','addresses'));
 alter table recipe_approvals drop constraint recipe_approvals_kind_check,
-  add constraint recipe_approvals_kind_check check (kind in ('orders','search','cart','restaurants','menu'));
+  add constraint recipe_approvals_kind_check check (kind in ('orders','search','cart','restaurants','menu','addresses'));
 
 -- Seed fee rules. All unverified: an admin checks them against the apps before launch.
 insert into fee_rules (site, rules) values
