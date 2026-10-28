@@ -52,6 +52,14 @@ class Settings:
     smtp_password: str = field(default="", repr=False)
     smtp_starttls: bool = False
     smtp_from: str = "Hisaab <no-reply@localhost>"
+    # Hardening (Plan 7)
+    backoff_base_s: int = 60
+    backoff_max_s: int = 3600
+    backoff_reset_h: int = 24
+    error_budget_window_h: int = 24
+    error_budget_min_jobs: int = 10
+    error_budget_max_failure_pct: int = 30
+    needs_login_remind_h: int = 72
 
 
 SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "instamart": "Instamart",
@@ -127,6 +135,13 @@ def settings(for_worker: bool = False) -> Settings:
         max_learn_job_s=int(env("MAX_LEARN_JOB_S", "2400")),
         sync_block_media=env("SYNC_BLOCK_MEDIA", "1") != "0",
         scheduler_tick_s=int(env("SCHEDULER_TICK_S", "900")),
+        backoff_base_s=int(env("BACKOFF_BASE_S", "60")),
+        backoff_max_s=int(env("BACKOFF_MAX_S", "3600")),
+        backoff_reset_h=int(env("BACKOFF_RESET_H", "24")),
+        error_budget_window_h=int(env("ERROR_BUDGET_WINDOW_H", "24")),
+        error_budget_min_jobs=int(env("ERROR_BUDGET_MIN_JOBS", "10")),
+        error_budget_max_failure_pct=int(env("ERROR_BUDGET_MAX_FAILURE_PCT", "30")),
+        needs_login_remind_h=int(env("NEEDS_LOGIN_REMIND_H", "72")),
         app_url=(env("APP_URL", "") or "http://localhost:3000").rstrip("/"),
         vapid_public_key=env("VAPID_PUBLIC_KEY", ""),
         vapid_private_key=env("VAPID_PRIVATE_KEY", ""),
