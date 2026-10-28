@@ -140,7 +140,7 @@ def test_apply_with_approved_post_applies(pg):
 
 def test_account_specific_recipe_is_pending(pg):
     learned = {"orders_page_url": "https://www.zomato.com/users/123/ordering"}
-    res = recipe_admin.apply_learned(pg, "zomato", "orders", learned, set(), None, "learned")
+    res = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")
     assert res["status"] == "pending"
     assert _approval(pg, res["approval_id"])[1] == "account_specific"
     assert store.get_recipe(pg, "zomato") is None

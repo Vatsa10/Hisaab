@@ -68,6 +68,14 @@ def mask(text: str, secrets: dict[str, str]) -> str:
     return text
 
 
+DIGIT_RUN = re.compile(r"\d(?:[ -]?\d){3,}")
+
+
+def mask_log(text: str, secrets: dict[str, str]) -> str:
+    """mask() plus any run of 4+ digits (phones, OTPs, CAPTCHA answers) for logs and the run log."""
+    return DIGIT_RUN.sub("<DIGITS>", mask(text, secrets))
+
+
 # --- page helpers (also used by sync replay) --------------------------------
 
 # Only elements a user could actually hit: the centre point must land on the element itself, so things
@@ -503,7 +511,7 @@ class Discovery:
         self.click(target["ref"])
         settle(self.page)
         self.history.append(f"system clicked {describe(target)} to load more orders")
-        log.info("[%s] auto-clicked %s", self.site, describe(target))
+        log.info("[%s] auto-clicked %s", self.site, mask_log(describe(target), self.secrets))
         return self.order_responses() > before
 
     def premature(self) -> str | None:
@@ -654,7 +662,7 @@ class Discovery:
                 self.run_log = self._new_run_log()
             self.run_log.parent.mkdir(parents=True, exist_ok=True)
             with self.run_log.open("a", encoding="utf-8") as f:
-                f.write(mask(json.dumps(entry, ensure_ascii=False, default=str), self.secrets) + "\n")
+                f.write(mask_log(json.dumps(entry, ensure_ascii=False, default=str), self.secrets) + "\n")
         except OSError:
             pass
 
@@ -693,7 +701,8 @@ class Discovery:
             self.last_key = key
             outcome = mask(result["error"] if "error" in result else "ok", self.secrets)
             self.history.append(f"{name} {target} -> {outcome}")
-            log.info("[%s] %d %s: %s %s -> %s (%.1fs)", self.site, step, source, name, target[:80], outcome[:100],
+            log.info("[%s] %d %s: %s %s -> %s (%.1fs)", self.site, step, source, name,
+                     mask_log(target[:80], self.secrets), mask_log(outcome[:100], self.secrets),
                      time.time() - t0)
             self.record({"step": step, "url": urlsplit(self.page.url).path, "source": source, "action": name,
                          "target": target, "outcome": outcome, "probabilities": self.last_probs,

@@ -9,6 +9,8 @@ import re
 import time
 from urllib.parse import urlsplit
 
+import recipes
+
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -101,9 +103,12 @@ def account_specific(obj, where: str = "$") -> list[str]:
     return []
 
 
-def sanitize_for_sharing(recipe: dict) -> tuple[dict, list[str]]:
+def sanitize_for_sharing(recipe: dict, site: str | None = None) -> tuple[dict, list[str]]:
     """(a copy of recipe safe to share, JSON paths of values that still look account-specific).
-    Identity headers are removed; flagged values are reported, not rewritten. The input is not modified."""
+    Identity headers are removed; a per-account site (zomato) is templated first; other flagged values are
+    reported, not rewritten. The input is not modified."""
+    if site in recipes.PER_ACCOUNT_SITES:
+        recipe = recipes.templatize(recipe)
     clean = strip_identity_headers(recipe)
     return clean, account_specific(clean)
 
@@ -233,7 +238,7 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
     the current recipe nor in approved (post_allowlist); otherwise it is published at once and recorded as
     auto_applied with reason as given ("learned" or "drift_relearn"). Returns {"approval_id", "status",
     "version"} (version None while pending)."""
-    clean, flagged = sanitize_for_sharing(recipe)
+    clean, flagged = sanitize_for_sharing(recipe, site)
     with conn.transaction():
         # Locked so a publish cannot slip in between reading the base and writing over it.
         base = conn.execute("SELECT recipe, version FROM recipes WHERE site=%s AND kind=%s FOR UPDATE",

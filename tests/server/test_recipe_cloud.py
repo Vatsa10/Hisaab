@@ -129,8 +129,8 @@ PERSONAL = {
 def _publish(args, monkeypatch, tmp_path, recipe):
     import cli
     monkeypatch.setattr(recipes, "RECIPES", tmp_path)
-    (tmp_path / "zomato.json").write_text(json.dumps(recipe), encoding="utf-8")
-    return CliRunner().invoke(cli.app, ["publish-recipe", "zomato", *args])
+    (tmp_path / "zepto.json").write_text(json.dumps(recipe), encoding="utf-8")
+    return CliRunner().invoke(cli.app, ["publish-recipe", "zepto", *args])
 
 
 def test_publish_recipe_refuses_account_specific_values(monkeypatch, tmp_path):
@@ -149,7 +149,7 @@ def test_publish_recipe_strips_identity_headers_and_force_publishes(pg, monkeypa
     monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
     r = _publish(["--force"], monkeypatch, tmp_path, PERSONAL)
     assert r.exit_code == 0, r.output
-    stored = store.get_recipe(pg, "zomato")
+    stored = store.get_recipe(pg, "zepto")
     assert stored["headers"] == {"x-client": "web"}
     assert stored["read_post_allowlist"] == [{"url": "https://www.zomato.com/api/x", "headers": {}}]
     assert stored["nav_trace"] == PERSONAL["nav_trace"]

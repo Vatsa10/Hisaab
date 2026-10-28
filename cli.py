@@ -242,8 +242,21 @@ def publish_recipe(site: str,
     if recipe is None:
         typer.secho(f"no learned recipe for {site}: run `python cli.py learn {site}` first", fg="red")
         raise typer.Exit(1)
+    per_account = site in recipes.PER_ACCOUNT_SITES
+    refuse = ("zomato recipes are per-account: publish refuses --force; "
+              "re-learn so the orders page can be templated.")
+    if per_account:
+        if force:
+            typer.secho(refuse, fg="red")
+            raise typer.Exit(1)
+        recipe = recipes.templatize(recipe)
     recipe = _strip_identity_headers(recipe)
     flagged = _account_specific(recipe)
+    if flagged and per_account:
+        typer.secho(refuse, fg="red")
+        for p in flagged:
+            typer.echo(f"  {p}")
+        raise typer.Exit(1)
     if flagged:
         typer.secho(f"{site} recipe has values that look specific to your account (shared recipes are readable "
                     "by every user):", fg="yellow" if force else "red")

@@ -268,3 +268,60 @@ def next_request(req: dict, pagination: dict, data, n_orders: int) -> dict | Non
     if kind == "offset":
         return apply_param(req, param, int(cur or 0) + n_orders)
     return None
+
+
+# --- per-account templating --------------------------------------------------
+# Zomato's orders page lives under /users/<slug>: a shared recipe carries {account} and {orders_page_url}
+# placeholders, and each user's sync binds them to that user's own orders page.
+
+PER_ACCOUNT_SITES = ("zomato",)
+_ACCOUNT_PREFIX = re.compile(r"^/users/[^/]+")
+
+
+class TemplateError(ValueError):
+    """A templated recipe cannot be bound to the given orders page."""
+
+
+def _url_path_of(url) -> str:
+    return urlsplit(url).path if isinstance(url, str) and url else ""
+
+
+def _map_strings(obj, fn):
+    if isinstance(obj, dict):
+        return {k: _map_strings(v, fn) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_map_strings(v, fn) for v in obj]
+    return fn(obj) if isinstance(obj, str) else obj
+
+
+def templatize(recipe: dict) -> dict:
+    """A copy of recipe with the learning account's /users/<slug> prefix replaced by {account}, the orders page
+    by {orders_page_url}, and the nav_trace up to the orders page replaced by one navigate step.
+    A recipe without that prefix is returned unchanged."""
+    orders_path = _url_path_of(recipe.get("orders_page_url"))
+    m = _ACCOUNT_PREFIX.match(orders_path)
+    if not m:
+        return recipe
+    prefix = m.group(0)
+    out = copy.deepcopy(recipe)
+    trace = out.get("nav_trace")
+    if isinstance(trace, list):
+        for i, step in enumerate(trace):
+            if isinstance(step, dict) and step.get("url_after") == orders_path:
+                trace[:i + 1] = [{"action": "navigate", "url": "{orders_page_url}"}]
+                break
+    out = _map_strings(out, lambda s: s.replace(prefix, "{account}") if prefix in s else s)
+    out["orders_page_url"] = "{orders_page_url}"
+    return out
+
+
+def bind(recipe: dict, orders_page_url: str | None) -> dict:
+    """recipe with {account} and {orders_page_url} replaced by one user's own orders page."""
+    blob = json.dumps(recipe)
+    if "{account}" not in blob and "{orders_page_url}" not in blob:
+        return recipe
+    m = _ACCOUNT_PREFIX.match(_url_path_of(orders_page_url))
+    if not m:
+        raise TemplateError("this recipe needs the user's own orders page, and none is known")
+    account = m.group(0)
+    return _map_strings(recipe, lambda s: s.replace("{orders_page_url}", orders_page_url).replace("{account}", account))
