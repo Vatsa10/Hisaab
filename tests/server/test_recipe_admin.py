@@ -143,7 +143,7 @@ def test_account_specific_recipe_is_pending(pg):
     res = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")
     assert res["status"] == "pending"
     assert _approval(pg, res["approval_id"])[1] == "account_specific"
-    assert store.get_recipe(pg, "zomato") is None
+    assert store.get_recipe(pg, "zepto") is None
 
 
 def test_cart_recipe_always_pending(pg):

@@ -1094,7 +1094,7 @@ def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: s
             log.info("recipe validated: %d orders on page 1 via %s (fast path %s)",
                      len(orders), redact_url(recipe["endpoint"]), fast_ok)
             return recipe
-        log.warning("recipe attempt %d failed: %s", attempt + 1, err[:200])
+        log.warning("recipe attempt %d failed: %s", attempt + 1, mask_log(err[:200], {}))
         messages.append({"role": "user", "content": f"Validation failed: {err}\nReturn a corrected recipe JSON."})
     raise RuntimeError(f"could not produce a valid recipe for {site}")
 
@@ -1155,7 +1155,7 @@ def learn_from_seed(site: str, page, guard, capture, seed: dict, approve: Approv
                           learned_at=datetime.now().isoformat(timespec="seconds"))
             log.info("seed recipe validated: %d orders on page 1 via %s", len(orders), redact_url(recipe["endpoint"]))
             return recipe
-        log.warning("field_map attempt %d failed: %s", attempt + 1, err[:200])
+        log.warning("field_map attempt %d failed: %s", attempt + 1, mask_log(err[:200], {}))
         messages.append({"role": "user", "content": f"Validation failed: {err}. Return a corrected JSON."})
     raise RuntimeError(f"could not map the {site} order response")
 
@@ -1173,7 +1173,7 @@ def discover(site: str, page, guard, capture, approve: Approve | None = None,
     d = Discovery(site, page, guard, capture)
     d.trace.append({"action": "navigate", "url": start, "url_after": urlsplit(page.url).path})
     result = d.run()
-    log.info("discovery finished: %s", result)
+    log.info("discovery finished: %s", mask_log(str(result), {}))
     if not result["success"] and "LOGGED_OUT" in result["note"]:
         raise SessionExpired("not logged in")
     # d.page: the agent may switch tabs
