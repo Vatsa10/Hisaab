@@ -30,9 +30,59 @@ param proxyUrlTemplate string
 @description('Extra Chrome flags for the containerised worker')
 param chromeExtraArgs string = '--no-sandbox --disable-dev-shm-usage'
 
+// Budget, unit costs, limits and notifications. Defaults match server/config.py; the two secrets are optional.
+param appUrl string = 'http://localhost:3000'
+param monthlyBudgetInr string = '5000'
+param proxyInrPerGb string = '400'
+param aiInrPer1kTokens string = '0.05'
+param workerInrPerMinute string = '0.20'
+param fixedMonthlyInr string = '0'
+param refreshPerAppPerDay string = '3'
+param cartChecksPerDay string = '10'
+param syncIntervalH string = '24'
+param pausedSyncIntervalH string = '72'
+param smtpHost string = ''
+param smtpPort string = '587'
+param smtpUser string = ''
+param smtpStarttls string = '1'
+param smtpFrom string = 'Hisaab <no-reply@localhost>'
+param vapidPublicKey string = ''
+param vapidSubject string = 'mailto:admin@localhost'
+@secure()
+param smtpPassword string = ''
+@secure()
+param vapidPrivateKey string = ''
+
 var uniq = uniqueString(resourceGroup().id)
 var acrName = toLower('${prefix}${uniq}')
 var storageName = toLower(take('${prefix}${uniq}', 24))
+var budgetEnv = [
+  { name: 'APP_URL', value: appUrl }
+  { name: 'MONTHLY_BUDGET_INR', value: monthlyBudgetInr }
+  { name: 'PROXY_INR_PER_GB', value: proxyInrPerGb }
+  { name: 'AI_INR_PER_1K_TOKENS', value: aiInrPer1kTokens }
+  { name: 'WORKER_INR_PER_MINUTE', value: workerInrPerMinute }
+  { name: 'FIXED_MONTHLY_INR', value: fixedMonthlyInr }
+  { name: 'REFRESH_PER_APP_PER_DAY', value: refreshPerAppPerDay }
+  { name: 'CART_CHECKS_PER_DAY', value: cartChecksPerDay }
+  { name: 'SYNC_INTERVAL_H', value: syncIntervalH }
+  { name: 'PAUSED_SYNC_INTERVAL_H', value: pausedSyncIntervalH }
+  { name: 'SMTP_HOST', value: smtpHost }
+  { name: 'SMTP_PORT', value: smtpPort }
+  { name: 'SMTP_USER', value: smtpUser }
+  { name: 'SMTP_STARTTLS', value: smtpStarttls }
+  { name: 'SMTP_FROM', value: smtpFrom }
+  { name: 'VAPID_PUBLIC_KEY', value: vapidPublicKey }
+  { name: 'VAPID_SUBJECT', value: vapidSubject }
+]
+var notifySecrets = concat(
+  empty(smtpPassword) ? [] : [{ name: 'smtp-password', value: smtpPassword }],
+  empty(vapidPrivateKey) ? [] : [{ name: 'vapid-private-key', value: vapidPrivateKey }]
+)
+var notifySecretEnv = concat(
+  empty(smtpPassword) ? [] : [{ name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }],
+  empty(vapidPrivateKey) ? [] : [{ name: 'VAPID_PRIVATE_KEY', secretRef: 'vapid-private-key' }]
+)
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -135,13 +185,13 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
         allowInsecure: false
       }
       registries: registries
-      secrets: [
+      secrets: concat([
         { name: 'database-url', value: databaseUrl }
         { name: 'supabase-jwt-secret', value: supabaseJwtSecret }
         { name: 'anthropic-api-key', value: anthropicApiKey }
         { name: 'typesafe-api-key', value: typesafeApiKey }
         { name: 'profile-master-key', value: profileMasterKey }
-      ]
+      ], notifySecrets)
     }
     template: {
       containers: [
@@ -149,14 +199,14 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           name: 'api'
           image: apiImage
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
+          env: concat([
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'SUPABASE_JWT_SECRET', secretRef: 'supabase-jwt-secret' }
             { name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }
             { name: 'ANTHROPIC_MODEL', value: anthropicModel }
             { name: 'TYPESAFE_API_KEY', secretRef: 'typesafe-api-key' }
             { name: 'PROFILE_MASTER_KEY', secretRef: 'profile-master-key' }
-          ]
+          ], budgetEnv, notifySecretEnv)
           probes: [
             {
               type: 'Liveness'
@@ -199,14 +249,14 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
     configuration: {
       activeRevisionsMode: 'Single'
       registries: registries
-      secrets: [
+      secrets: concat([
         { name: 'database-url', value: databaseUrl }
         { name: 'anthropic-api-key', value: anthropicApiKey }
         { name: 'typesafe-api-key', value: typesafeApiKey }
         { name: 'profile-master-key', value: profileMasterKey }
         { name: 'proxy-url-template', value: proxyUrlTemplate }
         { name: 'profile-store-url', value: storageConnectionString }
-      ]
+      ], notifySecrets)
     }
     template: {
       // On SIGTERM the worker stops claiming and lets the in-flight job run up to DRAIN_S (540 s), then aborts it
@@ -217,7 +267,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           name: 'worker'
           image: workerImage
           resources: { cpu: 2, memory: '4Gi' }
-          env: [
+          env: concat([
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }
             { name: 'ANTHROPIC_MODEL', value: anthropicModel }
@@ -230,7 +280,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             // SIGTERM drain must end inside terminationGracePeriodSeconds (600); a silent job is reclaimed after 300 s.
             { name: 'DRAIN_S', value: '540' }
             { name: 'STALE_JOB_S', value: '300' }
-          ]
+          ], budgetEnv, notifySecretEnv)
         }
       ]
       scale: {
@@ -252,6 +302,47 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           }
         ]
       }
+    }
+  }
+}
+
+// Every 15 minutes: queue due syncs, send budget alerts, dispatch notifications. One run, then exit.
+resource scheduler 'Microsoft.App/jobs@2024-03-01' = if (deployApps) {
+  name: '${prefix}-scheduler'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identity.id}': {} }
+  }
+  dependsOn: [acrPull]
+  properties: {
+    environmentId: env.id
+    configuration: {
+      triggerType: 'Schedule'
+      scheduleTriggerConfig: {
+        cronExpression: '*/15 * * * *'
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      replicaTimeout: 600
+      replicaRetryLimit: 0
+      registries: registries
+      secrets: concat([
+        { name: 'database-url', value: databaseUrl }
+      ], notifySecrets)
+    }
+    template: {
+      containers: [
+        {
+          name: 'scheduler'
+          image: apiImage
+          command: ['python', '-m', 'server.scheduler', '--once']
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          env: concat([
+            { name: 'DATABASE_URL', secretRef: 'database-url' }
+          ], budgetEnv, notifySecretEnv)
+        }
+      ]
     }
   }
 }

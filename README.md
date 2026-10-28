@@ -303,6 +303,17 @@ On `SIGTERM` the worker drains: it claims no new job and lets the current one fi
 `DRAIN_S` (default 540 s, inside Azure's 600 s grace period). A job still running then is aborted: a
 sync goes straight back to the queue, a connect fails with `worker_shutdown`. Ctrl-C aborts at once.
 
+### Scheduler, limits and budget
+
+`python -m server.scheduler` (compose service `scheduler`; an Azure Container Apps job every 15 minutes with
+`--once`) queues a `sync` for each connection not synced in `SYNC_INTERVAL_H` hours (24), skipping connections that
+need login and sites whose orders recipe is unhealthy or paused. It also sends budget alerts to admins (once per month
+at `BUDGET_ALERT_PCT`, again at 100 %) and dispatches pending notifications. Once the monthly budget is reached,
+automatic syncs slow to every `PAUSED_SYNC_INTERVAL_H` hours (72). Set `MONTHLY_BUDGET_INR`, `PROXY_INR_PER_GB`,
+`AI_INR_PER_1K_TOKENS`, `WORKER_INR_PER_MINUTE`, `FIXED_MONTHLY_INR`, `REFRESH_PER_APP_PER_DAY` and
+`CART_CHECKS_PER_DAY` for the API, worker and scheduler alike. Create the first admin with
+`python cli.py add-admin you@example.com`.
+
 ## Tests
 
 ```bash

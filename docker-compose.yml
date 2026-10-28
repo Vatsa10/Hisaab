@@ -11,6 +11,15 @@ x-app-env: &app-env
   VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
   VAPID_SUBJECT: ${VAPID_SUBJECT:-}
   VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+  MONTHLY_BUDGET_INR: "${MONTHLY_BUDGET_INR:-5000}"
+  PROXY_INR_PER_GB: "${PROXY_INR_PER_GB:-400}"
+  AI_INR_PER_1K_TOKENS: "${AI_INR_PER_1K_TOKENS:-0.05}"
+  WORKER_INR_PER_MINUTE: "${WORKER_INR_PER_MINUTE:-0.20}"
+  FIXED_MONTHLY_INR: "${FIXED_MONTHLY_INR:-0}"
+  REFRESH_PER_APP_PER_DAY: "${REFRESH_PER_APP_PER_DAY:-3}"
+  CART_CHECKS_PER_DAY: "${CART_CHECKS_PER_DAY:-10}"
+  SYNC_INTERVAL_H: "${SYNC_INTERVAL_H:-24}"
+  PAUSED_SYNC_INTERVAL_H: "${PAUSED_SYNC_INTERVAL_H:-72}"
 
 services:
   db:
@@ -87,6 +96,18 @@ services:
     shm_size: 1gb
     volumes:
       - vault:/data/vault
+
+  scheduler:  # queues due daily syncs, sends budget alerts, dispatches notifications (every SCHEDULER_TICK_S)
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      SCHEDULER_TICK_S: "${SCHEDULER_TICK_S:-900}"
+    command: ["python", "-m", "server.scheduler"]
 
   mailpit:  # local SMTP sink: the UI at http://localhost:8025 shows every email the app sends
     image: axllent/mailpit:v1.21

@@ -21,6 +21,7 @@ Images are `linux/amd64` (Google Chrome has no Linux arm64 build); on Apple Sili
 | `db` | Postgres 16 with dev credentials (`postgres`/`postgres`) | 54330 |
 | `migrate` | One-shot: applies `tests/server/bootstrap.sql` (Supabase role/auth stand-ins), then `supabase/migrations/*.sql` in sorted order, then exits | - |
 | `api` | `uvicorn server.api:app` (FastAPI) | 8000 |
+| `scheduler` | `python -m server.scheduler` (api image): every `SCHEDULER_TICK_S` (900 s) queues a `sync` for each connection not synced in `SYNC_INTERVAL_H` (24 h; `PAUSED_SYNC_INTERVAL_H`, 72 h, once the monthly budget is reached), sends budget alerts to admins once per month and dispatches pending notifications. `--once` runs a single tick | - |
 | `worker` | `python -m server.worker` under tini and Xvfb (`DISPLAY=:99`), driving real headful Google Chrome over CDP. `shm_size: 1gb`, vault in the `vault` named volume at `/data/vault` | - |
 
 Both images run as the non-root user `app`. The worker sets `PROFILE_ROOT=/tmp/profiles` and
@@ -32,6 +33,9 @@ Compose reads these from your shell or a `.env` file next to `docker-compose.yml
 
 - `SUPABASE_JWT_SECRET` - defaults to a dev-only value; must match the secret that signs your tokens.
 - `ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY` (optional), `PROFILE_MASTER_KEY`, `PROXY_URL_TEMPLATE` - default to empty.
+- Budget, unit costs and limits, set explicitly in compose: `MONTHLY_BUDGET_INR`, `PROXY_INR_PER_GB`, `AI_INR_PER_1K_TOKENS`,
+  `WORKER_INR_PER_MINUTE`, `FIXED_MONTHLY_INR`, `REFRESH_PER_APP_PER_DAY`, `CART_CHECKS_PER_DAY`, `SYNC_INTERVAL_H`,
+  `PAUSED_SYNC_INTERVAL_H`, `SCHEDULER_TICK_S`.
 - `ANTHROPIC_MODEL` - defaults to `claude-haiku-5-5`, the only model the cost policy allows (under $1 / MTok).
 
 Notifications: compose adds a `mailpit` service, a local SMTP sink. The app sends mail to `mailpit:1025`
