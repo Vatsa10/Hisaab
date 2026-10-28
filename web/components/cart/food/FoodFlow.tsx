@@ -158,6 +158,14 @@ export function FoodFlow({ fromId }: FoodFlowProps) {
           return;
         }
         setMenu(res);
+        setOpen((cur) => {
+          const next = { ...cur };
+          for (const s of FOOD_SITES) {
+            const o = res.restaurant.listings[s]?.is_open;
+            if (typeof o === "boolean") next[s] = o;
+          }
+          return next;
+        });
         // Dishes restored from a past check are matched to today's menu; ones no longer on it are dropped.
         const remap = (cur: Picked[]): Picked[] => {
           const next: Picked[] = [];
@@ -294,9 +302,9 @@ export function FoodFlow({ fromId }: FoodFlowProps) {
     }
   }
 
-  const closed = FOOD_SITES.filter(
-    (s) => (menu?.restaurant.listings[s]?.is_open ?? open[s]) === false && (menu ? menu.restaurant.listings[s] != null || open[s] === false : true),
-  );
+  // `open` comes from the search listings (and from the menu response when it carries is_open). A ?from
+  // restore has no search listings, so it shows nothing closed unless the menu response says so.
+  const closed = FOOD_SITES.filter((s) => open[s] === false);
   const listed = menu ? menu.restaurant : null;
   const where = listed
     ? [listed.locality, distanceLabel(Object.values(listed.listings)[0]?.distance_km)].filter(Boolean).join(" · ")
@@ -359,9 +367,14 @@ export function FoodFlow({ fromId }: FoodFlowProps) {
               <p role="alert" className="text-label text-danger">
                 {menuError}
               </p>
-              <Button className="mt-3" variant="secondary" onClick={() => void openMenu(restaurant, open, picked)}>
-                Try again
-              </Button>
+              <div className="mt-3 flex gap-2">
+                <Button variant="secondary" onClick={() => void openMenu(restaurant, open, picked)}>
+                  Try again
+                </Button>
+                <Button variant="ghost" onClick={backToSearch}>
+                  Search again
+                </Button>
+              </div>
             </div>
           ) : !menu ? (
             <p role="status" className="mt-4 flex items-center gap-2 px-1 text-label text-ink-muted">

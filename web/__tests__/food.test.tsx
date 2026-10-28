@@ -64,6 +64,7 @@ vi.mock("@/lib/supabase/server", () => ({
 import { ApiError } from "@/lib/api";
 import CartPage from "@/app/(app)/cart/page";
 import { FoodFlow } from "@/components/cart/food/FoodFlow";
+import { startFoodCheck } from "@/lib/food";
 
 // ---- the stand-in API ---------------------------------------------------------------------
 
@@ -209,13 +210,15 @@ async function openMenu() {
 describe("food mode", () => {
   it("mode switch shows food flow and keeps groceries default", async () => {
     const grocery = render(await CartPage({ searchParams: Promise.resolve({}) }));
-    expect(screen.getByRole("tab", { name: "Groceries" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("navigation", { name: "Cart mode" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Groceries" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Food" })).not.toHaveAttribute("aria-current");
     expect(screen.getByRole("heading", { name: /Your list/ })).toBeInTheDocument();
     expect(screen.queryByLabelText("Search a restaurant")).not.toBeInTheDocument();
     grocery.unmount();
 
     render(await CartPage({ searchParams: Promise.resolve({ mode: "food" }) }));
-    expect(screen.getByRole("tab", { name: "Food" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("link", { name: "Food" })).toHaveAttribute("aria-current", "page");
     expect(await screen.findByLabelText("Search a restaurant")).toBeInTheDocument();
   });
 
@@ -280,7 +283,7 @@ describe("food mode", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Bhatt Sweets/ }));
     const again = await screen.findByRole("dialog");
     fireEvent.click(within(again).getByRole("button", { name: /Zomato listing/ }));
-    fireEvent.click(within(again).getByRole("button", { name: "No, different" }));
+    fireEvent.click(within(again).getByRole("button", { name: "No, different — use Zomato" }));
     await waitFor(() => expect(calls("/cart/food/menus")).toHaveLength(2));
     expect(body(calls("/cart/food/menus")[1]!)).toEqual({ name: "Bhatt Sweets & Snacks", zomato_id: "z2" });
   });
@@ -351,6 +354,35 @@ describe("food mode", () => {
       ],
     });
     await waitFor(() => expect(nav.push).toHaveBeenCalledWith("/cart/req-f1"));
+  });
+
+  it("clips dish text to 80 and variant to 60 before posting", async () => {
+    const long = "Chef Special Slow Cooked Dum Pukht Hyderabadi Chicken Biryani With Extra Raita And Salan Combo";
+    expect(long.length).toBeGreaterThan(80);
+    await startFoodCheck({
+      restaurant: { name: "Dum Pukht", swiggy_id: "s1", confirmed: false, declined: [] },
+      items: [
+        { text: long, qty: 1, variant: "Regular (Serves 1-2)" },
+        { text: "Naan", qty: 1, variant: "v".repeat(75) },
+      ],
+    });
+    const items = body(calls("/cart/food/checks")[0]!).items;
+    expect(items[0].text).toHaveLength(80);
+    expect(items[0].text).toBe(long.slice(0, 80));
+    expect(items[0].variant).toBe("Regular (Serves 1-2)");
+    expect(items[1].variant).toBeUndefined();
+  });
+
+  it("menu failure offers Search again", async () => {
+    backend.menus = () => {
+      throw new ApiError(409, "A lookup is already running. Try again in a moment.");
+    };
+    render(<FoodFlow />);
+    await search("dum");
+    fireEvent.click(await pairButton(/Dum Pukht/));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A lookup is already running.");
+    fireEvent.click(screen.getByRole("button", { name: "Search again" }));
+    expect(await screen.findByLabelText("Search a restaurant")).toBeInTheDocument();
   });
 
   it("lookup limit detail is shown", async () => {

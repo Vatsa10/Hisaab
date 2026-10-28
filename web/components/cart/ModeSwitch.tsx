@@ -10,13 +10,12 @@ const MODES: ReadonlyArray<{ id: CartMode; label: string; href: string }> = [
 /** Groceries | Food, a segmented control at the top of /cart. `?mode=food` selects Food; Groceries is the default. */
 export function ModeSwitch({ mode }: { mode: CartMode }) {
   return (
-    <div role="tablist" aria-label="Cart mode" className="mb-4 grid grid-cols-2 gap-1 rounded-control bg-line-soft p-1">
+    <nav aria-label="Cart mode" className="mb-4 grid grid-cols-2 gap-1 rounded-control bg-line-soft p-1">
       {MODES.map((m) => (
         <Link
           key={m.id}
           href={m.href}
-          role="tab"
-          aria-selected={mode === m.id}
+          aria-current={mode === m.id ? "page" : undefined}
           replace
           scroll={false}
           className={cn(
@@ -27,6 +26,6 @@ export function ModeSwitch({ mode }: { mode: CartMode }) {
           {m.label}
         </Link>
       ))}
-    </div>
+    </nav>
   );
 }

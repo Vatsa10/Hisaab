@@ -14,6 +14,8 @@ export const FOOD_MAX_ITEMS = 10;
 export const SEARCHING_LINE = "Searching Swiggy and Zomato…";
 export const NO_FOOD_APP = "Connect Swiggy or Zomato to compare.";
 export const MIN_QUERY = 2;
+export const DISH_TEXT_MAX = 80;
+export const VARIANT_MAX = 60;
 
 export interface UsualRestaurant {
   name: string;
@@ -149,9 +151,10 @@ export function startFoodCheck(body: FoodCheckBody): Promise<CheckStarted> {
         declined: restaurant.declined,
       },
       items: items.map((i) => ({
-        text: i.text,
+        // The server caps a dish at 80 characters and a variant at 60 (the controller raises its 20 at merge).
+        text: i.text.slice(0, DISH_TEXT_MAX),
         qty: i.qty,
-        ...(i.variant ? { variant: i.variant } : {}),
+        ...(i.variant && i.variant.length <= VARIANT_MAX ? { variant: i.variant } : {}),
         ...(typeof i.veg === "boolean" ? { veg: i.veg } : {}),
       })),
     }),
