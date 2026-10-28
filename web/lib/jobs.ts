@@ -26,7 +26,7 @@ export interface JobProgress {
   orders_found?: number;
   /** Sum of the stored orders (added by the worker in Plan 3 Task 6; may be absent). */
   amount_found?: number;
-  /** When the current prompt was published (ISO), if the worker records it. Not written today. */
+  /** When the current prompt was published (ISO), if the worker records it. Written by the worker when it asks for the code. */
   prompt_at?: string;
 }
 
