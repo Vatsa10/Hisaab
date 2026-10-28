@@ -1,10 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ApiError, apiFetch } from "@/lib/api";
 import { APPS, type AppInfo, type SiteId } from "@/lib/apps";
+import { getLimits, getMe, type Limits } from "@/lib/me";
 import { isTerminal, watchConnections, watchJob, type Connection, type Job } from "@/lib/jobs";
 import { AddressRow, type Profile } from "./AddressRow";
 import { AppRow, rowState } from "./AppRow";
@@ -26,9 +28,9 @@ export interface AccountsScreenProps {
 
 function refreshProblem(e: unknown, app: AppInfo): string {
   if (e instanceof ApiError) {
-    if (e.status === 409) return `${app.name} is already syncing.`;
+    // The API words these (limits, already syncing, budget pause); show them as sent.
+    if ((e.status === 429 || e.status === 409 || e.status === 503) && e.detail) return e.detail;
     if (e.status === 404) return `Connect ${app.name} first.`;
-    if (e.status === 429) return `You've used today's refreshes for ${app.name}. It syncs on its own once a day.`;
     if (e.status === 0) return e.detail;
   }
   return `Couldn't refresh ${app.name}. Try again in a bit.`;
@@ -57,6 +59,20 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => watchConnections(setConnections), []);
+
+  const [limits, setLimits] = useState<Limits | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const loadLimits = () => {
+    getLimits()
+      .then(setLimits)
+      .catch(() => {});
+  };
+  useEffect(() => {
+    loadLimits();
+    getMe()
+      .then((m) => setIsAdmin(Boolean(m.is_admin)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 60_000);
@@ -133,8 +149,10 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
     try {
       const res = await apiFetch<{ job_id: string }>(`/connections/${app.id}/refresh`, { method: "POST" });
       track(app, res.job_id, "sync");
+      loadLimits();
     } catch (e) {
       setNotice(refreshProblem(e, app));
+      if (e instanceof ApiError && e.status === 429) loadLimits();
     } finally {
       setRefreshing(null);
     }
@@ -171,6 +189,7 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
                 onConnect={openConnect}
                 onRefresh={refresh}
                 refreshing={refreshing === app.id}
+                refreshLeft={limits?.refresh_left[app.id]}
                 now={now}
               />
             );
@@ -182,6 +201,20 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
         <p role="alert" className="mt-3 rounded-field bg-danger-soft px-3.5 py-2.5 text-label text-danger">
           {notice}
         </p>
+      ) : null}
+
+      {isAdmin ? (
+        <Card as="section" aria-label="Admin" padding="none" className="mt-4">
+          <Link
+            href="/admin"
+            className="flex min-h-14 items-center justify-between px-4 font-medium transition-colors duration-150 active:bg-canvas"
+          >
+            <span>Admin</span>
+            <span aria-hidden="true" className="text-label font-semibold text-accent">
+              ›
+            </span>
+          </Link>
+        </Card>
       ) : null}
 
       <AddressRow profile={profile} onSaved={setProfile} />

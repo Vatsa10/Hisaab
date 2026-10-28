@@ -30,6 +30,8 @@ export interface AppRowProps {
   onConnect: (app: AppInfo) => void;
   onRefresh: (app: AppInfo) => void;
   refreshing?: boolean;
+  /** Manual refreshes left today for this app; unknown (undefined) until the limits load. */
+  refreshLeft?: number;
   /** Clock for "Synced 2h ago" (the screen ticks it every minute). */
   now?: number;
 }
@@ -47,7 +49,7 @@ function Name({ children }: { children: ReactNode }) {
 }
 
 /** One app on the Accounts screen: logo, name and its state, with the action that state needs. */
-export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh, refreshing, now }: AppRowProps) {
+export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh, refreshing, refreshLeft, now }: AppRowProps) {
   const state = rowState(connection, busy);
 
   if (state === "connect" || state === "needs_login") {
@@ -111,20 +113,34 @@ export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh,
   const synced = connection?.last_synced_at
     ? `✓ Synced ${relativeTime(connection.last_synced_at, now)}`
     : "✓ Connected";
+  const known = refreshLeft !== undefined;
+  const exhausted = known && refreshLeft <= 0;
+  const refreshLabel = !known
+    ? `Refresh ${app.name} now`
+    : exhausted
+      ? "No refreshes left today"
+      : `Refresh now · ${refreshLeft} left today`;
   return (
     <li className="group flex items-center gap-3 pl-4">
       <Logo app={app} />
       <span className={cn(INNER, "pr-1.5")}>
-        <Name>{app.name}</Name>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-medium">{app.name}</span>
+          {known ? (
+            <span className="block truncate text-label text-ink-muted">
+              {exhausted ? "None left today" :`${refreshLeft} refresh${refreshLeft === 1 ? "" : "es"} left today`}
+            </span>
+          ) : null}
+        </span>
         <span className="text-label font-semibold text-accent" suppressHydrationWarning>
           {synced}
         </span>
         <button
           type="button"
           onClick={() => onRefresh(app)}
-          disabled={refreshing}
-          aria-label={`Refresh ${app.name} now`}
-          title="Refresh now"
+          disabled={refreshing || exhausted}
+          aria-label={refreshLabel}
+          title={refreshLabel}
           className="grid size-11 shrink-0 place-items-center rounded-full text-ink-muted transition-colors duration-150 hover:bg-canvas hover:text-ink active:bg-line-soft disabled:opacity-50"
         >
           <RefreshIcon size={20} className={refreshing ? "animate-spin" : undefined} />

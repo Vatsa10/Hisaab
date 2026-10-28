@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { NotificationsCard } from "@/components/account/NotificationsCard";
 import { SignOutButton } from "@/components/auth/SignOutButton";
 import { AccountsScreen, type ConsentRow } from "@/components/connect/AccountsScreen";
 import type { Profile } from "@/components/connect/AddressRow";
@@ -37,6 +38,8 @@ export default async function AccountsPage() {
         initialProfile={(profile.data as Profile | null) ?? null}
         initialJobs={(jobs.data as Job[] | null) ?? []}
       />
+
+      <NotificationsCard />
 
       <Card as="section" aria-label="Your account" className="mt-6">
         <p className="text-label text-ink-muted">Signed in as</p>

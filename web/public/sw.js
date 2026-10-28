@@ -105,3 +105,44 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(cacheFirst(req));
   }
 });
+
+// ---- Web Push ----------------------------------------------------------------------------
+// The notification outbox sends {title, body, url}. Only same-origin paths ("/x", never "//x")
+// are ever opened; anything else falls back to the home page.
+
+function safePath(url) {
+  return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.startsWith("/\\") ? url : "/";
+}
+
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {};
+  }
+  const title = typeof payload.title === "string" && payload.title ? payload.title : "Hisaab";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: typeof payload.body === "string" ? payload.body : "",
+      icon: "/icons/192.png",
+      data: { url: safePath(payload.url) },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = new URL(safePath(event.notification.data && event.notification.data.url), self.location.origin).href;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (list) => {
+      const open = list.find((c) => c.url.startsWith(self.location.origin));
+      if (open) {
+        await open.focus();
+        if (typeof open.navigate === "function") await open.navigate(target);
+        return;
+      }
+      await self.clients.openWindow(target);
+    }),
+  );
+});

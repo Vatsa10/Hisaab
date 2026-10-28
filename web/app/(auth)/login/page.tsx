@@ -1,21 +1,18 @@
 import type { Metadata } from "next";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { BrandMark } from "@/components/ui/BrandMark";
+import { authErrorMessage } from "@/lib/authErrors";
 import { hasSupabaseEnv } from "@/lib/env";
 import { safeNextPath } from "@/lib/routes";
 
 export const metadata: Metadata = { title: "Sign in" };
 
-const CALLBACK_ERRORS: Record<string, string> = {
-  auth: "Sign-in didn't finish. Try again.",
-};
-
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string; error?: string }>;
+  searchParams: Promise<{ next?: string; error?: string; email?: string }>;
 }) {
-  const { next, error } = await searchParams;
+  const { next, error, email } = await searchParams;
   const configured = hasSupabaseEnv();
 
   return (
@@ -28,7 +25,7 @@ export default async function LoginPage({
       </p>
 
       {configured ? (
-        <LoginForm next={safeNextPath(next)} initialError={error ? (CALLBACK_ERRORS[error] ?? CALLBACK_ERRORS.auth) : undefined} />
+        <LoginForm next={safeNextPath(next)} initialError={error ? authErrorMessage(error, email) : undefined} />
       ) : (
         <p role="alert" className="mt-8 rounded-card bg-up-soft p-4 text-label text-up">
           Sign-in isn&rsquo;t configured on this server. Set NEXT_PUBLIC_SUPABASE_URL and

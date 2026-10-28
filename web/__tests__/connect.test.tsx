@@ -18,6 +18,12 @@ const live = vi.hoisted(() => ({
   connections: [] as Array<(rows: unknown) => void>,
   connectionUnsubs: 0,
 }));
+vi.mock("@/lib/me", () => ({
+  getMe: vi.fn(async () => ({ user_id: "u", email: "a@b.co", is_admin: false })),
+  getLimits: vi.fn(async () => {
+    throw new Error("limits are not under test here");
+  }),
+}));
 vi.mock("@/lib/jobs", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/jobs")>();
   return {
@@ -554,7 +560,7 @@ describe("AccountsScreen", () => {
     [409, "Zepto is already syncing."],
     [404, "Connect Zepto first."],
   ])("refresh %i shows its own copy", async (status, copy) => {
-    api.apiFetch.mockRejectedValueOnce(new ApiError(status, "x"));
+    api.apiFetch.mockRejectedValueOnce(new ApiError(status, status === 409 ? copy : "x"));
     render(
       <AccountsScreen
         initialConnections={[{ site: "zepto", status: "connected", last_synced_at: new Date().toISOString() }]}

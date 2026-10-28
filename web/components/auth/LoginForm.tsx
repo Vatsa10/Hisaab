@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { TextField } from "@/components/ui/TextField";
+import { authErrorCode, authErrorMessage } from "@/lib/authErrors";
 import { cn } from "@/lib/cn";
 import { clearPageCache } from "@/lib/pwa";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -18,7 +19,9 @@ interface FieldErrors {
 const MIN_PASSWORD = 6;
 
 /** Turn Supabase auth errors into plain sentences. Never echoes the password or logs anything. */
-function friendlyError(message: string | undefined, mode: Mode): string {
+function friendlyError(message: string | undefined, mode: Mode, email?: string): string {
+  const refused = authErrorCode(message);
+  if (refused) return authErrorMessage(refused, email);
   const m = (message ?? "").toLowerCase();
   if (m.includes("invalid login credentials")) return "That email and password don't match. Try again, or create an account.";
   if (m.includes("already registered") || m.includes("already exists")) return "There's already an account with this email. Sign in instead.";
@@ -98,7 +101,7 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
           ? await auth.signInWithPassword(creds)
           : await auth.signUp({ ...creds, options: { emailRedirectTo: callbackUrl() } });
       if (error) {
-        setFormError(friendlyError(error.message, mode));
+        setFormError(friendlyError(error.message, mode, creds.email));
         return;
       }
       if (!data.session) {
