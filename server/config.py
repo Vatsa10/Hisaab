@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 
 # Fixed key for local development only (file:// vault); never used unless ALLOW_DEV_PROFILE_KEY=1.
 DEV_PROFILE_KEY = base64.b64encode(b"expense-agent-dev-profile-key-32"[:32]).decode()
+DEFAULT_CORS_ORIGINS = "http://localhost:3000"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,8 @@ class Settings:
     smtp_password: str = field(default="", repr=False)
     smtp_starttls: bool = False
     smtp_from: str = "Hisaab <no-reply@localhost>"
-    # Hardening (Plan 7)
+    # Hardening (Plan 7): job retries, per-site back-off, error budget, re-login reminders
+    max_job_attempts: int = 3
     backoff_base_s: int = 60
     backoff_max_s: int = 3600
     backoff_reset_h: int = 24
@@ -60,6 +63,11 @@ class Settings:
     error_budget_min_jobs: int = 10
     error_budget_max_failure_pct: int = 30
     needs_login_remind_h: int = 72
+    # API-only: the Ask login, the PWA origins and the LLM (checked by check_hosted)
+    ask_database_url: str = field(default="", repr=False)
+    cors_origins: tuple[str, ...] = (DEFAULT_CORS_ORIGINS,)
+    anthropic_api_key: str = field(default="", repr=False)
+    anthropic_model: str = "claude-haiku-5-5"
 
 
 SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "instamart": "Instamart",
@@ -67,12 +75,12 @@ SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "insta
 
 
 def _master_key(env, store_url: str, for_worker: bool) -> bytes | None:
+    if not for_worker:  # only the worker holds the profile key: the API never reads or parses it
+        return None
     from server import vault
     raw = (env("PROFILE_MASTER_KEY", "") or "").strip()
     if raw:
         return vault.master_key_from_env(raw)
-    if not for_worker:
-        return None
     if not store_url.startswith("file://"):
         raise ValueError("PROFILE_MASTER_KEY is required when PROFILE_STORE_URL is not a file:// store")
     if env("ALLOW_DEV_PROFILE_KEY", "") == "1":
@@ -152,4 +160,93 @@ def settings(for_worker: bool = False) -> Settings:
         smtp_password=env("SMTP_PASSWORD", ""),
         smtp_starttls=env("SMTP_STARTTLS", "0") == "1",
         smtp_from=env("SMTP_FROM", "") or "Hisaab <no-reply@localhost>",
+        max_job_attempts=int(env("MAX_JOB_ATTEMPTS", "3")),
+        backoff_base_s=int(env("BACKOFF_BASE_S", "60")),
+        backoff_max_s=int(env("BACKOFF_MAX_S", "3600")),
+        backoff_reset_h=int(env("BACKOFF_RESET_H", "24")),
+        error_budget_window_h=int(env("ERROR_BUDGET_WINDOW_H", "24")),
+        error_budget_min_jobs=int(env("ERROR_BUDGET_MIN_JOBS", "10")),
+        error_budget_max_failure_pct=int(env("ERROR_BUDGET_MAX_FAILURE_PCT", "30")),
+        needs_login_remind_h=int(env("NEEDS_LOGIN_REMIND_H", "72")),
+        ask_database_url=env("ASK_DATABASE_URL", ""),
+        cors_origins=tuple(o.strip() for o in (env("CORS_ORIGINS", "") or DEFAULT_CORS_ORIGINS).split(",")
+                           if o.strip()),
+        anthropic_api_key=(env("ANTHROPIC_API_KEY", "") or "").strip(),
+        anthropic_model=(env("ANTHROPIC_MODEL", "") or "").strip() or DEFAULT_ANTHROPIC_MODEL,
     )
+
+
+ROLES = ("api", "worker", "scheduler", "scaler")
+HOSTED_SSLMODES = ("require", "verify-ca", "verify-full")
+TRANSACTION_POOLER_PORT = "6543"
+
+
+def check_database_url(url: str, role: str, name: str = "DATABASE_URL") -> None:
+    """Refuse a hosted database URL that is not the Supabase session pooler over TLS. A local URL passes.
+    Messages name the rule and the variable, never the URL or any part of it (it carries the password)."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    from server.local_db import is_local_db
+    if role not in ROLES:
+        raise ValueError(f"unknown role for the database check (expected one of: {', '.join(ROLES)})")
+    if not (url or "").strip():
+        raise ValueError(f"{name} is not set for the {role}")
+    try:
+        params = conninfo_to_dict(url)
+    except Exception:
+        raise ValueError(f"{name} for the {role} is not a valid connection string") from None
+    if is_local_db(url):
+        return
+    if params.get("sslmode") not in HOSTED_SSLMODES:
+        raise ValueError(f"{name} for the {role} must set sslmode=require (or verify-ca / verify-full) "
+                         "on a hosted database")
+    if TRANSACTION_POOLER_PORT in [p.strip() for p in str(params.get("port") or "").split(",")]:
+        raise ValueError(f"{name} for the {role} uses port 6543, the transaction pooler, which breaks "
+                         "LISTEN/NOTIFY; use the session pooler on port 5432")
+
+
+def _check_cors(origins: tuple[str, ...]) -> None:
+    from urllib.parse import urlsplit
+
+    from server.local_db import LOCAL_HOSTS
+    if not origins:
+        raise ValueError("CORS_ORIGINS must list the PWA's https origin(s) on a hosted API")
+    for origin in origins:
+        try:
+            parts = urlsplit(origin)
+            host = parts.hostname or ""
+        except ValueError:
+            parts, host = None, ""
+        if (parts is None or parts.scheme != "https" or not host or host in LOCAL_HOSTS
+                or "*" in origin or parts.path not in ("", "/")):
+            raise ValueError("CORS_ORIGINS on a hosted API must be https origins of the PWA only "
+                             "(no localhost, no http, no wildcard)")
+
+
+def _check_model(model: str) -> None:
+    import llm
+    try:
+        llm.check_policy(model)
+    except llm.LLMPolicyError as e:
+        raise ValueError(f"ANTHROPIC_MODEL is refused: {e}") from None
+
+
+def check_hosted(s: Settings, role: str) -> None:
+    """Start-up checks for a hosted deployment (anything whose DATABASE_URL is not on this machine).
+    Every role: the database URL rule. API: SUPABASE_JWKS_URL, a hosted-safe ASK_DATABASE_URL, https
+    CORS_ORIGINS, ANTHROPIC_API_KEY and an allowed ANTHROPIC_MODEL. Worker: an allowed ANTHROPIC_MODEL
+    (its key is optional; without it categorisation is off). Raises ValueError; messages carry no secret."""
+    from server.local_db import is_local_db
+    check_database_url(s.database_url, role)
+    if is_local_db(s.database_url):
+        return
+    if role in ("api", "worker"):
+        _check_model(s.anthropic_model)
+    if role != "api":
+        return
+    if not s.jwks_url.strip():
+        raise ValueError("SUPABASE_JWKS_URL is required on a hosted API")
+    check_database_url(s.ask_database_url, role, name="ASK_DATABASE_URL")
+    _check_cors(s.cors_origins)
+    if not s.anthropic_api_key.strip():
+        raise ValueError("ANTHROPIC_API_KEY is required on a hosted API (Ask uses the LLM)")

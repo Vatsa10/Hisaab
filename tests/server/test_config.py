@@ -56,3 +56,150 @@ def test_worker_settings_validate_proxy_template(monkeypatch):
         assert str(e.value) == config.PROXY_TEMPLATE_INVALID and "pa/ss" not in str(e.value)
     monkeypatch.setenv("PROXY_URL_TEMPLATE", "")
     assert config.settings(for_worker=True).proxy_url_template == ""
+
+
+# ---- Plan 7 Task 2: hardening tunables, API never loads the profile key, hosted checks ----
+import base64
+
+import pytest
+
+from server.config import check_database_url, check_hosted, settings
+
+HOSTED_DB = "postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require"
+HOSTED_ASK = "postgresql://ask_reader.ref:askpw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require"
+LOCAL_DB = "postgresql://postgres:pw@127.0.0.1:54329/postgres"
+TUNABLES = ("MAX_JOB_ATTEMPTS", "BACKOFF_BASE_S", "BACKOFF_MAX_S", "BACKOFF_RESET_H", "ERROR_BUDGET_WINDOW_H",
+            "ERROR_BUDGET_MIN_JOBS", "ERROR_BUDGET_MAX_FAILURE_PCT", "NEEDS_LOGIN_REMIND_H")
+
+
+def test_api_settings_ignore_master_key(monkeypatch):
+    monkeypatch.setenv("PROFILE_MASTER_KEY", base64.b64encode(b"k" * 32).decode())
+    assert settings().profile_master_key is None and settings(for_worker=True).profile_master_key == b"k" * 32
+
+
+def test_api_settings_ignore_an_invalid_master_key(monkeypatch):
+    monkeypatch.setenv("PROFILE_MASTER_KEY", "not-base64-!!")
+    assert settings().profile_master_key is None  # the API never even parses it
+    with pytest.raises(ValueError):
+        settings(for_worker=True)
+
+
+def test_hardening_tunables_from_env(monkeypatch):
+    for k in TUNABLES:
+        monkeypatch.delenv(k, raising=False)
+    s = settings()
+    assert (s.max_job_attempts, s.backoff_base_s, s.backoff_max_s, s.backoff_reset_h, s.error_budget_window_h,
+            s.error_budget_min_jobs, s.error_budget_max_failure_pct, s.needs_login_remind_h) == \
+        (3, 60, 3600, 24, 24, 10, 30, 72)
+    assert Settings().max_job_attempts == 3 and Settings().needs_login_remind_h == 72
+    for i, k in enumerate(TUNABLES):
+        monkeypatch.setenv(k, str(i + 5))
+    s = settings()
+    assert s.max_job_attempts == 5
+    assert [getattr(s, k.lower()) for k in TUNABLES] == list(range(5, 5 + len(TUNABLES)))
+
+
+@pytest.mark.parametrize("url,ok", [
+    ("postgresql://postgres:pw@127.0.0.1:54329/postgres", True),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require", True),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=verify-full", True),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres", False),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=prefer", False),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require", False),
+    ("postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com/postgres?sslmode=require&port=6543", False),
+    ("", False),
+])
+def test_check_database_url(url, ok):
+    if ok:
+        check_database_url(url, "worker")
+    else:
+        with pytest.raises(ValueError):
+            check_database_url(url, "worker")
+
+
+def test_check_database_url_rejects_unknown_role():
+    with pytest.raises(ValueError):
+        check_database_url(LOCAL_DB, "web")
+
+
+def test_check_database_url_error_never_contains_password():
+    for url in ("postgresql://postgres.ref:pw-SECRET@aws-0-ap-south-1.pooler.supabase.com:5432/postgres",
+                "postgresql://postgres.ref:pw-SECRET@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require",
+                "postgresql://postgres.ref:pw-SECRET@[broken"):
+        with pytest.raises(ValueError) as exc:
+            check_database_url(url, "api")
+        text = str(exc.value)
+        assert "pw-SECRET" not in text and "pooler.supabase.com" not in text and "postgres.ref" not in text
+    with pytest.raises(ValueError, match="sslmode"):
+        check_database_url("postgresql://u:pw@db.example.com:5432/postgres", "scheduler")
+    with pytest.raises(ValueError, match="6543"):
+        check_database_url("postgresql://u:pw@db.example.com:6543/postgres?sslmode=require", "scaler")
+
+
+def _hosted_api(**over) -> Settings:
+    base = dict(database_url=HOSTED_DB, jwks_url="https://ref.supabase.co/auth/v1/.well-known/jwks.json",
+                ask_database_url=HOSTED_ASK, cors_origins=("https://hisaab.example.in",),
+                anthropic_api_key="sk-ant-x", anthropic_model="claude-haiku-5-5")
+    base.update(over)
+    return Settings(**base)
+
+
+def test_hosted_api_requires_jwks():
+    with pytest.raises(ValueError, match="SUPABASE_JWKS_URL"):
+        check_hosted(_hosted_api(jwks_url=""), "api")
+    check_hosted(_hosted_api(), "api")
+    check_hosted(Settings(database_url=LOCAL_DB), "api")  # local: no hosted requirements
+
+
+def test_hosted_runs_database_check_for_every_role():
+    for role in ("api", "worker", "scheduler", "scaler"):
+        with pytest.raises(ValueError, match="sslmode"):
+            check_hosted(_hosted_api(database_url=HOSTED_DB.replace("?sslmode=require", "")), role)
+
+
+def test_hosted_api_requires_a_safe_ask_database_url():
+    with pytest.raises(ValueError, match="ASK_DATABASE_URL"):
+        check_hosted(_hosted_api(ask_database_url=""), "api")
+    with pytest.raises(ValueError, match="ASK_DATABASE_URL") as exc:
+        check_hosted(_hosted_api(ask_database_url=HOSTED_ASK.replace("?sslmode=require", "")), "api")
+    assert "askpw" not in str(exc.value)
+    with pytest.raises(ValueError, match="ASK_DATABASE_URL"):
+        check_hosted(_hosted_api(ask_database_url=HOSTED_ASK.replace(":5432", ":6543")), "api")
+    check_hosted(_hosted_api(ask_database_url=""), "worker")  # only the API uses the Ask login
+
+
+@pytest.mark.parametrize("origins", [(), ("http://localhost:3000",), ("*",), ("http://hisaab.example.in",),
+                                     ("https://hisaab.example.in", "http://127.0.0.1:3000")])
+def test_hosted_api_requires_https_public_cors_origins(origins):
+    with pytest.raises(ValueError, match="CORS_ORIGINS"):
+        check_hosted(_hosted_api(cors_origins=origins), "api")
+
+
+def test_hosted_api_requires_anthropic_key_and_allowed_model():
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY") as exc:
+        check_hosted(_hosted_api(anthropic_api_key=""), "api")
+    with pytest.raises(ValueError, match="ANTHROPIC_MODEL"):
+        check_hosted(_hosted_api(anthropic_model="claude-opus-5-5"), "api")
+    with pytest.raises(ValueError, match="ANTHROPIC_MODEL"):
+        check_hosted(_hosted_api(anthropic_model="claude-opus-5-5", anthropic_api_key=""), "worker")
+    check_hosted(_hosted_api(anthropic_api_key=""), "worker")  # categorisation is optional on the worker
+    with pytest.raises(ValueError) as exc:
+        check_hosted(_hosted_api(anthropic_api_key=" ", jwks_url=""), "api")
+    assert "sk-ant" not in str(exc.value)
+
+
+def test_new_settings_read_from_env_and_hide_secrets(monkeypatch):
+    monkeypatch.setenv("ASK_DATABASE_URL", "postgresql://ask_reader:askpw-XYZ@h/db")
+    monkeypatch.setenv("CORS_ORIGINS", "https://a.example.in, https://b.example.in ,")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-XYZ")
+    monkeypatch.setenv("ANTHROPIC_MODEL", " claude-haiku-5-5 ")
+    s = settings()
+    assert s.ask_database_url.endswith("@h/db") and s.anthropic_api_key == "sk-ant-XYZ"
+    assert s.cors_origins == ("https://a.example.in", "https://b.example.in")
+    assert s.anthropic_model == "claude-haiku-5-5"
+    assert "askpw-XYZ" not in repr(s) and "sk-ant-XYZ" not in repr(s)
+    for k in ("ASK_DATABASE_URL", "CORS_ORIGINS", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"):
+        monkeypatch.delenv(k)
+    s = settings()
+    assert (s.ask_database_url, s.cors_origins, s.anthropic_api_key, s.anthropic_model) == \
+        ("", ("http://localhost:3000",), "", "claude-haiku-5-5")
