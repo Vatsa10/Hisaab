@@ -10,7 +10,7 @@
 // "Which city do you order from?" first; every connect finds 28 orders over six months, every
 // 11th cancelled; Swiggy's every 3rd order is an Instamart grocery order.
 
-import { devices, expect, test, type Browser, type Locator, type Page } from "@playwright/test";
+import { devices, expect, test, type Browser, type BrowserContextOptions, type Locator, type Page } from "@playwright/test";
 
 const PASSWORD = "e2e-Passw0rd!";
 const FAKE_OTP = "123456";
@@ -33,11 +33,8 @@ const TABS = {
 } as const;
 type TabName = keyof typeof TABS;
 
-/** iPhone 14 (390 px) and the narrowest phone the design must fit (375 px). */
-const WIDTHS = [
-  { width: 390, height: 844 },
-  { width: 375, height: 812 },
-] as const;
+/** The narrowest phone the design must fit, besides the iPhone 14's 390 px. */
+const NARROW = { width: 375, height: 812 } as const;
 
 // ---- small helpers ---------------------------------------------------------------------------
 
@@ -94,16 +91,22 @@ async function openTab(page: Page, tab: TabName): Promise<void> {
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
 }
 
-/** Every tab, at 390 px and 375 px, has no horizontal scroll. */
-async function expectNoHorizontalScrollOnEveryTab(page: Page, state: string): Promise<void> {
-  for (const size of WIDTHS) {
-    await page.setViewportSize(size);
-    for (const tab of Object.keys(TABS) as TabName[]) {
-      await openTab(page, tab);
-      await expectNoHorizontalScroll(page, `${state}, ${tab} at ${size.width}px`);
-    }
+/** Every tab of this page's phone, opened from the tab bar, has no horizontal scroll. */
+async function expectNoHorizontalScrollOnTabs(page: Page, where: string): Promise<void> {
+  for (const tab of Object.keys(TABS) as TabName[]) {
+    await openTab(page, tab);
+    await expectNoHorizontalScroll(page, `${where}: ${tab}`);
   }
-  await page.setViewportSize(WIDTHS[0]);
+}
+
+/** Every tab has no horizontal scroll, on the iPhone 14 (390 px) and on a 375 px phone. */
+async function expectNoHorizontalScrollOnEveryTab(page: Page, state: string): Promise<void> {
+  await expectNoHorizontalScrollOnTabs(page, `${state}, 390px`);
+  await onNarrowPhone(page, async (narrow) => {
+    await narrow.goto("/spend");
+    await expect(mainHeading(narrow, "Spending")).toBeVisible();
+    await expectNoHorizontalScrollOnTabs(narrow, `${state}, 375px`);
+  });
 }
 
 /** No phone number or OTP in localStorage, sessionStorage, IndexedDB names or cookies. */
@@ -148,11 +151,27 @@ async function signIn(page: Page, email: string): Promise<void> {
   await expect(mainHeading(page, "Spending")).toBeVisible();
 }
 
-/** A second iPhone (its own cookies and storage) for the same browser. */
-async function secondPhone(browser: Browser) {
+/** Another phone (its own cookies and storage) in the same browser: an iPhone 14 unless overridden. */
+async function secondPhone(browser: Browser, options: BrowserContextOptions = {}) {
   // defaultBrowserType picks the engine for a project; it is not a context option.
   const { defaultBrowserType: _engine, ...iphone } = devices["iPhone 14"];
-  return browser.newContext({ ...iphone, baseURL: test.info().project.use.baseURL, locale: "en-IN" });
+  return browser.newContext({ ...iphone, baseURL: test.info().project.use.baseURL, locale: "en-IN", ...options });
+}
+
+/**
+ * Run `fn` as the same signed-in user on a 375 px phone. A fresh context, not page.setViewportSize: resizing a
+ * mobile WebKit page in place leaves its layout viewport at the old height and hit-testing off (seen as the
+ * fixed tab bar vanishing and "<html> intercepts pointer events").
+ */
+async function onNarrowPhone(page: Page, fn: (narrow: Page) => Promise<void>): Promise<void> {
+  const browser = page.context().browser();
+  if (!browser) throw new Error("no browser for a second context");
+  const narrow = await secondPhone(browser, { viewport: NARROW, storageState: await page.context().storageState() });
+  try {
+    await fn(await narrow.newPage());
+  } finally {
+    await narrow.close();
+  }
 }
 
 // ---- Accounts and the connect flow ---------------------------------------------------------------
@@ -195,13 +214,16 @@ async function typeOtp(sheet: Locator, app: AppName, code: string): Promise<void
 interface FirstSync {
   orders: number;
   amount: number;
-  /** "Found so far" counts seen while the first sync ran (when the sync was slow enough to show one). */
+  /** "Found so far" counts seen live while the first sync ran (the e2e worker pauses between fake pages). */
   live: number[];
 }
 
-/** Wait for the first sync to finish (pushed over Realtime) and read what the sheet says was found. */
+/**
+ * Watch the first sync (pushed over Realtime): the live "Found so far" count while it runs, then what the sheet
+ * says was found. scripts/e2e_local.sh sets FAKE_PAGE_DELAY_S=0.4, so the fake fetch reports its pages over
+ * about a second and the live count is always on screen for a while.
+ */
 async function waitForFirstSync(sheet: Locator, app: AppName): Promise<FirstSync> {
-  await expect(sheet.getByRole("heading", { name: `${app} connected` })).toBeVisible();
   const live: number[] = [];
   let found: RegExpExecArray | null = null;
   await expect
@@ -214,19 +236,19 @@ async function waitForFirstSync(sheet: Locator, app: AppName): Promise<FirstSync
         found = /Found\s+(\d+) orders?\s+(₹[\d,]+(?:\.\d+)?) · [A-Z][a-z]{2} \d{4} – today/.exec(text);
         return found !== null;
       },
-      { message: `${app}: the first sync never finished`, timeout: 90_000, intervals: [100, 250, 500] },
+      { message: `${app}: the first sync never finished`, timeout: 90_000, intervals: [100] },
     )
     .toBe(true);
+  await expect(sheet.getByRole("heading", { name: `${app} connected` })).toBeVisible();
   const m = found as unknown as RegExpExecArray;
   const result = { orders: Number(m[1]), amount: rupees(m[2] ?? ""), live };
   expect(result.orders).toBe(FAKE_ORDER_COUNT);
   expect(result.amount).toBeGreaterThan(0);
-  for (const n of live) {
-    expect(n, "a live count can only grow towards the final one").toBeGreaterThan(0);
-    expect(n).toBeLessThanOrEqual(result.orders);
-  }
-  if (live.length === 0) {
-    test.info().annotations.push({ type: "note", description: `${app}: no "Found so far" count was shown (the sync finished first)` });
+  expect(live.length, `${app}: no live "Found so far" count was shown during the first sync`).toBeGreaterThan(0);
+  for (const [i, n] of live.entries()) {
+    expect(n, "a live count is a positive number of orders").toBeGreaterThan(0);
+    expect(n, "a live count never passes the final one").toBeLessThanOrEqual(result.orders);
+    expect(n, "a live count never goes down").toBeGreaterThanOrEqual(live[i - 1] ?? 0);
   }
   return result;
 }
@@ -239,6 +261,27 @@ async function closeSheet(page: Page, sheet: Locator): Promise<void> {
 async function expectSynced(page: Page, app: AppName): Promise<void> {
   await expect(appRow(page, app)).toContainText("✓ Synced");
   await expect(page.getByRole("button", { name: `Refresh ${app} now` })).toBeVisible();
+}
+
+// ---- Ask ---------------------------------------------------------------------------------------------
+
+/**
+ * Ask "how much on each app" on the open Ask screen and read the answer's table (ASK_FAKE: spend per site from
+ * monthly_spend). Expects exactly one row, Swiggy, the only app this user connected; returns its amount.
+ */
+async function askSpendPerApp(page: Page): Promise<number> {
+  const question = "How much have I spent on each app?";
+  await page.getByLabel("Ask a question about your spending").fill(question);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const log = page.getByRole("log", { name: "Conversation" });
+  await expect(log).toContainText(question);
+  const table = log.getByRole("table");
+  await expect(table).toBeVisible();
+  await expect(table.getByRole("columnheader")).toHaveText(["site", "amount"]);
+  const rows = table.getByRole("row").filter({ has: page.getByRole("cell") });
+  await expect(rows).toHaveCount(1); // only this user's one app: row-level security held
+  await expect(rows.getByRole("cell")).toHaveText(["swiggy", /^\d+(\.\d+)?$/]);
+  return Number((await rows.getByRole("cell").nth(1).innerText()).trim());
 }
 
 // ---- Realtime --------------------------------------------------------------------------------------
@@ -382,34 +425,29 @@ test("sign up, connect Swiggy with an OTP, and Spend, Orders and Ask fill in", a
     await expect(summary).toContainText(/Order ID\s+FAKE-swiggy-\d{4}/);
     await expect(main.getByRole("region", { name: /^\d+ items?$/ })).toBeVisible();
     await expect(main.getByText("Swiggy doesn't list item prices, only the order total.")).toBeVisible();
-    for (const size of WIDTHS) {
-      await page.setViewportSize(size);
-      await expectNoHorizontalScroll(page, `order detail at ${size.width}px`);
-    }
-    await page.setViewportSize(WIDTHS[0]);
+    await expectNoHorizontalScroll(page, "order detail, 390px");
+    const detailUrl = page.url();
+    await onNarrowPhone(page, async (narrow) => {
+      await narrow.goto(detailUrl);
+      await expect(mainHeading(narrow, "Instamart")).toBeVisible();
+      await expect(narrow.getByRole("region", { name: "Summary" })).toBeVisible();
+      await expectNoHorizontalScroll(narrow, "order detail, 375px");
+    });
     await main.getByRole("link", { name: "Orders", exact: true }).click();
     await expect(page).toHaveURL(/\/orders$/);
   });
 
   await test.step("Ask answers from the user's own orders with a table", async () => {
     await openTab(page, "Ask");
-    await page.getByLabel("Ask a question about your spending").fill("How much have I spent on each app?");
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-    const log = page.getByRole("log", { name: "Conversation" });
-    await expect(log).toContainText("How much have I spent on each app?");
-    const table = log.getByRole("table");
-    await expect(table).toBeVisible();
-    await expect(table.getByRole("columnheader")).toHaveText(["site", "amount"]);
-    const rows = table.getByRole("row").filter({ has: page.getByRole("cell") });
-    await expect(rows).toHaveCount(1); // only this user's one app: row-level security held
-    await expect(rows.getByRole("cell")).toHaveText(["swiggy", /^\d+(\.\d+)?$/]);
-    const amount = Number((await rows.getByRole("cell").nth(1).innerText()).trim());
+    const amount = await askSpendPerApp(page);
     expect(amount, "Ask's Swiggy total should equal what the first sync found").toBe(sync.amount);
-    for (const size of WIDTHS) {
-      await page.setViewportSize(size);
-      await expectNoHorizontalScroll(page, `Ask with a table at ${size.width}px`);
-    }
-    await page.setViewportSize(WIDTHS[0]);
+    await expectNoHorizontalScroll(page, "Ask with a table, 390px");
+    await onNarrowPhone(page, async (narrow) => {
+      await narrow.goto("/ask");
+      await expect(mainHeading(narrow, "Ask")).toBeVisible();
+      expect(await askSpendPerApp(narrow)).toBe(sync.amount);
+      await expectNoHorizontalScroll(narrow, "Ask with a table, 375px");
+    });
   });
 
   await test.step("no horizontal scroll on any tab, with data", async () => {

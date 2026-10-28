@@ -29,7 +29,7 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    | Service | Command | Port | Switches |
    | --- | --- | --- | --- |
    | API | `python -m uvicorn server.api:app` | 8010 | `ASK_FAKE=1`, `CORS_ORIGINS=http://localhost:3110` |
-   | Worker | `python -m server.worker` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5` |
+   | Worker | `python -m server.worker` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `FAKE_PAGE_DELAY_S=0.4`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5` |
    | PWA | `next start` | 3110 | - |
 
    The script waits for `/healthz`, the worker's `worker started` line and the PWA's `/login` before going on.
@@ -51,7 +51,9 @@ redirects. The port can differ, the host may not.
 
 - `WORKER_FAKE=1` (`server/fake_sites.py`): no browser, no network. The OTP is `123456`; any other code fails the
   login (`login_failed`). A phone ending in `0000` is first asked "Which city do you order from?". Every connect
-  finds 28 orders over six months, every 11th cancelled; Swiggy's every third order is an Instamart order.
+  finds 28 orders over six months, every 11th cancelled; Swiggy's every third order is an Instamart order. The
+  orders arrive in pages of 8 and each page reports a live "Found so far" count. `FAKE_PAGE_DELAY_S=0.4`
+  pauses between pages, so that count stays on screen long enough to check.
 - `ASK_FAKE=1` (`server/api.py`): `/ask` runs one fixed query (spend per app from `monthly_spend`) through the
   same `scoped_sql` guard and row-level security as the real analyst, and answers with a markdown table. No LLM.
 - `CATEGORIZE=0`: no OpenAI call after a sync.
@@ -70,8 +72,8 @@ Both fakes refuse to start unless `DATABASE_URL` points at this machine.
    - Consent ("I understand"), phone, "Send OTP"; the row shows "Syncing…"; the job reaches `otp_needed` and the
      OTP field appears. The field has `inputmode="numeric"`, `autocomplete="one-time-code"`, `maxlength="6"`.
    - The OTP `123456` is typed digit by digit, and the field sends itself.
-   - The first sync is pushed over Realtime. Any "Found so far" live count must stay within the final count. The
-     final "Found" card shows 28 orders, an amount, and the first month. The phone number and OTP are in no
+   - The first sync is pushed over Realtime. A live "Found so far" count must appear, never decrease, and stay
+     within the final count. The final "Found" card shows 28 orders, an amount, and the first month. The phone number and OTP are in no
      browser storage or cookie.
    - Spend has six bars with non-zero totals that add up to no more than the sync found. The big number is the
      current month's bar, and each month's Swiggy row matches its bar. Instamart shows as a sub-label of Swiggy

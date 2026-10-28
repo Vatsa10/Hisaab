@@ -4,12 +4,14 @@
 #
 # 1. starts local Supabase if it is down (scripts/dev_supabase.sh) and builds the PWA against it
 # 2. `supabase db reset` (every migration, a clean database), then dev_supabase.sh again for the ask_reader login
-# 3. starts the API (ASK_FAKE=1) and the worker (WORKER_FAKE=1, CATEGORIZE=0) with .env.server.local, and the PWA
+# 3. starts the API (ASK_FAKE=1) and the worker (WORKER_FAKE=1, CATEGORIZE=0, FAKE_PAGE_DELAY_S=0.4) with
+#    .env.server.local, and the PWA
 # 4. runs Playwright (e2e/), then stops everything it started, including Supabase if it started it
 #
 # Usage: bash scripts/e2e_local.sh [playwright args, e.g. -g "updates live"]
 # Env:   E2E_KEEP_SUPABASE=1 leaves a Supabase this script started running.
-# Ports: API 8010, PWA 3110, one host name throughout: localhost. Docker must be running.
+# Ports: API 8010 and PWA 3110 on localhost (the host Supabase Auth allows redirects to); Supabase itself is
+#        reached at 127.0.0.1 as `supabase status` reports it. Docker must be running.
 # Logs:  e2e/.run/logs/ (never secrets). Prints one summary line at the end.
 set -euo pipefail
 set -m # background jobs get their own process group, so each can be stopped with its children
@@ -34,6 +36,25 @@ rm -rf "$LOGS"
 mkdir -p "$LOGS" "$RUN_DIR/profiles"
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
+
+# Supabase's CLI prints its keys (anon, service role, JWT secret, S3) while starting: every line that reaches a
+# log or the terminal goes through this first.
+redact() {
+  sed -E \
+    -e 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+    -e 's/("?[A-Za-z0-9_]*(KEY|SECRET|TOKEN|PASSWORD)[A-Za-z0-9_]*"?[[:space:]]*[:=][[:space:]]*)"?[^",[:space:]}]+"?/\1<redacted>/g' \
+    -e 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+@#\1<redacted>@#g'
+}
+
+# supabase <args...>: the pinned CLI, its output redacted into supabase.log.
+supabase_logged() {
+  $SUPABASE "$@" 2>&1 | redact >>"$LOGS/supabase.log"
+}
+
+# dev_supabase.sh: its stdout names the anon key (dropped); its stderr (supabase start) is redacted into the log.
+dev_supabase() {
+  { bash scripts/dev_supabase.sh 2>&1 >/dev/null; } | redact >>"$LOGS/supabase.log"
+}
 
 # ---- stopping what we started ---------------------------------------------------------------------
 
@@ -60,7 +81,7 @@ cleanup() {
   for pid in "${PIDS[@]+"${PIDS[@]}"}"; do stop_pid "$pid"; done
   if [ "$STARTED_SUPABASE" = 1 ] && [ "${E2E_KEEP_SUPABASE:-0}" != 1 ]; then
     log "stopping the Supabase this run started"
-    $SUPABASE stop >>"$LOGS/supabase.log" 2>&1 || true
+    supabase_logged stop || true
   fi
   local took="$((SECONDS / 60))m$((SECONDS % 60))s"
   if [ "$status" = 0 ]; then
@@ -80,8 +101,8 @@ fail() {
   exit 1
 }
 
-show_log() { # the end of a log, for a failure that needs it (logs never hold secrets)
-  [ -f "$1" ] && tail -n 30 "$1" >&2 || true
+show_log() { # the end of a log, for a failure that needs it
+  [ -f "$1" ] && tail -n 30 "$1" | redact >&2 || true
 }
 
 # ---- checks ---------------------------------------------------------------------------------------
@@ -135,16 +156,18 @@ if ! $SUPABASE status >/dev/null 2>&1; then
   STARTED_SUPABASE=1
   log "starting local Supabase"
 fi
-# Starts it if needed and writes web/.env.local and .env.server.local. Its stdout names the anon key: not printed.
-bash scripts/dev_supabase.sh >/dev/null 2>>"$LOGS/supabase.log" || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed"; }
+# Starts it if needed and writes web/.env.local and .env.server.local.
+dev_supabase || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed"; }
 
 env_value() { sed -n "s/^$2=//p" "$1" | tr -d '\r' | head -n1; }
 SUPABASE_URL="$(env_value web/.env.local NEXT_PUBLIC_SUPABASE_URL)"
 ANON_KEY="$(env_value web/.env.local NEXT_PUBLIC_SUPABASE_ANON_KEY)"
 [ -n "$SUPABASE_URL" ] && [ -n "$ANON_KEY" ] || fail "web/.env.local is missing the Supabase URL or anon key"
-# One host everywhere: the browser, the PWA server and the API all say localhost, which is also the host
-# of the Supabase auth site_url (supabase/config.toml), so auth redirects to this PWA are allowed.
-SUPABASE_URL="${SUPABASE_URL//127.0.0.1/$HOST}"
+# The PWA and the API are served on localhost: that is the host of the Supabase Auth site_url
+# (supabase/config.toml), and Auth only redirects back to that host. Supabase itself stays at 127.0.0.1, as
+# `supabase status` gives it. Do not rewrite it to localhost: on Windows with WSL, wslrelay.exe also listens
+# on [::1] for every Docker-published port and sometimes hangs a connection, so a "localhost" Supabase URL
+# (which browsers and Node try over ::1 first) stalls sign-ups, server renders and Realtime at random.
 
 PHASE="building the PWA"
 if [ ! -d web/node_modules ]; then
@@ -164,9 +187,15 @@ pnpm --dir e2e exec playwright install webkit >"$LOGS/playwright-install.log" 2>
 
 PHASE="resetting the database"
 log "supabase db reset"
-$SUPABASE db reset >>"$LOGS/supabase.log" 2>&1 || { show_log "$LOGS/supabase.log"; fail "supabase db reset failed"; }
+# The CLI's reset now and then fails while "Initialising schema" (the realtime container races its own
+# schema_migrations insert: DbSetupError, exit 1); the next reset goes through. Up to three tries.
+for attempt in 1 2 3; do
+  if supabase_logged db reset; then break; fi
+  [ "$attempt" = 3 ] && { show_log "$LOGS/supabase.log"; fail "supabase db reset failed three times"; }
+  log "supabase db reset failed (attempt $attempt), retrying"
+done
 # The reset recreates ask_reader without a login: give it a fresh password (written to .env.server.local only).
-bash scripts/dev_supabase.sh >/dev/null 2>>"$LOGS/supabase.log" || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed after the reset"; }
+dev_supabase || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed after the reset"; }
 wait_for "Supabase auth" 120 "" "$LOGS/supabase.log" http_ok -H "apikey: $ANON_KEY" "$SUPABASE_URL/auth/v1/health"
 wait_for "Supabase REST" 120 "" "$LOGS/supabase.log" http_ok -H "apikey: $ANON_KEY" "$SUPABASE_URL/rest/v1/"
 
@@ -178,7 +207,6 @@ server_env() {
   # shellcheck disable=SC1091
   . "$ROOT/.env.server.local"
   set +a
-  export SUPABASE_JWKS_URL="${SUPABASE_JWKS_URL//127.0.0.1/$HOST}"
   unset SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
 }
 
@@ -195,7 +223,8 @@ wait_for "API" 60 "$API_PID" "$LOGS/api.log" http_ok "$API_URL/healthz"
 PHASE="starting the worker"
 (
   server_env
-  export WORKER_FAKE=1 CATEGORIZE=0 PROFILE_ROOT="$RUN_DIR/profiles" DRAIN_S=5
+  # FAKE_PAGE_DELAY_S: the fake fetch pauses between its pages, so the live "Found so far" count is on screen.
+  export WORKER_FAKE=1 CATEGORIZE=0 FAKE_PAGE_DELAY_S=0.4 PROFILE_ROOT="$RUN_DIR/profiles" DRAIN_S=5
   exec "$PY" -m server.worker
 ) >"$LOGS/worker.log" 2>&1 &
 WORKER_PID=$!
