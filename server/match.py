@@ -1,31 +1,34 @@
 """Match shopping-list items to products and dishes (Plan 5 R4, R14). Pure: no database, no network.
 
-Nothing is ever guessed. An item without a confident match becomes "pick" (the user chooses), and an optional
-small-model judge may only confirm NEAR candidates; it is injected by the caller and never needed.
+Nothing is ever guessed. An item without a confident match becomes "pick" (the user chooses). An optional judge
+may only confirm NEAR candidates; it is injected by the caller (wired to `llm.py` elsewhere) and never needed here.
+The best-scoring candidate wins; price only breaks ties between equal scores.
 """
-import json
-import logging
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Literal
-
-import agent
-import db
-
-try:  # Plan 4 meters every OpenAI response; until it lands, counting is a no-op.
-    from metering import count_openai
-except ImportError:  # pragma: no cover - depends on which plans are merged
-    def count_openai(resp):
-        return resp
-
-log = logging.getLogger(__name__)
 
 SURE = 0.8
 NEAR = 0.5
 SHOW = 0.3
 MAX_CANDIDATES = 5
 JUDGE_TOP = 3
+_EPS = 1e-9  # scores are sums of floats: 0.4 + 0.15 + 0.25 is 0.7999999999999999
+
+
+def _is_sure(s: float) -> bool:
+    return s >= SURE - _EPS
+
+
+def _is_near(s: float) -> bool:
+    return s >= NEAR - _EPS
+
+
+def _is_shown(s: float) -> bool:
+    return s >= SHOW - _EPS
+
 
 STOPWORDS = frozenset({"pack", "of", "the", "and", "fresh", "x", "pcs", "pc", "each"})
 
@@ -36,7 +39,7 @@ _UNITS = {
     "l": ("ml", 1000), "ltr": ("ml", 1000), "ltrs": ("ml", 1000), "litre": ("ml", 1000), "litres": ("ml", 1000),
     "liter": ("ml", 1000), "liters": ("ml", 1000), "ml": ("ml", 1),
     "pc": ("pc", 1), "pcs": ("pc", 1), "piece": ("pc", 1), "pieces": ("pc", 1), "unit": ("pc", 1),
-    "units": ("pc", 1), "nos": ("pc", 1),
+    "units": ("pc", 1), "nos": ("pc", 1), "dozen": ("pc", 12), "dozens": ("pc", 12),
 }
 _UNIT_RE = "|".join(sorted(map(re.escape, _UNITS), key=len, reverse=True))
 _NUM = r"(\d+(?:\.\d+)?)"
@@ -72,28 +75,44 @@ def _size(amount: float, unit: str, count: float = 1) -> Size:
     return Size(float(amount) * mult * count, dim)
 
 
-def parse_size(text: str) -> Size | None:
-    """The pack size named in a product name or pack-size label; multipacks multiply."""
+def _parse_size(text: str | None) -> tuple[Size | None, str | None]:
+    """(size, kind): kind is "multi" (the text counts its packs), "single" (one pack) or "count" (only a
+    "Pack of N" / "N pack" count, no unit size)."""
     t = (text or "").lower()
     if m := _MULTI_COUNT_FIRST.search(t):
-        return _size(float(m.group(2)), m.group(3), int(m.group(1)))
+        return _size(float(m.group(2)), m.group(3), int(m.group(1))), "multi"
     if m := _MULTI_SIZE_FIRST.search(t):
-        return _size(float(m.group(1)), m.group(2), int(m.group(3)))
+        return _size(float(m.group(1)), m.group(2), int(m.group(3))), "multi"
     pack_of = _PACK_OF.search(t)
     if m := _SINGLE.search(t):
         size = _size(float(m.group(1)), m.group(2))
         if pack_of:
-            return Size(size.amount * int(pack_of.group(1)), size.unit)
-        return size
+            return Size(size.amount * int(pack_of.group(1)), size.unit), "multi"
+        return size, "single"
     if m := _N_PACK.search(t):
-        return Size(float(m.group(1)), "pc")
+        return Size(float(m.group(1)), "pc"), "count"
     if pack_of:
-        return Size(float(pack_of.group(1)), "pc")
-    return None
+        return Size(float(pack_of.group(1)), "pc"), "count"
+    return None, None
+
+
+def parse_size(text: str) -> Size | None:
+    """The pack size named in a product name or pack-size label; multipacks multiply."""
+    return _parse_size(text)[0]
+
+
+def _norm(text: str | None) -> str:
+    """`db.norm_name`, except combining marks (Unicode Mn/Mc) stay inside words, so Hindi names do not split.
+    `db.norm_name` itself is unchanged: the SQL views must keep matching it."""
+    out = []
+    for c in (text or "").lower():
+        keep = c.isalnum() or c == "_" or c.isspace() or unicodedata.category(c) in ("Mn", "Mc")
+        out.append(c if keep else " ")
+    return re.sub(r"\s+", " ", "".join(out)).strip()
 
 
 def _words(text: str | None) -> list[str]:
-    return db.norm_name(text or "").split()
+    return _norm(text).split()
 
 
 def tokens(text: str | None) -> frozenset[str]:
@@ -168,7 +187,14 @@ def from_raw(d: dict) -> Product | None:
     if not name or pid is None or price is None or price <= 0:
         return None
     pack = str(d.get("pack_size") or "").strip() or None
-    size = (parse_size(pack) if pack else None) or parse_size(name)
+    pack_size, pack_kind = _parse_size(pack)
+    name_size, name_kind = _parse_size(name)
+    if pack_kind == "count" and name_kind == "single" and name_size.unit != "pc":
+        size = Size(name_size.amount * pack_size.amount, name_size.unit)   # "Bread 400 g" + "Pack of 2"
+    elif pack_kind == "count" and name_kind == "multi":
+        size = name_size                                                    # the name already counts its packs
+    else:
+        size = pack_size or name_size
     mrp = _num(d.get("mrp"))
     brand = str(d.get("brand") or "").strip() or None
     return Product(str(pid), name, brand, size, pack or (size.label() if size else None), price,
@@ -204,35 +230,8 @@ def score(q: Query, p: Product) -> float:
     return _token_score(q.tokens, tokens(p.name) | tokens(p.brand), _size_score(q.size, p.size))
 
 
+# (item text, up to JUDGE_TOP product names) -> one bool per name. Injected by the caller; never required.
 Judge = Callable[[str, list[str]], list[bool]]
-
-_JUDGE_SYSTEM = (
-    "You check Indian grocery search results against one shopping-list item. For each product, answer true only "
-    "if it is the same kind of product the shopper asked for: same product type and flavour or variant, and the "
-    "same brand when the item names one. Pack size may differ. "
-    'Reply as JSON: {"same": [true|false, ...]} with one answer per product, in order.')
-
-
-def llm_judge(model: str) -> Judge:
-    """A judge backed by one OpenAI call per item. Any error answers all False (the user is asked instead)."""
-
-    def judge(query: str, names: list[str]) -> list[bool]:
-        try:
-            resp = count_openai(agent.llm().chat.completions.create(
-                model=model or agent.model(),
-                response_format={"type": "json_object"},
-                messages=[{"role": "system", "content": _JUDGE_SYSTEM},
-                          {"role": "user", "content": json.dumps({"item": query, "products": names},
-                                                                 ensure_ascii=False)}]))
-            same = json.loads(resp.choices[0].message.content)["same"]
-            if not isinstance(same, list):
-                raise ValueError("same is not a list")
-            return [same[i] is True if i < len(same) else False for i in range(len(names))]
-        except Exception as e:
-            log.warning("match judge failed (%s); asking the user instead", type(e).__name__)
-            return [False] * len(names)
-
-    return judge
 
 
 def _packs(q: Query, p: Product) -> int:
@@ -255,10 +254,8 @@ def _result(idx, status, confidence=None, product=None, packs=None, swap_from=No
 
 
 def _brand_key(p: Product) -> str | None:
-    if p.brand:
-        return db.norm_name(p.brand) or None
-    first = [w for w in _words(p.name) if len(w) > 1 and w not in STOPWORDS]
-    return first[0] if first else None
+    """The normalised brand; None without one, and then no swap happens (never guessed from the name)."""
+    return _norm(p.brand) or None
 
 
 def _within(size: Size | None, ref: Size | None) -> bool:
@@ -283,20 +280,23 @@ def _priced(q: Query, scored: list[tuple[Product, float]], ref: Size | None) -> 
     return out
 
 
-def _cheapest(options: list[tuple[Product, float, int]]) -> tuple[Product, float, int]:
-    return min(options, key=lambda o: (round(o[2] * o[0].price, 2), -o[1], o[0].product_id))
+def _best(options: list[tuple[Product, float, int]]) -> tuple[Product, float, int]:
+    """The highest score wins; the cheapest line (then the lower id) only among equal scores."""
+    top = max(s for _, s, _ in options)
+    tied = [o for o in options if o[1] >= top - _EPS]
+    return min(tied, key=lambda o: (round(o[2] * o[0].price, 2), o[0].product_id))
 
 
 def match_item(q: Query, products: list[Product], judge: Judge | None = None) -> dict:
     scored = sorted(((p, score(q, p)) for p in products), key=lambda t: (-t[1], t[0].price, t[0].product_id))
-    shown = [(p, s) for p, s in scored if s >= SHOW]
+    shown = [(p, s) for p, s in scored if _is_shown(s)]
     candidates = [_row(p, _packs(q, p), s) for p, s in shown[:MAX_CANDIDATES]]
 
-    # 1. Accepted: SURE and in stock; otherwise the judge may confirm up to JUDGE_TOP NEAR ones.
+    # 1. Accepted: SURE and in stock; otherwise the judge may confirm up to JUDGE_TOP NEAR ones. No judge: pick.
     confidence = "sure"
-    accepted = [(p, s) for p, s in scored if p.in_stock and s >= SURE]
+    accepted = [(p, s) for p, s in scored if p.in_stock and _is_sure(s)]
     if not accepted and judge is not None:
-        near = [(p, s) for p, s in scored if p.in_stock and NEAR <= s < SURE][:JUDGE_TOP]
+        near = [(p, s) for p, s in scored if p.in_stock and _is_near(s) and not _is_sure(s)][:JUDGE_TOP]
         if near:
             answers = judge(q.text, [p.name for p, _ in near])
             accepted = [ps for ps, ok in zip(near, answers) if ok is True]
@@ -306,26 +306,32 @@ def match_item(q: Query, products: list[Product], judge: Judge | None = None) ->
         # 2. Accepted products measured in different dimensions (ml vs g) are different things: ask.
         if len({p.size.unit for p, _ in accepted if p.size}) > 1:
             return _result(q.idx, "pick", candidates=candidates)
-        # 3-4. Packs, then the cheapest line.
+        # 3-4. Packs, then the best score (price breaks ties).
         options = _priced(q, accepted, None if q.size else accepted[0][0].size)
         if options:
-            p, s, packs = _cheapest(options)
+            p, s, packs = _best(options)
             return _result(q.idx, "matched", confidence, _row(p, packs, s), packs, candidates=candidates)
 
-    # 5. The exact item is out of stock: swap within the brand, dimension and ±25 % size, else say so.
-    gone = [(p, s) for p, s in scored if not p.in_stock and s >= SURE]
+    # 5. The exact item is out of stock. Swap only within the same named brand, dimension and ±25 % size, to a
+    #    product that keeps every non-brand word of the query. Otherwise the user picks from what is in stock;
+    #    with nothing in stock to show, it is out of stock.
+    gone = [(p, s) for p, s in scored if not p.in_stock and _is_sure(s)]
     if gone:
         orig, orig_s = gone[0]
         brand = _brand_key(orig)
+        must_keep = q.tokens - tokens(orig.brand)
         subs = [(p, s) for p, s in scored
-                if p.in_stock and s >= NEAR and brand is not None and _brand_key(p) == brand
+                if p.in_stock and _is_near(s) and brand is not None and _brand_key(p) == brand
+                and must_keep <= (tokens(p.name) | tokens(p.brand))
                 and orig.size is not None and _within(p.size, orig.size)]
         options = _priced(q, subs, orig.size)
         orig_row = _row(orig, _packs(q, orig), orig_s)
         if options:
-            p, s, packs = _cheapest(options)
+            p, s, packs = _best(options)
             return _result(q.idx, "swapped", None, _row(p, packs, s), packs, swap_from=orig_row,
                            candidates=candidates)
+        if any(c["in_stock"] for c in candidates):
+            return _result(q.idx, "pick", candidates=candidates)
         return {**_result(q.idx, "out_of_stock", candidates=candidates), "product": {**orig_row, "line_total": None}}
 
     # 6. Something close enough to show: the user picks. Nothing: not found.
@@ -342,12 +348,20 @@ _VARIANT_PATTERNS = (
     re.compile(rf"\s*\b({_V})\s+(?:plate|portion|size|qty)\b", re.I),                      # "Half Plate"
     re.compile(rf"\s+({_V})\s*$", re.I),                                                     # "Biryani Half"
     re.compile(r"^\s*(regular|small|medium|large)\b\s*", re.I),                               # "Large Pizza"
+    re.compile(r"^\s*(half|full)\b(?!\s+fry\b)\s*", re.I),                                    # "Half Tandoori"
 )
 _SERVES = re.compile(r"\s*[\(\[]?\s*\b(?:serves|for)\s+(\d+)(?:\s*-\s*\d+)?(?:\s+(?:people|persons|pax))?\s*[\)\]]?",
                      re.I)
 _ADDON = re.compile(r"\s*(?:\bwith\b|\+|\badd\s+on\b)\s*(.+)$", re.I)
-_EXTRA = re.compile(r"\s*\bextra\s+(.+)$", re.I)
+_EXTRA = re.compile(r"(?<=\S)\s+\bextra\s+(.+)$", re.I)   # "Burger Extra Cheese", not "Extra Long Hot Dog"
 _ADDON_FILLER = frozenset({"extra", "with", "add", "on", "addon", "and"})
+# Words that make a different dish: "Paneer Tikka" is not "Paneer Tikka Roll", nor "Chicken Biryani Rice Bowl".
+HEAD_NOUNS = frozenset({
+    "roll", "rolls", "wrap", "wraps", "bowl", "bowls", "combo", "combos", "thali", "thalis", "meal", "meals",
+    "platter", "platters", "box", "bucket", "sandwich", "sandwiches", "burger", "burgers", "pizza", "pizzas",
+    "pasta", "salad", "soup", "frankie", "kathi", "sub", "momo", "momos", "noodles", "rice", "pulao", "paratha",
+    "parathas", "curry", "masala", "gravy", "kebab", "kebabs", "taco", "tacos", "quesadilla", "biryani",
+})
 
 
 def _variant_of(text: str | None) -> str | None:
@@ -446,9 +460,15 @@ def _conflicts(a, b) -> bool:
 
 
 def _dish_score(q: DishQuery, d: Dish) -> float:
+    """`score` on the base names, capped below SURE unless it is plainly the same dish: every query word is in
+    it, it adds no head noun ("Roll", "Bowl", ...), its variant is known when the query's is, and the add-ons
+    agree."""
+    name = d.base_name or d.name
     s = score(Query(q.idx, q.text, q.qty, q.tokens, None),
-              Product(d.dish_id, d.base_name or d.name, None, None, None, d.price, None, d.in_stock))
-    if (q.variant is not None and d.variant is None) or q.addons != d.addons:
+              Product(d.dish_id, name, None, None, None, d.price, None, d.in_stock))
+    dt = tokens(name)
+    if (not q.tokens <= dt or (dt - q.tokens) & HEAD_NOUNS
+            or (q.variant is not None and d.variant is None) or q.addons != d.addons):
         s = min(s, SURE - 0.01)
     return s
 
@@ -463,16 +483,17 @@ def match_dish(q: DishQuery, dishes: list[Dish]) -> dict:
     eligible = [d for d in dishes if not (_conflicts(q.veg, d.veg) or _conflicts(q.variant, d.variant)
                                           or _conflicts(q.serves, d.serves))]
     scored = sorted(((d, _dish_score(q, d)) for d in eligible), key=lambda t: (-t[1], t[0].price, t[0].dish_id))
-    candidates = [_dish_row(d, q.qty, s) for d, s in scored if s >= SHOW][:MAX_CANDIDATES]
+    candidates = [_dish_row(d, q.qty, s) for d, s in scored if _is_shown(s)][:MAX_CANDIDATES]
 
-    accepted = [(d, s) for d, s in scored if d.in_stock and s >= SURE]
+    accepted = [(d, s) for d, s in scored if d.in_stock and _is_sure(s)]
     if accepted:
         if q.variant is None and len({d.variant for d, _ in accepted}) > 1:
             return _result(q.idx, "pick", candidates=candidates)
-        d, s = min(accepted, key=lambda t: (t[0].price, -t[1], t[0].dish_id))
+        top = max(s for _, s in accepted)
+        d, s = min(((d, s) for d, s in accepted if s >= top - _EPS), key=lambda t: (t[0].price, t[0].dish_id))
         return _result(q.idx, "matched", "sure", _dish_row(d, q.qty, s), q.qty, candidates=candidates)
 
-    gone = [(d, s) for d, s in scored if not d.in_stock and s >= SURE]
+    gone = [(d, s) for d, s in scored if not d.in_stock and _is_sure(s)]
     if gone:
         d, s = gone[0]
         row = {**_dish_row(d, q.qty, s), "line_total": None}

@@ -1,6 +1,7 @@
 """Product and dish matching (Plan 5 R4, R14): pure, no database, the model judge is always a fake."""
 import json
-from types import SimpleNamespace
+import pathlib
+import re
 
 import pytest
 
@@ -51,6 +52,30 @@ def test_parse_size_unit_spellings():
     assert match.parse_size("Maggi Noodles 12 pack") == Size(12, "pc")
     assert match.parse_size("Coca Cola 750 ml (Pack of 2)") == Size(1500, "ml")
     assert match.parse_size("") is None
+
+
+def test_parse_size_dozen():
+    assert match.parse_size("Eggs 1 dozen") == Size(12, "pc")
+    assert match.parse_size("Bananas 2 Dozen") == Size(24, "pc")
+    assert match.tokens("Eggs 1 dozen") == frozenset({"eggs"})
+
+
+def test_name_size_times_pack_size_count():
+    p = match.from_raw({"product_id": "a", "name": "Bread 400 g", "pack_size": "Pack of 2", "price": 90})
+    assert p.size == Size(800, "g")
+    p = match.from_raw({"product_id": "b", "name": "Bread 2 x 400 g", "pack_size": "Pack of 2", "price": 90})
+    assert p.size == Size(800, "g")                                # the name already counts the packs
+    p = match.from_raw({"product_id": "c", "name": "Eggs", "pack_size": "Pack of 6", "price": 50})
+    assert p.size == Size(6, "pc")
+    p = match.from_raw({"product_id": "d", "name": "Milk 1 L", "pack_size": "500 ml", "price": 29})
+    assert p.size == Size(500, "ml")                               # a real pack size still wins
+
+
+def test_tokens_keep_hindi_combining_marks():
+    assert match.tokens("अमूल दूध 1 L") == frozenset({"अमूल", "दूध"})
+    assert match.tokens("Toor Dal / अरहर दाल") == frozenset({"toor", "dal", "अरहर", "दाल"})
+    m = match.match_item(match.parse_query(0, "दूध", 1), [P("अमूल दूध 500 ml", 29)])
+    assert m["status"] == "matched"
 
 
 def test_tokens_drop_sizes_stopwords_and_single_characters():
@@ -113,16 +138,37 @@ def test_score_uses_brand_tokens():
 
 def test_buys_two_half_litre_packs_for_one_litre():
     m = match.match_item(match.parse_query(0, "Amul Taaza Milk 1L", 1),
-                         [P("Amul Taaza Toned Milk 500 ml", 29), P("Amul Taaza Toned Milk 1 L", 60)])
+                         [P("Amul Taaza Toned Milk 500 ml", 29), P("Amul Masti Buttermilk 200 ml", 15)])
     assert (m["status"], m["product"]["name"], m["packs"], m["line_total"]) == \
         ("matched", "Amul Taaza Toned Milk 500 ml", 2, 58.0)
     assert m["confidence"] == "sure" and m["swap_from"] is None and m["idx"] == 0
 
 
-def test_quantity_multiplies_the_wanted_amount():
-    m = match.match_item(match.parse_query(0, "Amul Taaza Milk 1L ×2", 1),
+def test_highest_score_wins_over_cheaper_lower_score():
+    # controller ruling (fix round 1): price only breaks ties among equal scores
+    m = match.match_item(match.parse_query(0, "Amul Taaza Milk 1L", 1),
                          [P("Amul Taaza Toned Milk 500 ml", 29), P("Amul Taaza Toned Milk 1 L", 60)])
+    assert (m["product"]["name"], m["packs"], m["line_total"]) == ("Amul Taaza Toned Milk 1 L", 1, 60.0)
+
+
+def test_plain_butter_never_priced_as_garlic_butter():
+    m = match.match_item(match.parse_query(0, "Amul Butter 100 g", 1),
+                         [P("Amul Butter 100 g", 56), P("Amul Garlic Butter 100 g", 50)])
+    assert m["product"]["name"] == "Amul Butter 100 g"
+
+
+def test_quantity_multiplies_the_wanted_amount():
+    m = match.match_item(match.parse_query(0, "Amul Taaza Milk 1L ×2", 1), [P("Amul Taaza Toned Milk 500 ml", 29)])
     assert (m["product"]["name"], m["packs"], m["line_total"]) == ("Amul Taaza Toned Milk 500 ml", 4, 116.0)
+
+
+def test_score_at_sure_boundary_counts_as_sure():
+    q = match.parse_query(0, "Amul Taaza Milk 1L", 1)
+    p = P("Amul Milk 1 L", 60)
+    assert match.score(q, p) < match.SURE                      # 0.7999999999999999 in floating point
+    assert match.score(q, p) == pytest.approx(match.SURE)
+    m = match.match_item(q, [p], judge=never_judge)
+    assert (m["status"], m["confidence"]) == ("matched", "sure")
 
 
 def test_never_buys_more_than_one_and_a_half_times():
@@ -155,22 +201,53 @@ def test_tie_on_cost_prefers_higher_score_then_lower_id():
 
 
 def test_swap_same_brand_when_out_of_stock():
-    m = match.match_item(match.parse_query(0, "Lay's Classic", 1),
+    m = match.match_item(match.parse_query(0, "Lay's Classic 52 g", 1),
                          [P("Lay's Classic Salted Chips 52 g", 20, brand="Lay's", in_stock=False),
-                          P("Lay's Magic Masala Chips 52 g", 20, brand="Lay's"),
-                          P("Lay's Magic Masala Chips 200 g", 70, brand="Lay's")])
+                          P("Lay's Classic Salted Potato Chips Value Party Pack 60 g", 25, brand="Lay's"),
+                          P("Lay's Magic Masala Chips 52 g", 20, brand="Lay's")])
     assert (m["status"], m["product"]["name"], m["packs"], m["line_total"]) == \
-        ("swapped", "Lay's Magic Masala Chips 52 g", 1, 20.0)
+        ("swapped", "Lay's Classic Salted Potato Chips Value Party Pack 60 g", 1, 25.0)
     assert m["swap_from"]["name"] == "Lay's Classic Salted Chips 52 g"
     assert m["swap_from"]["in_stock"] is False
 
 
-def test_out_of_stock_without_same_brand_substitute():
+def test_swap_must_keep_every_non_brand_query_word():
+    # Magic Masala is the same brand, dimension and size, but it is not "Classic": ask instead
+    m = match.match_item(match.parse_query(0, "Lay's Classic", 1),
+                         [P("Lay's Classic Salted Chips 52 g", 20, brand="Lay's", in_stock=False),
+                          P("Lay's Magic Masala Chips 52 g", 20, brand="Lay's")])
+    assert (m["status"], m["product"], m["swap_from"]) == ("pick", None, None)
+    m = match.match_item(match.parse_query(0, "Amul Butter", 1),
+                         [P("Butter 100 g", 56, brand="Amul", in_stock=False),
+                          P("Cheese Slices 100 g", 60, brand="Amul")])
+    assert (m["status"], m["product"]) == ("pick", None)
+
+
+def test_swap_needs_a_brand_on_both_products():
+    m = match.match_item(match.parse_query(0, "Organic Tomato", 1),
+                         [P("Organic Tomato 500 g", 40, in_stock=False), P("Organic Onion 500 g", 30)])
+    assert (m["status"], m["product"]) == ("pick", None)
+    m = match.match_item(match.parse_query(0, "Lay's Classic 52 g", 1),
+                         [P("Lay's Classic Salted Chips 52 g", 20, brand="Lay's", in_stock=False),
+                          P("Lay's Classic Salted Potato Chips Value Party Pack 60 g", 25)])
+    assert m["status"] == "pick"
+
+
+def test_out_of_stock_without_substitute_or_alternative():
+    m = match.match_item(match.parse_query(0, "Lay's Classic", 1),
+                         [P("Lay's Classic Salted Chips 52 g", 20, brand="Lay's", in_stock=False),
+                          P("Bingo Mad Angles 52 g", 20, brand="Bingo")])
+    assert m["status"] == "out_of_stock" and m["swap_from"] is None and m["line_total"] is None
+    assert m["product"]["name"] == "Lay's Classic Salted Chips 52 g"
+
+
+def test_out_of_stock_with_other_candidates_asks_user():
     m = match.match_item(match.parse_query(0, "Lay's Classic", 1),
                          [P("Lay's Classic Salted Chips 52 g", 20, brand="Lay's", in_stock=False),
                           P("Bingo Classic Salted Chips 52 g", 20, brand="Bingo")])
-    assert m["status"] == "out_of_stock" and m["swap_from"] is None and m["line_total"] is None
-    assert m["product"]["name"] == "Lay's Classic Salted Chips 52 g"
+    assert (m["status"], m["product"]) == ("pick", None)
+    assert [c["name"] for c in m["candidates"]] == ["Lay's Classic Salted Chips 52 g",
+                                                     "Bingo Classic Salted Chips 52 g"]
 
 
 def test_near_match_without_judge_asks_user():
@@ -243,46 +320,14 @@ def test_constants():
     assert (match.SURE, match.NEAR, match.SHOW, match.MAX_CANDIDATES, match.JUDGE_TOP) == (0.8, 0.5, 0.3, 5, 3)
 
 
-# --- llm_judge (fake client only) ---------------------------------------------------------------
+# --- provider neutrality ------------------------------------------------------------------------
 
-class _FakeClient:
-    def __init__(self, content=None, error=None):
-        self.kwargs = None
-        self.content, self.error = content, error
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
-
-    def _create(self, **kwargs):
-        self.kwargs = kwargs
-        if self.error:
-            raise self.error
-        msg = SimpleNamespace(content=self.content)
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=SimpleNamespace(total_tokens=7))
-
-
-def test_llm_judge_failure_is_all_false(monkeypatch):
-    monkeypatch.setattr(match.agent, "llm", lambda: _FakeClient(error=RuntimeError("boom")))
-    assert match.llm_judge("m")("Lay's Classic", ["a", "b", "c"]) == [False, False, False]
-    monkeypatch.setattr(match.agent, "llm", lambda: _FakeClient(content="not json"))
-    assert match.llm_judge("m")("Lay's Classic", ["a", "b"]) == [False, False]
-
-
-def test_llm_judge_parses_answer_and_meters(monkeypatch):
-    client = _FakeClient(content='{"same": [true, false, "yes"]}')
-    metered = []
-    monkeypatch.setattr(match.agent, "llm", lambda: client)
-    monkeypatch.setattr(match, "count_openai", lambda resp: metered.append(resp.usage.total_tokens) or resp)
-    assert match.llm_judge("gpt-x")("Lay's Classic", ["a", "b", "c", "d"]) == [True, False, False, False]
-    assert metered == [7]
-    assert client.kwargs["model"] == "gpt-x"
-    assert client.kwargs["response_format"]["type"] in ("json_object", "json_schema")
-
-
-def test_llm_judge_empty_model_uses_agent_model(monkeypatch):
-    client = _FakeClient(content='{"same": [true]}')
-    monkeypatch.setattr(match.agent, "llm", lambda: client)
-    monkeypatch.setattr(match.agent, "model", lambda: "default-model")
-    assert match.llm_judge("")("q", ["a"]) == [True]
-    assert client.kwargs["model"] == "default-model"
+def test_match_is_provider_neutral():
+    src = pathlib.Path(match.__file__).read_text(encoding="utf-8")
+    for name in ("agent", "metering", "openai", "anthropic"):
+        assert not re.search(rf"^\s*(import|from)\s+{name}\b", src, re.M), name
+    assert not hasattr(match, "llm_judge") and not hasattr(match, "count_openai")
+    assert match.Judge is not None
 
 
 # --- dishes ------------------------------------------------------------------------------------
@@ -373,3 +418,45 @@ def test_dish_query_quantity_suffix():
     m = match.match_dish(q, [D("Chicken 65", 240)])
     assert (m["status"], m["packs"], m["line_total"]) == ("matched", 2, 480.0)
     json.dumps(m)
+
+
+def test_paneer_tikka_never_priced_as_paneer_tikka_roll():
+    q = match.parse_dish_query(0, "Paneer Tikka", 1)
+    m = match.match_dish(q, [D("Paneer Tikka", 280), D("Paneer Tikka Roll", 160)])
+    assert (m["status"], m["product"]["name"]) == ("matched", "Paneer Tikka")
+    m = match.match_dish(q, [D("Paneer Tikka Roll", 160)])
+    assert (m["status"], m["product"]) == ("pick", None)
+
+
+def test_chicken_biryani_never_priced_as_rice_bowl():
+    q = match.parse_dish_query(0, "Chicken Biryani", 1)
+    m = match.match_dish(q, [D("Chicken Biryani", 300), D("Chicken Biryani Rice Bowl", 199)])
+    assert (m["status"], m["product"]["name"]) == ("matched", "Chicken Biryani")
+    m = match.match_dish(q, [D("Chicken Biryani Rice Bowl", 199)])
+    assert m["status"] == "pick"
+
+
+def test_dish_missing_a_query_word_is_not_sure():
+    q = match.parse_dish_query(0, "Hyderabadi Chicken Dum Biryani", 1)
+    m = match.match_dish(q, [D("Chicken Dum Biryani", 300)])      # 3 of 4 words: 0.45 + 0.15 + 0.25 = 0.85
+    assert m["status"] == "pick"
+
+
+def test_dish_highest_score_wins_then_price():
+    q = match.parse_dish_query(0, "Chicken Biryani", 1)
+    m = match.match_dish(q, [D("Chicken Biryani", 300), D("Special Chicken Biryani", 250)])
+    assert m["product"]["name"] == "Chicken Biryani"
+    m = match.match_dish(q, [D("Chicken Biryani", 300, did="b"), D("Chicken Biryani", 280, did="a")])
+    assert m["product"]["price"] == 280.0
+
+
+def test_half_and_full_before_the_name():
+    q = match.parse_dish_query(0, "Half Tandoori Chicken", 1)
+    assert (q.variant, q.tokens) == ("half", frozenset({"tandoori", "chicken"}))
+    assert match.match_dish(q, [D("Tandoori Chicken (Full)", 450)])["status"] == "not_found"
+    assert match.dish_traits("Full Butter Chicken")[:2] == ("Butter Chicken", "full")
+    assert match.dish_traits("Half Fry Egg")[1] is None             # "half fry" is the dish, not a portion
+
+
+def test_leading_extra_is_not_an_addon():
+    assert match.dish_traits("Extra Long Hot Dog") == ("Extra Long Hot Dog", None, None, frozenset())

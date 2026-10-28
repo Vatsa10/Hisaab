@@ -76,17 +76,34 @@ def _has_coords(x: Listing) -> bool:
     return x.lat is not None and x.lon is not None
 
 
+def _locality_tokens(locality: str | None) -> frozenset[str]:
+    """Locality words, keeping short numbers: "Sector 5" and "Sector 9" must differ."""
+    return frozenset(w for w in match._words(locality) if w not in match.STOPWORDS)
+
+
 def score(a: Listing, b: Listing) -> float:
-    """0.6 × name Jaccard + 0.4 × place agreement; listings more than 3 km apart score 0."""
+    """0.6 × name Jaccard + 0.4 × place agreement (R13), with the fix-round-1 controller rulings:
+    - 0 when the coordinates are more than 3 km apart, or the reported distances to the user differ by more
+      than 3 km;
+    - capped below SURE ("ask") when the place is unknown (no coordinates on both and no locality on both), or
+      when both localities are known and each has a word the other lacks ("Sector 14" vs "Sector 52")."""
+    if a.distance_km is not None and b.distance_km is not None and abs(a.distance_km - b.distance_km) > MAX_PAIR_KM:
+        return 0.0
+    la, lb = _locality_tokens(a.locality), _locality_tokens(b.locality)
+    known = bool(la and lb)
     if _has_coords(a) and _has_coords(b):
         km = haversine_km(a.lat, a.lon, b.lat, b.lon)
         if km > MAX_PAIR_KM:
             return 0.0
         place = 1.0 if km <= 0.25 else 0.7 if km <= 1 else 0.3 if km <= 2 else 0.0
+        known = True
     else:
-        la, lb = match.tokens(a.locality), match.tokens(b.locality)
-        place = (0.7 if _jaccard(la, lb) >= 0.5 else 0.0) if la and lb else 0.5
-    return 0.6 * _jaccard(name_tokens(a.name), name_tokens(b.name)) + 0.4 * place
+        place = (0.7 if _jaccard(la, lb) >= 0.5 else 0.0) if known else 0.5
+    s = 0.6 * _jaccard(name_tokens(a.name), name_tokens(b.name)) + 0.4 * place
+    conflict = bool(la and lb and la - lb and lb - la)
+    if not known or conflict:
+        s = min(s, match.SURE - 0.01)
+    return s
 
 
 def _app(site: str) -> str:
@@ -121,7 +138,7 @@ def pair_results(by_site: dict[str, list[Listing]], user_lat, user_lon, access: 
     for i, (sa, a) in enumerate(pool):
         for j in range(i + 1, len(pool)):
             sb, b = pool[j]
-            if sa != sb and (s := score(a, b)) >= match.NEAR:
+            if sa != sb and match._is_near(s := score(a, b)):
                 edges.append((s, i, j))
     edges.sort(key=lambda e: (-e[0], e[1], e[2]))
 
@@ -140,7 +157,7 @@ def pair_results(by_site: dict[str, list[Listing]], user_lat, user_lon, access: 
         distances = [d for _, x in listed if (d := _distance(x, user_lat, user_lon)) is not None]
         if s is None:
             confidence, note = "single", _single_note(listed[0][0], sites, access)
-        elif s >= match.SURE:
+        elif match._is_sure(s):
             confidence, note = "sure", None
         else:
             confidence, note = "ask", "Check this is the same restaurant"

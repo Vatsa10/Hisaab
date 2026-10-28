@@ -84,12 +84,44 @@ def test_locality_used_without_coordinates():
     a = L("swiggy", "Meghana Foods", locality="Gorwa")
     assert rm.score(a, L("zomato", "Meghana Foods", locality="Gorwa, Vadodara")) == pytest.approx(0.6 + 0.4 * 0.7)
     assert rm.score(a, L("zomato", "Meghana Foods", locality="Alkapuri")) == pytest.approx(0.6)
-    assert rm.score(a, L("zomato", "Meghana Foods")) == pytest.approx(0.6 + 0.4 * 0.5)
+    # an unknown place (0.6 + 0.4 × 0.5 = 0.8) is capped below SURE: ask, never pair silently
+    assert rm.score(a, L("zomato", "Meghana Foods")) == pytest.approx(match.SURE - 0.01)
     # one side has coordinates only: fall back to localities, and one of them is unknown
     assert rm.score(L("swiggy", "Meghana Foods", *GORWA), L("zomato", "Meghana Foods", locality="Gorwa")) == \
-        pytest.approx(0.6 + 0.4 * 0.5)
+        pytest.approx(match.SURE - 0.01)
     assert rm.score(L("swiggy", "Meghana Foods", *GORWA, locality="Gorwa"),
                     L("zomato", "Meghana Foods", locality="Gorwa")) == pytest.approx(0.6 + 0.4 * 0.7)
+
+
+def test_unknown_place_is_ask_not_sure():
+    s = rm.score(L("swiggy", "Behrouz Biryani"), L("zomato", "Behrouz Biryani"))
+    assert match.NEAR <= s < match.SURE - 1e-9
+    s = rm.score(L("swiggy", "Behrouz Biryani", distance_km=0.5), L("zomato", "Behrouz Biryani", distance_km=0.7))
+    assert match.NEAR <= s < match.SURE - 1e-9
+    [p] = rm.pair_results({"swiggy": [L("swiggy", "Behrouz Biryani", rid="s")],
+                           "zomato": [L("zomato", "Behrouz Biryani", rid="z")]}, None, None,
+                          {"swiggy": "ok", "zomato": "ok"})
+    assert (p["confidence"], p["note"]) == ("ask", "Check this is the same restaurant")
+
+
+def test_reported_distances_more_than_3_km_apart_never_pair():
+    a = L("swiggy", "Behrouz Biryani", distance_km=0.5)
+    assert rm.score(a, L("zomato", "Behrouz Biryani", distance_km=4.8)) == 0
+    assert rm.score(a, L("zomato", "Behrouz Biryani", locality="Gorwa", distance_km=3.6)) == 0
+    assert rm.score(a, L("zomato", "Behrouz Biryani", distance_km=3.4)) > 0
+
+
+def test_differing_localities_cap_below_sure():
+    a = L("swiggy", "Behrouz Biryani", locality="Sector 14, Gurgaon")
+    assert match.NEAR <= rm.score(a, L("zomato", "Behrouz Biryani", locality="Sector 52, Gurgaon")) < match.SURE - 1e-9
+    assert match.NEAR <= rm.score(L("swiggy", "Behrouz Biryani", locality="Sector 5"),
+                                  L("zomato", "Behrouz Biryani", locality="Sector 9")) < match.SURE - 1e-9
+    # same coordinates do not override a locality conflict
+    assert rm.score(L("swiggy", "Behrouz Biryani", *GORWA, locality="Sector 14"),
+                    L("zomato", "Behrouz Biryani", *GORWA, locality="Sector 52")) < match.SURE - 1e-9
+    # a locality that only adds the city is not a conflict
+    assert rm.score(L("swiggy", "Behrouz Biryani", locality="Sector 14"),
+                    L("zomato", "Behrouz Biryani", locality="Sector 14, Gurgaon")) >= match.SURE
 
 
 def test_pair_results_notes():
