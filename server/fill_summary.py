@@ -15,8 +15,8 @@ from server.config import SITE_NAMES
 USER_SKIPS = ("you_skipped", "no_answer")
 SKIP_NOTES = {"you_skipped": "you skipped it", "no_answer": "no answer",
               "out_of_stock": "out of stock when we checked", "not_found": "not found"}
-# The engine stopped adding with adds possibly already in the app's cart (cart_fill.fill_cart): the user is told to
-# check the app, and the fill is never refunded.
+# The engine stopped adding with adds possibly already in the app's cart (cart_fill.fill_cart): the store ends the
+# fill as interrupted (slot kept, never refunded), and the user is told to check the app.
 CART_UNKNOWN = ("redirected_write", "existing_changed", "cart_changed", "cart_read_failed")
 CHECK_APP = "Some items may already be in your cart. Check your {app} cart before filling again."
 
@@ -74,20 +74,24 @@ def _sections(items: list[dict]) -> list[dict]:
 def _error_line(status: str, error: str | None, a: int, app: str, conn: str) -> str | None:
     if status not in ("failed", "interrupted"):
         return None
-    if status == "interrupted" or error == "worker_lost":
-        return f"We lost track of this fill. Check your {app} cart before filling again."
-    n = "Nothing was added." if a == 0 else "Some items were added before it stopped."
     check = CHECK_APP.format(app=app)
-    lines = {
-        "needs_login": f"{conn} logged you out. Reconnect it, then try again. {n}",
-        "recipe_drift": f"Filling {app} carts stopped working. We've told the team. {n}",
-        "location_changed": f"{app}'s location changed again. Nothing was added.",
-        "nothing_added": f"{app} didn't accept any of the items. Nothing was added.",
+    stop_lines = {
         "redirected_write": f"{app} answered one of our adds in a way we didn't expect, so we stopped. {check}",
         # warning_line already says what changed.
         "existing_changed": f"We stopped adding. {check}",
         "cart_changed": f"Your {app} cart changed while we were adding, so we stopped. {check}",
         "cart_read_failed": f"We couldn't read your {app} cart after adding, so we stopped. {check}",
+    }
+    if error in CART_UNKNOWN:
+        return stop_lines[error]
+    if status == "interrupted" or error == "worker_lost":
+        return f"We lost track of this fill. Check your {app} cart before filling again."
+    n = "Nothing was added." if a == 0 else "Some items were added before it stopped."
+    lines = {
+        "needs_login": f"{conn} logged you out. Reconnect it, then try again. {n}",
+        "recipe_drift": f"Filling {app} carts stopped working. We've told the team. {n}",
+        "location_changed": f"{app}'s location changed again. Nothing was added.",
+        "nothing_added": f"{app} didn't accept any of the items. Nothing was added.",
     }
     return lines.get(error, f"Something went wrong. {n}")
 
@@ -117,7 +121,7 @@ def build(fill: dict, area: str, open_url: str | None) -> dict:
     items = [i for i in fill.get("items") or [] if isinstance(i, dict)]
     a = sum(1 for i in items if i.get("status") in ("added", "partial"))
     t = sum(1 for i in items if not (i.get("status") == "skipped" and i.get("skip_reason") in USER_SKIPS))
-    unknown = status == "failed" and error in CART_UNKNOWN
+    unknown = status in ("failed", "interrupted") and error in CART_UNKNOWN
 
     if status == "done":
         title, tone = f"Added {_plural(a, 'item', 'items')} to your {app} cart", "success"

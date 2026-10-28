@@ -431,7 +431,9 @@ def mark_started(conn, fill_id: str) -> None:
     f = get_fill(conn, fill_id)
     if f is None:
         return
-    conn.execute("update cart_fills set status = 'filling', started_at = now(), items = %s where id = %s",
+    # Only a live fill starts: one that finalize_lost (or a finish) already ended stays ended.
+    conn.execute("update cart_fills set status = 'filling', started_at = now(), items = %s "
+                 "where id = %s and status in ('queued','filling')",
                  (Jsonb([_pending(p) for p in f["plan"]]), str(fill_id)))
 
 
@@ -456,10 +458,8 @@ def _area(conn, request_id: str) -> str:
 
 
 def _refundable(outcome: dict) -> bool:
-    """Nothing was added (not even partly), and the app's cart is known not to hold our adds."""
+    """Nothing was added (not even partly). Interrupted fills (the cart may hold our adds) never get here."""
     if outcome.get("status") not in ("failed", "needs_confirmation"):
-        return False
-    if outcome.get("status") == "failed" and outcome.get("error") in fill_summary.CART_UNKNOWN:
         return False
     return not any(isinstance(i, dict) and i.get("status") in ("added", "partial") for i in outcome.get("items") or [])
 
@@ -469,9 +469,17 @@ def _finish(conn, fill_id: str, outcome: dict, open_url: str | None, s: Settings
     if not _is_uuid(fill_id):
         return {}
     with conn.transaction():
-        if conn.execute("select 1 from cart_fills where id = %s for update", (str(fill_id),)).fetchone() is None:
+        row = conn.execute("select status from cart_fills where id = %s for update", (str(fill_id),)).fetchone()
+        if row is None:
             return {}
         f = get_fill(conn, fill_id)
+        if row[0] not in ACTIVE:
+            # Already ended (finalize_lost, or an earlier finish): a late finish never overwrites it.
+            return f["summary"] or {}
+        if outcome.get("status") == "failed" and outcome.get("error") in fill_summary.CART_UNKNOWN:
+            # The engine stopped with adds possibly in the app's cart: interrupted keeps the slot (no re-fill)
+            # and is never refunded.
+            outcome = dict(outcome, status="interrupted")
         counted = f["counted"]
         if counted and _refundable(outcome):
             limits.refund_cart_fill(conn, f["user_id"], usage.today(f["created_at"], s.app_tz))

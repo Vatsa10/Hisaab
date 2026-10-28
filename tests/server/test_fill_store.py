@@ -140,6 +140,15 @@ def test_plan_uses_choice():
     assert fill.plan_items(req, {"items": RESULT_ITEMS}, "blinkit")[2]["action"] == "ask"
 
 
+def test_plan_uses_choice_with_int_keys():
+    req = {"items": REQ_ITEMS, "choices": {2: {"zepto": "c1"}}}
+    plan = fill.plan_items(req, {"items": RESULT_ITEMS}, "zepto")
+    assert (plan[2]["action"], plan[2]["product_id"], plan[2]["packs"], plan[2]["price"]) == ("add", "c1", 1, 56.0)
+    # An unknown candidate id is ignored: the item is still asked.
+    req = {"items": REQ_ITEMS, "choices": {2: {"zepto": "nope"}}}
+    assert fill.plan_items(req, {"items": RESULT_ITEMS}, "zepto")[2]["action"] == "ask"
+
+
 def test_db_site():
     assert (fill.db_site("instamart"), fill.db_site("zepto")) == ("swiggy", "zepto")
 
@@ -405,13 +414,55 @@ def test_partial_is_counted(pg, s):
 
 
 def test_engine_stop_with_unknown_cart_is_not_refunded(pg, s):
-    """redirected_write / cart_read_failed / existing_changed / cart_changed: adds may be in the app's cart."""
+    """redirected_write / cart_read_failed / existing_changed / cart_changed: adds may be in the app's cart, so the
+    fill ends interrupted: still counted, and it keeps the slot so the check can't be filled again."""
+    for code in ("redirected_write", "existing_changed", "cart_changed", "cart_read_failed"):
+        pg.execute("truncate cart_fills, jobs, usage, cart_requests, cart_results, recipes, connections cascade")
+        rid = ready(pg)
+        fid = fill.start_fill(pg, A, rid, "zepto", NOW, s)["fill_id"]
+        fill.mark_started(pg, fid)
+        summary = fill.finish_fill(pg, fid, outcome("failed", [res_item(0, "not_added")], error=code),
+                                   OPEN_APP_URLS["zepto"], s)
+        assert summary["status"] == "interrupted", code
+        assert summary["title"] == "Your Zepto cart may be half filled"
+        assert summary["error_line"].endswith("Check your Zepto cart before filling again."), code
+        assert summary["open"] == {"label": "Open Zepto to pay", "url": "https://www.zepto.com/"}
+        f = fill_row(pg, fid)
+        assert (f["status"], f["error"], f["counted"]) == ("interrupted", code, True)
+        assert usage_row(pg, A)["cart_fills"] == 1
+        assert fill._slot_taken(pg, rid, "zepto") is True
+        pg.execute("update jobs set status = 'done'")
+        with pytest.raises(fill.AlreadyFilled):
+            fill.start_fill(pg, A, rid, "zepto", NOW, s)
+        assert usage_row(pg, A)["cart_fills"] == 1
+
+
+def test_late_finish_never_overwrites_an_ended_fill(pg, s):
     rid = ready(pg)
+    out = fill.start_fill(pg, A, rid, "zepto", NOW, s)
+    fid = out["fill_id"]
+    fill.mark_started(pg, fid)
+    pg.execute("update jobs set status = 'failed' where id = %s", (out["job_id"],))
+    assert fill.finalize_lost(pg, s, NOW) == 1
+    ended = fill_row(pg, fid)
+    assert ended["status"] == "interrupted"
+    # The worker comes back late: neither a finish, a failure nor a restart changes the ended fill.
+    fill.finish_fill(pg, fid, outcome("failed", [res_item(0, "not_added")], error="nothing_added"),
+                     OPEN_APP_URLS["zepto"], s)
+    fill.fail_fill(pg, fid, "needs_login", s)
+    fill.mark_started(pg, fid)
+    after = fill_row(pg, fid)
+    assert (after["status"], after["error"], after["counted"], after["summary"], after["items"]) ==         ("interrupted", "worker_lost", True, ended["summary"], ended["items"])
+    assert usage_row(pg, A)["cart_fills"] == 1
+    # A done fill is not overwritten either.
+    pg.execute("truncate cart_fills, jobs, usage cascade")
     fid = fill.start_fill(pg, A, rid, "zepto", NOW, s)["fill_id"]
-    summary = fill.finish_fill(pg, fid, outcome("failed", [res_item(0, "not_added")], error="redirected_write"),
-                               OPEN_APP_URLS["zepto"], s)
-    assert summary["open"] == {"label": "Open Zepto to pay", "url": "https://www.zepto.com/"}
-    assert fill_row(pg, fid)["counted"] is True and usage_row(pg, A)["cart_fills"] == 1
+    fill.finish_fill(pg, fid, outcome("done", [res_item(0, "added", added_qty=2)]), OPEN_APP_URLS["zepto"], s)
+    fill.finish_fill(pg, fid, outcome("failed", [], error="nothing_added"), OPEN_APP_URLS["zepto"], s)
+    fill.mark_started(pg, fid)
+    f = fill_row(pg, fid)
+    assert (f["status"], f["counted"], f["started_at"]) == ("done", True, None)
+    assert usage_row(pg, A)["cart_fills"] == 1
 
 
 def test_refund_uses_ist_day_of_created_at(pg, s):

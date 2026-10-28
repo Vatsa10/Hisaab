@@ -171,10 +171,12 @@ def test_engine_stop_codes_tell_the_user_to_check_the_app():
                              "Some items may already be in your cart. Check your Zepto cart before filling again."),
     }
     for code, text in expected.items():
-        for items in ([item("Milk", "not_added")], [added("Milk", 1)]):
-            s = fill_summary.build(F(status="failed", error=code, items=items,
+        # The store ends these fills as interrupted (the slot stays taken); the engine reports them as failed.
+        for status, items in [(st, it) for st in ("interrupted", "failed")
+                              for it in ([item("Milk", "not_added")], [added("Milk", 1)])]:
+            s = fill_summary.build(F(status=status, error=code, items=items,
                                      existing_changed=code == "existing_changed"), AREA, ZEPTO)
-            assert s["error_line"] == text, code
+            assert s["error_line"] == text, (code, status)
             assert s["title"] == "Your Zepto cart may be half filled", code
             assert s["tone"] == "warning", code
             assert s["open"] == {"label": "Open Zepto to pay", "url": ZEPTO}, code
