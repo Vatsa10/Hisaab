@@ -1,4 +1,10 @@
--- Plan 7 (minimal slice for site health and session expiry; Task 1 adds jobs.attempts/run_after and usage_erased).
+-- Plan 7 hardening (minimal slice, from Task 1's Interfaces): job attempts and delayed retry, per-site back-off,
+-- the needs-login stamp and the recipe pause stamp. Idempotent so it merges with the other minimal 0010 slice.
+-- Plan 7 Task 1 completes it (jobs_type_finished index, usage_erased).
+
+alter table jobs add column if not exists attempts int not null default 0,
+                 add column if not exists run_after timestamptz;
+
 alter table connections add column if not exists needs_login_at timestamptz;
 
 create table if not exists site_backoff (

@@ -1,5 +1,9 @@
-"""Service settings: secrets stay out of repr, worker-only validation, defaults."""
-from server.config import Settings
+"""Service settings: secrets stay out of repr, worker-only validation, defaults, hosted checks."""
+import base64
+
+import pytest
+
+from server.config import Settings, check_database_url, check_hosted, settings
 
 
 def test_settings_repr_hides_secrets():
@@ -59,11 +63,6 @@ def test_worker_settings_validate_proxy_template(monkeypatch):
 
 
 # ---- Plan 7 Task 2: hardening tunables, API never loads the profile key, hosted checks ----
-import base64
-
-import pytest
-
-from server.config import check_database_url, check_hosted, settings
 
 HOSTED_DB = "postgresql://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require"
 HOSTED_ASK = "postgresql://ask_reader.ref:askpw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require"
