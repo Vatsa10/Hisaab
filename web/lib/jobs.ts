@@ -28,6 +28,11 @@ export interface JobProgress {
   amount_found?: number;
   /** When the current prompt was published (ISO), if the worker records it. Written by the worker when it asks for the code. */
   prompt_at?: string;
+  /** Cart fill: the choices offered for the question (the id goes back as the answer). */
+  choices?: { id: string; label: string }[];
+  /** Cart fill: items handled so far, and in all. */
+  done?: number;
+  total?: number;
 }
 
 export interface Job {

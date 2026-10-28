@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useId, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useId, useState } from "react";
 import { buttonClassName } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import {
+  siteName,
   startCheck,
   watchCartRequest,
   type CartPick,
@@ -16,7 +17,10 @@ import {
   type CartSite,
   type CartSummary,
 } from "@/lib/cart";
+import { getFillOptions, type FillOptions } from "@/lib/fill";
 import { AppCard } from "./AppCard";
+import { FillConfirmSheet } from "./FillConfirmSheet";
+import { FillSheet } from "./FillSheet";
 import { ItemTable } from "./ItemTable";
 import { PickSheet } from "./PickSheet";
 import { ResultHeader } from "./ResultHeader";
@@ -30,6 +34,8 @@ function editHref(req: CartRequest): string {
 /** One cart check: live progress while it runs, then the ranked apps, item table and picks. */
 export function CartResultView({ id }: { id: string }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const tableId = useId();
   const [loaded, setLoaded] = useState(false);
   const [request, setRequest] = useState<CartRequest | null>(null);
@@ -39,6 +45,29 @@ export function CartResultView({ id }: { id: string }) {
   const [pick, setPick] = useState<CartPick | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [fillOptions, setFillOptions] = useState<FillOptions | null>(null);
+  const [confirmSite, setConfirmSite] = useState<CartSite | null>(null);
+  const fillId = searchParams?.get("fill") ?? null;
+  const done = request?.status === "done";
+
+  const refreshFill = useCallback(() => {
+    void Promise.resolve(getFillOptions(id)).then(
+      (o) => setFillOptions(o && typeof o === "object" && o.sites ? o : null),
+      () => setFillOptions(null),
+    );
+  }, [id]);
+
+  useEffect(() => {
+    if (done) refreshFill();
+  }, [done, refreshFill]);
+
+  // ?fill=<id> opens the live sheet, so a notification link or a reload lands on it.
+  const showFill = useCallback(
+    (next: string | null) => {
+      router.replace(next ? `${pathname}?fill=${encodeURIComponent(next)}` : pathname);
+    },
+    [router, pathname],
+  );
 
   useEffect(
     () =>
@@ -116,6 +145,9 @@ export function CartResultView({ id }: { id: string }) {
             mode={summary.mode}
             offersNote={summary.offers_note}
             onPick={() => openPick(c.site)}
+            fill={fillOptions?.sites?.[c.site] ?? null}
+            onFill={() => setConfirmSite(c.site)}
+            onViewFill={showFill}
           />
         ))}
       </div>
@@ -158,6 +190,21 @@ export function CartResultView({ id }: { id: string }) {
       <Link href={editHref(request)} className={buttonClassName({ variant: "secondary", fullWidth: true, className: "mt-4" })}>
         Edit list
       </Link>
+
+      <FillConfirmSheet
+        open={confirmSite !== null}
+        requestId={summary.request_id}
+        site={confirmSite ?? ""}
+        appName={confirmSite ? siteName(confirmSite) : ""}
+        option={confirmSite ? (fillOptions?.sites?.[confirmSite] ?? null) : null}
+        onClose={() => setConfirmSite(null)}
+        onStarted={(newId) => {
+          setConfirmSite(null);
+          refreshFill();
+          showFill(newId);
+        }}
+      />
+      <FillSheet fillId={fillId} onClose={() => showFill(null)} onSwitch={showFill} onChanged={refreshFill} />
 
       <PickSheet
         requestId={summary.request_id}

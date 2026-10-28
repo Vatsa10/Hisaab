@@ -2,6 +2,8 @@ import Link from "next/link";
 import { buttonClassName } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { SITE_DOTS, type CartCard, type CartMode } from "@/lib/cart";
+import type { FillOption } from "@/lib/fill";
+import { FillButton } from "./FillButton";
 
 export interface AppCardProps {
   card: CartCard;
@@ -9,6 +11,12 @@ export interface AppCardProps {
   offersNote: string | null;
   /** Opens the pick-one sheet for this app's first open pick. */
   onPick: () => void;
+  /** The server's Fill button state for this app (null until loaded). */
+  fill?: FillOption | null;
+  /** Opens the confirm sheet. */
+  onFill?: () => void;
+  /** Opens the live fill sheet. */
+  onViewFill?: (fillId: string) => void;
 }
 
 // "1 out of stock · 1 to pick": the server's stock line may already carry the pick count.
@@ -41,7 +49,15 @@ function StockLine({ line, toPick, onPick }: { line: string | null; toPick: numb
 }
 
 /** One app's total with fees (mockup A). Prices and every line come from the server summary. */
-export function AppCard({ card, mode, offersNote, onPick }: AppCardProps) {
+export function AppCard({
+  card,
+  mode,
+  offersNote,
+  onPick,
+  fill = null,
+  onFill = () => {},
+  onViewFill = () => {},
+}: AppCardProps) {
   const ok = card.status === "ok";
   const best = ok && card.cheapest;
 
@@ -109,22 +125,7 @@ export function AppCard({ card, mode, offersNote, onPick }: AppCardProps) {
         </div>
       )}
 
-      {best ? (
-        <div className="mt-3">
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
-            aria-describedby={`soon-${card.site}`}
-            className={buttonClassName({ fullWidth: true })}
-          >
-            Fill cart on {card.name}
-          </button>
-          <p id={`soon-${card.site}`} className="mt-1.5 text-center text-caption text-ink-muted">
-            Coming soon
-          </p>
-        </div>
-      ) : null}
+      {best ? <FillButton option={fill} appName={card.name} onStart={onFill} onView={onViewFill} /> : null}
     </article>
   );
 }

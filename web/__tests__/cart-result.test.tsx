@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // ---- mocks -------------------------------------------------------------------------------
 
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
-vi.mock("next/navigation", () => ({ useRouter: () => router }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => router,
+  usePathname: () => "/cart/r1",
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -246,17 +250,47 @@ describe("ranked results", () => {
     expect(screen.getByText("Prices include fees we could see.")).toBeInTheDocument();
   });
 
-  it("fill button is disabled with coming soon and calls nothing", () => {
+  it("fill button renders the server state", async () => {
+    api.apiFetch.mockResolvedValue({
+      fills_left: 2,
+      fills_limit: 3,
+      sites: {
+        zepto: {
+          state: "ready",
+          label: "Fill cart on Zepto",
+          sublabel: "2 fills left today",
+          href: null,
+          fill_id: null,
+          preview: { add: ["Milk"], ask: [], skip: [] },
+        },
+      },
+    });
     renderView();
     show(request({}));
+    await waitFor(() => expect(screen.getByText("2 fills left today")).toBeInTheDocument());
+    const btn = screen.getByRole("button", { name: /Fill cart on Zepto/ });
+    expect(btn).toBeEnabled();
+    expect(api.apiFetch).toHaveBeenCalledWith("/cart/checks/r1/fill");
+    expect(screen.queryByText("Coming soon")).toBeNull();
+    expect(screen.getAllByRole("button", { name: /Fill cart/ })).toHaveLength(1);
+  });
+
+  it("an unavailable fill is disabled with its reason", async () => {
+    api.apiFetch.mockResolvedValue({
+      fills_left: 0,
+      fills_limit: 3,
+      sites: {
+        zepto: { state: "limit", label: "Fill cart on Zepto", sublabel: "No fills left today", href: null, fill_id: null, preview: null },
+      },
+    });
+    renderView();
+    show(request({}));
+    await waitFor(() => expect(screen.getByText("No fills left today")).toBeInTheDocument());
     const btn = screen.getByRole("button", { name: /Fill cart on Zepto/ });
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText("Coming soon")).toBeInTheDocument();
     fireEvent.click(btn);
-    expect(api.apiFetch).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
-    expect(screen.getAllByRole("button", { name: /Fill cart/ })).toHaveLength(1);
   });
 
   it("other cards show delta labels", () => {
@@ -378,6 +412,7 @@ describe("pick one", () => {
     const updated = grocerySummary();
     updated.cards[2] = { ...updated.cards[2]!, total_label: "₹455", delta_label: "+₹43", to_pick: 0 };
     updated.picks = [];
+    api.apiFetch.mockResolvedValueOnce(undefined); // the Fill options read
     api.apiFetch.mockRejectedValueOnce(new ApiError(409, "That product is gone. Pick another."));
     api.apiFetch.mockResolvedValueOnce({ summary: updated });
 
@@ -391,7 +426,7 @@ describe("pick one", () => {
 
     fireEvent.click(within(sheet).getByRole("button", { name: "Use this" }));
     await waitFor(() => expect(screen.getAllByRole("article")[2]).toHaveTextContent("₹455"));
-    const [path, init] = api.apiFetch.mock.calls[1]!;
+    const [path, init] = api.apiFetch.mock.calls[2]!;
     expect(path).toBe("/cart/checks/r1/choices");
     expect(JSON.parse(init.body)).toEqual({ idx: 3, site: "instamart", product_id: "p2" });
     expect(screen.queryByRole("button", { name: /to pick/ })).toBeNull();
@@ -416,6 +451,7 @@ describe("pick one", () => {
     const done = grocerySummary();
     done.picks = [];
     done.cards[2] = { ...done.cards[2]!, to_pick: 0, total_label: "₹452" };
+    api.apiFetch.mockResolvedValueOnce(undefined); // the Fill options read
     api.apiFetch.mockResolvedValueOnce({ summary: second }).mockResolvedValueOnce({ summary: done });
 
     renderView();
@@ -433,8 +469,8 @@ describe("pick one", () => {
     expect(within(sheet).getByRole("button", { name: "Use this" })).toBeDisabled();
     fireEvent.click(within(sheet).getByRole("radio", { name: /Nestle a\+ Dahi/ }));
     fireEvent.click(within(sheet).getByRole("button", { name: "Use this" }));
-    await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(2));
-    expect(JSON.parse(api.apiFetch.mock.calls[1]![1].body)).toEqual({ idx: 5, site: "instamart", product_id: "c2" });
+    await waitFor(() => expect(api.apiFetch).toHaveBeenCalledTimes(3));
+    expect(JSON.parse(api.apiFetch.mock.calls[2]![1].body)).toEqual({ idx: 5, site: "instamart", product_id: "c2" });
   });
 
   it("pick count is not repeated when the stock line already has it", () => {

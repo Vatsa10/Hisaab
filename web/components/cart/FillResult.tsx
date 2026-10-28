@@ -1,0 +1,74 @@
+"use client";
+
+import Link from "next/link";
+import { Button, buttonClassName } from "@/components/ui/Button";
+import { cn } from "@/lib/cn";
+import type { FillSummary } from "@/lib/fill";
+
+const TONES: Record<FillSummary["tone"], string> = {
+  success: "text-accent",
+  warning: "text-up",
+  error: "text-[#b91c1c]",
+};
+
+export interface FillResultProps {
+  summary: FillSummary;
+  /** The fill's failure code; "needs_login" adds a Reconnect link. */
+  error: string | null;
+  onDone: () => void;
+}
+
+/** What the fill did, as the server worded it. Hands off to the app: there is no checkout here. */
+export function FillResult({ summary, error, onDone }: FillResultProps) {
+  const lines = [summary.cart_line, summary.existing_line, summary.warning_line, summary.location_line, summary.error_line];
+  return (
+    <div>
+      <h3 className={cn("text-headline", TONES[summary.tone])}>{summary.title}</h3>
+
+      {summary.sections.map((s) => (
+        <section key={s.key} className="mt-4" aria-label={s.heading}>
+          <h4 className="text-label font-semibold text-ink-muted">{s.heading}</h4>
+          <ul className="mt-1 divide-y divide-line-soft">
+            {s.rows.map((row, i) => (
+              <li key={`${row}-${i}`} className="py-2 text-body break-words">
+                {row}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+
+      <div className="mt-4 space-y-1.5 text-label">
+        {lines.map((l, i) =>
+          l ? (
+            <p key={i} className={l === summary.warning_line ? "font-medium text-up" : "text-ink-muted"}>
+              {l}
+            </p>
+          ) : null,
+        )}
+      </div>
+
+      <div className="mt-5 flex flex-col gap-2">
+        {summary.open ? (
+          <a
+            href={summary.open.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={buttonClassName({ fullWidth: true })}
+          >
+            {summary.open.label}
+          </a>
+        ) : null}
+        <p className="text-center text-caption text-ink-muted">{summary.pay_note}</p>
+        {error === "needs_login" ? (
+          <Link href="/accounts" className={buttonClassName({ variant: "secondary", fullWidth: true })}>
+            Reconnect
+          </Link>
+        ) : null}
+        <Button variant={summary.open ? "ghost" : "secondary"} fullWidth onClick={onDone}>
+          Done
+        </Button>
+      </div>
+    </div>
+  );
+}
