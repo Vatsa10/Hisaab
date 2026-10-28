@@ -247,19 +247,129 @@ def test_food_logged_out_raises_session_expired(monkeypatch, tmp_path):
         food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
 
 
+def raiser(exc):
+    def fetch(req):
+        raise exc
+    return fetch
+
+
 def test_menu_drift_when_both_paths_fail(monkeypatch, tmp_path):
-    fake_env(monkeypatch, fetch=None, on_goto=lambda url: [])
+    missing = {"data": {"changed": True}}  # a 2xx whose dishes path no longer resolves
+    template = MENU_PARAM_RECIPE | {"page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}
+    fake_env(monkeypatch, fetch=lambda req: missing, on_goto=lambda url: [])
     with pytest.raises(food_search.SearchDrift):
-        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE | {
-            "page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}, tmp_path)
-    fake_env(monkeypatch, fetch=lambda req: {"data": {"changed": True}}, on_goto=lambda url: [])
-    with pytest.raises(food_search.SearchDrift):  # replay works but the field map no longer finds dishes
+        food_search.fetch_menu("swiggy", "101", LOC, template, tmp_path)
+    fake_env(monkeypatch, fetch=lambda req: missing, on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchDrift):  # no page to fall back to
         food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
-    fake_env(monkeypatch, fetch=None, on_goto=lambda url: [])
+    renamed = copy.deepcopy(MENU_DATA)
+    for card in renamed["data"]["cards"]:
+        card["dishes"] = card.pop("items", [])
+    fake_env(monkeypatch, fetch=lambda req: renamed, on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchDrift):  # categories still there, items renamed: drift, not "closed"
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(json.JSONDecodeError("x", "<html>", 0)), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchDrift):  # a 2xx that is not JSON
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=lambda req: {"data": {}}, on_goto=lambda url: [])
     with pytest.raises(food_search.SearchDrift):
         food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
-    assert issubclass(food_search.SearchDrift, food_search.SearchError)
-    assert issubclass(food_search.Unserviceable, food_search.SearchError)
+
+    def on_goto(url):  # the page's own call returns 2xx without the path
+        return [captured("https://www.swiggy.com/dapi/menu/pl?restaurantId=101", missing)]
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 503: busy")), on_goto=on_goto)
+    with pytest.raises(food_search.SearchDrift):
+        food_search.fetch_menu("swiggy", "101", LOC, template, tmp_path)
+    for cls in (food_search.SearchDrift, food_search.SearchTransient, food_search.Unserviceable):
+        assert issubclass(cls, food_search.SearchError)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("HTTP 503: busy"), RuntimeError("HTTP 429: slow down"),
+                                 RuntimeError("HTTP 502: bad gateway"), Exception("net::ERR_CONNECTION_RESET"),
+                                 TimeoutError("Timeout 60000ms exceeded")])
+def test_transient_errors_are_not_drift(monkeypatch, tmp_path, exc):
+    template = MENU_PARAM_RECIPE | {"page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}
+    fake_env(monkeypatch, fetch=raiser(exc), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchTransient):
+        food_search.fetch_menu("swiggy", "101", LOC, template, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(exc), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchTransient):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+
+def test_transient_page_capture_and_navigation_errors(monkeypatch, tmp_path):
+    def busy(url):
+        if "/search?" in url:
+            return [captured("https://www.swiggy.com/dapi/restaurants/search?str=pizza", {"err": 1}, status=503)]
+        return []
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 404: gone")), on_goto=busy)
+    with pytest.raises(food_search.SearchTransient):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+    seen = fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 500: x")))
+    real_goto = browser.goto
+
+    def flaky_goto(p, url, *a, **k):
+        if "/restaurants/" in url:
+            raise Exception("net::ERR_TIMED_OUT")
+        real_goto(p, url)
+    monkeypatch.setattr(browser, "goto", flaky_goto)
+    with pytest.raises(food_search.SearchTransient):
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE | {
+            "page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}, tmp_path)
+    assert seen["goto"] == ["https://www.swiggy.com/"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_page_capture_logout_raises_session_expired(monkeypatch, tmp_path, status):
+    def on_goto(url):
+        if "/restaurants/101" in url:
+            return [captured("https://www.swiggy.com/dapi/menu/pl?restaurantId=101", {"e": 1}, status=status)]
+        if "/search?" in url:
+            return [captured("https://www.swiggy.com/dapi/restaurants/search?str=p", {"e": 1}, status=status)]
+        return []
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 404: gone")), on_goto=on_goto)
+    with pytest.raises(browser.SessionExpired):
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE | {
+            "page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}, tmp_path)
+    with pytest.raises(browser.SessionExpired):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+
+def test_empty_menu_and_closed_restaurant_are_not_drift(monkeypatch, tmp_path):
+    closed_empty = {"data": {"restaurant": {"isOpen": False}}}  # no categories at all
+    no_cards = {"data": {"restaurant": {"isOpen": True}, "cards": []}}
+    empty_cards = {"data": {"restaurant": {}, "cards": [{"title": "Biryani", "items": []}]}}
+    for data in (closed_empty, no_cards, empty_cards):
+        fake_env(monkeypatch, fetch=lambda req, d=data: d)
+        out = food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
+        assert out == {"is_open": False, "dishes": [], "fee_info": {}}
+    closed_full = copy.deepcopy(MENU_DATA)
+    closed_full["data"]["restaurant"]["isOpen"] = False
+    fake_env(monkeypatch, fetch=lambda req: closed_full)
+    out = food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
+    assert out["is_open"] is False and len(out["dishes"]) == 5  # closed: dishes shown, never priced as open
+
+    def on_goto(url):  # the page-capture path treats a closed restaurant the same way
+        return [captured("https://www.zomato.com/webroutes/getPage", closed_empty)] if "/77/" in url else []
+    fake_env(monkeypatch, fetch=None, on_goto=on_goto)
+    out = food_search.fetch_menu("zomato", "77", LOC, MENU_TEMPLATE_RECIPE, tmp_path)
+    assert out == {"is_open": False, "dishes": [], "fee_info": {}}
+
+
+def test_fetch_menu_refuses_other_hosts(monkeypatch, tmp_path):
+    seen = fake_env(monkeypatch, fetch=lambda req: MENU_DATA)
+    for url in ("https://evil.example.com/restaurants/101", "https://swiggy.com.evil.in/r/1",
+                "http://www.swiggy.com/restaurants/101", "javascript:alert(1)"):
+        with pytest.raises(ValueError):
+            food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path, url=url)
+    with pytest.raises(ValueError):
+        food_search.fetch_menu("zomato", "77", LOC, MENU_TEMPLATE_RECIPE | {
+            "page_url_template": "https://www.swiggy.com/r/{restaurant_id}"}, tmp_path)
+    assert seen["open_site"] == []  # refused before any browser opens
+    out = food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path,
+                                 url="https://swiggy.com/restaurants/101")
+    assert len(out["dishes"]) == 5
 
 
 def test_search_with_no_results_is_not_drift(monkeypatch, tmp_path):

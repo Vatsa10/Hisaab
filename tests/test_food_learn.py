@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
+import agent
 import browser
 import food_learn
 import food_search
@@ -37,10 +38,16 @@ def cap(url, data, method="GET", body=None):
             "request_body": body, "sample": json.dumps(data)[:20000], "size": len(json.dumps(data)), "json": data}
 
 
-def fake_learn_env(monkeypatch, post_search=False, logged_out=False):
+def fake_learn_env(monkeypatch, post_search=False, logged_out=False, login_button=False):
     """Fake browser edges for learning and its replay. The probe page makes the site's search call (GET, or a POST
-    the read-only guard blocks until its regex is allowlisted); a restaurant page makes the menu call."""
-    seen = {"open_site": [], "goto": [], "fetch": [], "guards": []}
+    the read-only guard blocks until its regex is allowlisted); a restaurant page makes the menu call.
+    login_button: the page stays on the site but still shows a "Login" button (a logged-out profile)."""
+    seen = {"open_site": [], "goto": [], "fetch": [], "guards": [], "snapshots": 0}
+
+    def fake_snapshot(page):
+        seen["snapshots"] += 1
+        return {"elements": [{"text": "Login"}] if login_button else [{"text": "Search"}, {"text": "Account"}]}
+    monkeypatch.setattr(agent, "snapshot", fake_snapshot)
 
     @contextlib.contextmanager
     def fake_open(site, **k):
@@ -162,15 +169,16 @@ def test_learn_food_post_needs_approval(monkeypatch, tmp_path):
     asked = []
     with pytest.raises(sync.RecipeError, match="POST allowlist rejected"):
         food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm([]),
-                              approve=lambda e: asked.append(e) or False)
-    assert asked == [{"url_regex": POST_REGEX, "why": "restaurant search (read-only)"}]
+                              approve=lambda entries: asked.append(entries) or False)
+    # one call with the list of proposed entries (Task 4's approve(entries) -> bool)
+    assert asked == [[{"url_regex": POST_REGEX, "why": "restaurant search (read-only)"}]]
     assert seen["guards"][0].allowlist == []  # a rejected entry never joins the guard
 
     seen = fake_learn_env(monkeypatch, post_search=True)
     asked = []
     out = food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm([]),
-                                approve=lambda e: asked.append(e) or True)
-    assert len(asked) == 1
+                                approve=lambda entries: asked.append(entries) or True)
+    assert len(asked) == 1 and isinstance(asked[0], list)
     rest = out["restaurants"]
     assert rest["method"] == "POST" and rest["query_param"] == "query"
     assert rest["body"] == {"query": "pizza", "lat": 22.33, "lng": 73.15, "page": 1}
@@ -203,6 +211,21 @@ def test_learn_food_requires_logged_in_profile(monkeypatch, tmp_path):
     with pytest.raises(browser.SessionExpired):
         food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm(calls))
     assert calls == []
+
+
+def test_learn_food_refuses_profile_showing_login_button(monkeypatch, tmp_path):
+    seen = fake_learn_env(monkeypatch, login_button=True)
+    calls = []
+    with pytest.raises(browser.SessionExpired, match="Login"):
+        food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm(calls))
+    assert calls == [] and seen["snapshots"] == 1
+    assert not any("/search?" in u for u in seen["goto"])  # checked before the probe
+
+
+def test_learn_food_approve_must_be_exactly_true(monkeypatch, tmp_path):
+    fake_learn_env(monkeypatch, post_search=True)
+    with pytest.raises(sync.RecipeError, match="POST allowlist rejected"):
+        food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm([]), approve=lambda entries: "yes")
 
 
 def test_learn_food_fails_when_replay_finds_too_few_dishes(monkeypatch, tmp_path):
@@ -260,7 +283,7 @@ def test_check_food_recipe_rules():
             "fee_map": None, "read_post_allowlist": []}
     assert check(rest) is None and check(menu) is None
     assert check(menu | {"restaurant_param": None,
-                         "page_url_template": "https://www.zomato.com/r/{restaurant_id}"}) is None
+                         "page_url_template": "https://www.swiggy.com/r/{restaurant_id}"}) is None
     assert "location" in check(rest | {"location_inputs": []})
     assert "location" in check(rest | {"location_inputs": [{"in": "query", "name": "lat", "value": "lat"}]})
     assert "restaurant_param" in check(menu | {"restaurant_param": None, "page_url_template": None})
@@ -269,6 +292,10 @@ def test_check_food_recipe_rules():
     assert "blocklist" in check(rest | {"endpoint": "https://www.swiggy.com/dapi/cart/search"})
     assert "covered" in check(rest | {"method": "POST"})
     assert "broad" in check(rest | {"method": "POST", "read_post_allowlist": [{"url_regex": ".*", "why": ""}]})
+    # matches every path on the host except the bare root: caught by the https://{host}/x probe
+    assert "broad" in check(rest | {"method": "POST", "read_post_allowlist": [
+        {"url_regex": r"^https://www\.swiggy\.com/.+", "why": ""}]})
+    assert "host" in check(menu | {"page_url_template": "https://evil.example.com/r/{restaurant_id}"})
     assert "kind" in check(rest | {"kind": "search"})
     assert "dish_id" in check(menu | {"field_map": MENU_FM | {"dish_id": None}})
     assert "restaurant_id" in check(rest | {"field_map": REST_FM | {"restaurant_id": ""}})
@@ -277,3 +304,4 @@ def test_check_food_recipe_rules():
 def test_food_search_module_errors_are_the_learn_errors():
     # learning and replay raise the same classes the worker catches
     assert food_learn.SearchDrift is food_search.SearchDrift
+    assert food_learn.SearchTransient is food_search.SearchTransient

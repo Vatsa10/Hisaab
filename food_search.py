@@ -8,8 +8,13 @@ Two recipe kinds, both learned by an admin (food_learn) and only replayed here:
 Each call opens the caller's (the user's) Chrome profile with the read-only guard (never login mode, never a
 click), checks the session is still logged in, then tries the fast path (the request replayed from inside the
 page) and falls back to opening the page and reading the site's own captured response. Errors match the grocery
-search: SearchDrift when both paths fail, Unserviceable when the user's location cannot be served, and
-browser.SessionExpired for a logged-out session. Logs carry the site and counts only.
+search (Plan 5 Task 4):
+- SearchDrift only when a 2xx response is missing the recipe's path or cannot be parsed;
+- SearchTransient for transport errors, 429 and 5xx (and when no path produced a 2xx at all): retry later;
+- Unserviceable when the user's location cannot be served;
+- browser.SessionExpired for a logged-out session, from the replay or from the page's own 401/403.
+An empty menu or a closed restaurant is a result ({"is_open": False, "dishes": []}), never drift.
+Logs carry the site and counts only.
 """
 import inspect
 import json
@@ -33,14 +38,18 @@ CAPTURE_WAIT_MS = 8000
 CAPTURE_POLL_MS = 500
 
 
-# Same classes and meaning as the grocery search module's (Plan 5 Task 4, built in parallel). Once both are on
-# main these should become imports from search so the worker catches one set of classes.
+# Same names and meaning as the grocery search module's (Plan 5 Task 4, built in parallel). Controller ruling:
+# once both are on main these become `from search import ...` (a pure import swap), before Task 9.
 class SearchError(Exception):
     pass
 
 
 class SearchDrift(SearchError):
-    """The recipe no longer works: the fast path and the page capture both failed."""
+    """The recipe no longer works: a 2xx response is missing the recipe's path or cannot be parsed."""
+
+
+class SearchTransient(SearchError):
+    """A transport error, 429 or 5xx: the recipe may be fine, try again later."""
 
 
 class Unserviceable(SearchError):
@@ -48,6 +57,24 @@ class Unserviceable(SearchError):
 
 
 # --- path language: "*" fans out ---------------------------------------------
+
+def _parts(path) -> list[str]:
+    return re.sub(r"\[(-?\d+|\*)\]", r".\1", str(path)).split(".")
+
+
+def _step(nodes: list, part: str) -> list:
+    nxt = []
+    for n in nodes:
+        if part == "*":
+            nxt.extend(n if isinstance(n, list) else n.values() if isinstance(n, dict) else ())
+        elif isinstance(n, list) and part.lstrip("-").isdigit():
+            i = int(part)
+            if -len(n) <= i < len(n):
+                nxt.append(n[i])
+        elif isinstance(n, dict) and part in n:
+            nxt.append(n[part])
+    return [x for x in nxt if x is not None]
+
 
 def collect(data, path) -> list:
     """Every value at a dotted path, where "*" fans out over a list (or an id-keyed map). Missing branches are
@@ -57,21 +84,35 @@ def collect(data, path) -> list:
         return [] if data is None else [data]
     if isinstance(path, str) and path.startswith("="):
         return [path[1:]]
-    path = re.sub(r"\[(-?\d+|\*)\]", r".\1", str(path))
     nodes = [data]
-    for part in path.split("."):
-        nxt = []
-        for n in nodes:
-            if part == "*":
-                nxt.extend(n if isinstance(n, list) else n.values() if isinstance(n, dict) else ())
-            elif isinstance(n, list) and part.lstrip("-").isdigit():
-                i = int(part)
-                if -len(n) <= i < len(n):
-                    nxt.append(n[i])
-            elif isinstance(n, dict) and part in n:
-                nxt.append(n[part])
-        nodes = [x for x in nxt if x is not None]
+    for part in _parts(path):
+        nodes = _step(nodes, part)
     return nodes
+
+
+def path_exists(data, path) -> bool:
+    """Whether a collection path still matches the response's shape, even when the collection is empty: every
+    named step must be found somewhere, and a "*" over only empty containers ends the walk as a real empty
+    result. "data.cards.*.items.*" over cards=[] exists (no categories); over cards without "items" it does
+    not (the field map drifted)."""
+    if path is None or path == "":
+        return isinstance(data, (list, dict))
+    parts = _parts(path)
+    if parts[-1] == "*":
+        parts = parts[:-1]
+    nodes = [data]
+    for part in parts:
+        if part == "*":
+            if not any(isinstance(n, (list, dict)) for n in nodes):
+                return False
+            nodes = _step(nodes, part)
+            if not nodes:
+                return True
+        else:
+            nodes = _step(nodes, part)
+            if not nodes:
+                return False
+    return any(isinstance(n, (list, dict)) for n in nodes)
 
 
 def _rows(data, path) -> list[dict]:
@@ -250,10 +291,6 @@ def _param_where(req: dict) -> str:
     return "query" if req["method"] == "GET" or req["body"] is None else "body"
 
 
-def _needs_location(recipe: dict) -> bool:
-    return bool(recipe.get("location_inputs"))
-
-
 def build_request(recipe: dict, location: dict, param: str | None = None, value=None) -> dict:
     """The recipe's request with `value` bound at `param` (query string for GET, body path for POST) and the
     user's lat/lon bound at every location input."""
@@ -288,74 +325,129 @@ def _open(site: str, recipe: dict, profile_dir, location: dict, proxy_server, bl
     return browser.open_site(site, **kw)
 
 
+
+
 def _goto(page, url: str) -> None:
     browser.goto(page, url)
     sync.ensure_logged_in(page)
 
 
-def _wait_capture(page, capture, recipe: dict, mark: int) -> list[dict]:
-    """Successful responses of the recipe's endpoint seen since `mark`, waiting up to CAPTURE_WAIT_MS."""
+def own_page(site: str, url: str) -> str:
+    """The URL if it is an https page on the site's own host; ValueError otherwise (a listing or recipe URL
+    never sends the user's logged-in session anywhere else)."""
+    if urlsplit(url).scheme != "https" or not agent.site_allows_host(site, url):
+        raise ValueError(f"refusing a page that is not on {site}'s own site")
+    return url
+
+
+_HTTP_STATUS = re.compile(r"^HTTP (\d{3})\b")
+
+
+def _transient_status(status: int) -> bool:
+    return status == 429 or status >= 500
+
+
+def _fast(page, req: dict) -> tuple[str, object]:
+    """The fast path: ("ok", data); ("drift", None) for a 2xx that is not JSON; ("transient", None) for a
+    transport error, 429 or 5xx; ("failed", None) for any other HTTP error. A logout propagates."""
+    try:
+        return "ok", browser.fetch_in_page(page, req)
+    except browser.SessionExpired:
+        raise
+    except json.JSONDecodeError:
+        log.info("fast path: unparseable response")
+        return "drift", None
+    except Exception as e:
+        m = _HTTP_STATUS.match(str(e)) if isinstance(e, RuntimeError) else None
+        log.info("fast path failed: %s", f"HTTP {m[1]}" if m else type(e).__name__)
+        return ("failed" if m and not _transient_status(int(m[1])) else "transient"), None
+
+
+def _same_endpoint(c: dict, recipe: dict) -> bool:
+    """agent._same_endpoint without the 2xx filter of agent.captured_for: the fallback also has to see the
+    endpoint's 401/403 (logout) and 429/5xx (transient) answers."""
+    a, b = urlsplit(c["url"]), urlsplit(recipe["endpoint"])
+    if (a.netloc, a.path) != (b.netloc, b.path) or c["method"].upper() != recipe.get("method", "GET").upper():
+        return False
+    op = (recipe.get("body") or {}).get("operationName") if isinstance(recipe.get("body"), dict) else None
+    return not op or op in (c.get("request_body") or "")
+
+
+def _page_capture(page, capture, recipe: dict, url: str | None) -> tuple[list[dict], str | None]:
+    """Open the page and wait up to CAPTURE_WAIT_MS for the site's own call to the recipe's endpoint. Returns
+    (its 2xx responses, "transient" when the page failed to load or the endpoint answered 429/5xx). The
+    endpoint answering 401/403 is a logout: browser.SessionExpired."""
+    if not url:
+        return [], None
+    mark = len(capture.items)
+    try:
+        browser.goto(page, url)
+    except browser.SessionExpired:
+        raise
+    except Exception as e:
+        log.info("page fallback: navigation failed (%s)", type(e).__name__)
+        return [], "transient"
+    sync.ensure_logged_in(page)
     waited = 0
     while True:
-        hits = agent.captured_for(recipe, capture.items[mark:])
-        if hits or waited >= CAPTURE_WAIT_MS:
-            return hits
+        seen = [c for c in capture.items[mark:] if _same_endpoint(c, recipe)]
+        if denied := [c for c in seen if c["status"] in (401, 403)]:
+            raise browser.SessionExpired(f"HTTP {denied[0]['status']}")
+        ok = [c for c in seen if 200 <= c["status"] < 300]
+        if ok:
+            return ok, None
+        if waited >= CAPTURE_WAIT_MS:
+            return [], "transient" if any(_transient_status(c["status"]) for c in seen) else None
         page.wait_for_timeout(CAPTURE_POLL_MS)
         waited += CAPTURE_POLL_MS
 
 
-def _page_capture(page, capture, recipe: dict, url: str | None) -> list[dict]:
-    if not url:
-        return []
-    mark = len(capture.items)
-    _goto(page, url)
-    return _wait_capture(page, capture, recipe, mark)
-
-
-def _fast(page, req: dict):
-    """The fast path's response, or None when it failed for any reason other than a logout."""
-    try:
-        return browser.fetch_in_page(page, req)
-    except browser.SessionExpired:
-        raise
-    except Exception as e:
-        log.info("fast path failed: %s", type(e).__name__)
-        return None
+def _fail(site: str, what: str, evidence: set[str]):
+    """Drift needs evidence (a 2xx without the path, or unparseable); anything else is worth retrying."""
+    if "drift" in evidence:
+        raise SearchDrift(f"{site} {what}: the response no longer matches the recipe")
+    raise SearchTransient(f"{site} {what}: no usable response (retry later)")
 
 
 def _absolute(url: str | None, base: str) -> str | None:
     return urljoin(base, url) if url else None
 
 
+def _check_location(recipe: dict, location: dict | None) -> None:
+    loc = location or {}
+    if recipe.get("location_inputs") and (loc.get("lat") is None or loc.get("lon") is None):
+        raise Unserviceable("no delivery location saved")
+
+
 # --- replay ------------------------------------------------------------------
-
-def _has_rows_path(data, path) -> bool:
-    """The restaurant list's path exists (an empty list is a real "no results", not drift)."""
-    if not path:
-        return isinstance(data, list)
-    return bool(collect(data, re.sub(r"\.\*$", "", str(path))))
-
 
 def search_restaurants(site: str, query: str, location: dict, recipe: dict, profile_dir, proxy_server=None,
                        block_media=True, max_results=20) -> dict:
-    """{"restaurants": [listing rows, url absolute], "fee_info": {...}} for one query at the user's location."""
+    """{"restaurants": [listing rows, url absolute], "fee_info": {...}} for one query at the user's location.
+    No results is an empty list, not drift."""
     if site not in FOOD_SITES:
         raise ValueError(f"not a food site: {site}")
-    if _needs_location(recipe) and ((location or {}).get("lat") is None or (location or {}).get("lon") is None):
-        raise Unserviceable("no delivery location saved")
+    _check_location(recipe, location)
     fm = recipe["field_map"]
+    rows_path = fm.get("restaurants_path")
+    page_url = food_page_url(site, query, location, recipe.get("search_page_url"))
+    if page_url:
+        own_page(site, page_url)
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         home = browser.home_url(site, location)
         _goto(page, home)
-        data = _fast(page, build_request(recipe, location, recipe.get("query_param"), query))
-        fast = data is not None and _has_rows_path(data, fm.get("restaurants_path"))
+        evidence: set[str] = set()
+        kind, data = _fast(page, build_request(recipe, location, recipe.get("query_param"), query))
+        fast = kind == "ok" and path_exists(data, rows_path)
         if not fast:
-            page_url = food_page_url(site, query, location, recipe.get("search_page_url"))
-            hits = [h for h in _page_capture(page, capture, recipe, page_url)
-                    if _has_rows_path(h["json"], fm.get("restaurants_path"))]
-            if not hits:
-                raise SearchDrift(f"{site} restaurant search: fast path and page capture both failed")
-            data = hits[-1]["json"]
+            evidence.add("drift" if kind == "ok" else kind)
+            hits, trouble = _page_capture(page, capture, recipe, page_url)
+            good = [h for h in hits if path_exists(h["json"], rows_path)]
+            if not good:
+                evidence |= {"drift"} if hits else set()
+                evidence |= {trouble} if trouble else set()
+                _fail(site, "restaurant search", evidence)
+            data = good[-1]["json"]
         base = recipe.get("search_page_url") or home
         rows = extract_restaurants(data, fm)[:max_results]
         for r in rows:
@@ -372,31 +464,48 @@ def menu_page_url(recipe: dict, restaurant_id: str, url: str | None = None) -> s
     return template.replace("{restaurant_id}", quote(str(restaurant_id), safe="")) if template else None
 
 
+def menu_result(data, field_map: dict) -> dict | None:
+    """The menu in a 2xx response, or None when the field map no longer fits it (drift). A closed restaurant
+    keeps its dishes with is_open False; an empty menu is {"is_open": False, "dishes": []}."""
+    menu = extract_menu(data, field_map)
+    if menu["dishes"]:
+        return menu
+    if menu["is_open"] is False or path_exists(data, field_map.get("dishes_path")):
+        return {"is_open": False, "dishes": []}
+    return None
+
+
 def fetch_menu(site: str, restaurant_id: str, location: dict, recipe: dict, profile_dir, proxy_server=None,
                url=None, block_media=True) -> dict:
-    """{"is_open", "dishes", "fee_info"} for one restaurant. `url` (the listing's page) wins over the template."""
+    """{"is_open", "dishes", "fee_info"} for one restaurant. `url` (the listing's page) wins over the template;
+    either must be on the site's own host."""
     if site not in FOOD_SITES:
         raise ValueError(f"not a food site: {site}")
-    if _needs_location(recipe) and ((location or {}).get("lat") is None or (location or {}).get("lon") is None):
-        raise Unserviceable("no delivery location saved")
+    _check_location(recipe, location)
+    page_url = menu_page_url(recipe, restaurant_id, url)
+    if page_url:
+        own_page(site, page_url)
     fm = recipe["field_map"]
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         _goto(page, browser.home_url(site, location))
-        menu, data, fast = None, None, False
+        evidence: set[str] = set()
+        menu, data = None, None
         if recipe.get("restaurant_param"):
-            data = _fast(page, build_request(recipe, location, recipe["restaurant_param"], str(restaurant_id)))
-            if data is not None:
-                menu = extract_menu(data, fm)
-                fast = bool(menu["dishes"])
+            kind, data = _fast(page, build_request(recipe, location, recipe["restaurant_param"], str(restaurant_id)))
+            menu = menu_result(data, fm) if kind == "ok" else None
+            if menu is None:
+                evidence.add("drift" if kind == "ok" else kind)
+        fast = menu is not None
         if not fast:
-            menu = None
-            for h in reversed(_page_capture(page, capture, recipe, menu_page_url(recipe, restaurant_id, url))):
-                m = extract_menu(h["json"], fm)
-                if m["dishes"]:
+            hits, trouble = _page_capture(page, capture, recipe, page_url)
+            for h in reversed(hits):
+                if (m := menu_result(h["json"], fm)) is not None:
                     menu, data = m, h["json"]
                     break
             if menu is None:
-                raise SearchDrift(f"{site} menu: fast path and page capture both failed")
+                evidence |= {"drift"} if hits else set()
+                evidence |= {trouble} if trouble else set()
+                _fail(site, "menu", evidence)
         fee_info = extract_fee_info(data, recipe.get("fee_map"))
-    log.info("%s menu: %d dishes (fast path %s)", site, len(menu["dishes"]), fast)
+    log.info("%s menu: %d dishes, open %s (fast path %s)", site, len(menu["dishes"]), menu["is_open"], fast)
     return {"is_open": menu["is_open"], "dishes": menu["dishes"], "fee_info": fee_info}

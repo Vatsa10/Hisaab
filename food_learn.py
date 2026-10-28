@@ -17,12 +17,13 @@ import re
 from collections.abc import Callable, Iterable
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
+import agent
 import browser
 import food_search
 import guard as guard_mod
 import recipes
 import sync
-from food_search import FOOD_PAGES, FOOD_SITES, RESTAURANT_PROBE, SearchDrift, SearchError, Unserviceable  # noqa: F401
+from food_search import FOOD_PAGES, FOOD_SITES, RESTAURANT_PROBE, SearchDrift, SearchError, SearchTransient, Unserviceable  # noqa: F401
 
 log = logging.getLogger("food_learn")
 
@@ -61,7 +62,7 @@ def _check_common(recipe: dict) -> str | None:
             rx = re.compile(e["url_regex"])
         except (re.error, KeyError, TypeError):
             return f"bad allowlist entry {e}"
-        if rx.search(f"https://{host}/") or rx.search("https://example.com/x"):
+        if rx.search(f"https://{host}/") or rx.search(f"https://{host}/x") or rx.search("https://example.com/x"):
             return f"allowlist regex too broad: {e['url_regex']}"
     if recipe["method"].upper() == "POST" and not any(
             re.search(e["url_regex"], recipe["endpoint"]) for e in recipe.get("read_post_allowlist") or []):
@@ -101,6 +102,10 @@ def check_food_recipe(recipe: dict) -> str | None:
             return "page_url_template must contain {restaurant_id}"
         if guard_mod.BLOCKED_URL.search(urlsplit(template).path):
             return "page_url_template matches the blocklist"
+        site = recipe.get("site")
+        if urlsplit(template).scheme != "https" or (site in browser.SITES and not agent.site_allows_host(
+                site, template.replace("{restaurant_id}", "1"))):
+            return "page_url_template is not on the site's own host"
     return None
 
 
@@ -193,7 +198,7 @@ def _preapproved_entries(preapproved: Iterable) -> list[dict]:
 
 def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approve, preapproved: set[str]) -> None:
     """A POST the guard blocked that carries `needle` becomes a narrow allowlist entry, but only once it is
-    preapproved or `approve(entry)` returns True; then the page is reloaded so the site makes the call again."""
+    preapproved or `approve(entries)` returns True; then the page is reloaded so the site makes the call again."""
     new = []
     for b in guard.blocked:
         if b.get("method") != "POST" or b.get("reason") not in (None, "POST not allowlisted"):
@@ -206,9 +211,10 @@ def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approv
         if any(e["url_regex"] == entry["url_regex"] for e in [*guard.allowlist, *new]):
             continue
         new.append(entry)
-    for e in new:
-        if e["url_regex"] not in preapproved and not (approve is not None and approve(dict(e)) is True):
-            raise sync.RecipeError("POST allowlist rejected")
+    ask = [dict(e) for e in new if e["url_regex"] not in preapproved]
+    # Task 4's contract: approve(list_of_entries) -> bool, once, and only an exact True allows them
+    if ask and not (approve is not None and approve(ask) is True):
+        raise sync.RecipeError("POST allowlist rejected")
     if new:
         guard.allowlist.extend(new)
         log.info("allowlisted %d read POST(s) after approval; reloading", len(new))
@@ -511,6 +517,8 @@ def learn_food(site: str, location: dict, profile_dir, proxy_server=None, approv
           "proxy_server": proxy_server}
     with browser.open_site(site, **kw) as (_ctx, page, guard, capture):
         _visit(page, browser.home_url(site, location))
+        if agent.shows_login_button(agent.snapshot(page)["elements"]):
+            raise browser.SessionExpired("the admin profile still shows a Login button")
         rest, rows = _learn_restaurants(site, location, page, guard, capture, approve, pre, llm)
         openable = [r for r in rows if r["is_open"] is not False and r["url"]]
         if len(openable) < 2:
