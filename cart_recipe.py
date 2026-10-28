@@ -271,6 +271,14 @@ def check_cart_recipe(recipe: dict, site: str) -> str | None:
         if err := site_error(e.get("url_regex") or "", site, samples):
             return err
 
+    read_method = (read.get("method") or "GET").upper()
+    if read_method != "GET" and decide_cart(read_method, read["url"], False, _body_text(read.get("body")),
+                                            policy_for(recipe)) != (True, "read POST"):
+        # A POST read must decide as a read: never the add (or a location write) replayed on every fill.
+        return "cart read is not a read POST"
+    if read["url"] == add["url"] and read_method == (add.get("method") or "POST").upper():
+        return "cart read is the add request"
+
     current = recipe["location"].get("current")
     if not current or not (current.get("store_id_path") or (current.get("lat_path") and current.get("lon_path"))):
         return "cart recipe can't read the app's location"

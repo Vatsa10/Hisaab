@@ -311,14 +311,14 @@ def test_check_rejects_other_site_host():
         "allowlist entry for another site"
     # a subdomain of the site is the site
     sub = {"url_regex": r"^https://api\.zepto\.com/v1/cart/view$", "why": "x"}
-    assert cart_recipe.check_cart_recipe(recipe(read_post_allowlist=[sub]), "zepto") is None
+    assert cart_recipe.check_cart_recipe(recipe(read_post_allowlist=[READ_ENTRY, sub]), "zepto") is None
 
 
 def test_fake_host_only_with_worker_fake(monkeypatch):
     fake = recipe(home_url="https://fake.zepto.test/", add__url="https://fake.zepto.test/api/cart/add",
                   cart_allowlist=[{"url_regex": r"^https://fake\.zepto\.test/api/cart/add$", "why": "x", "op": "cart",
                                    "qty_path": "item.quantity"}],
-                  location__select=None, location_allowlist=[], read_post_allowlist=[])
+                  location__select=None, location_allowlist=[], read_post_allowlist=[], read__method="GET")
     assert cart_recipe.check_cart_recipe(fake, "zepto") == "allowlist entry for another site"
     monkeypatch.setenv("WORKER_FAKE", "1")
     assert cart_recipe.check_cart_recipe(fake, "zepto") is None

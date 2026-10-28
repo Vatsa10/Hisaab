@@ -26,15 +26,16 @@ class FakeSite:
     """A scripted page: clicks and navigations send requests through the real cart-guard decision."""
 
     def __init__(self, qty_step=2, add_body=None, elements=None, read_method="GET", loc_post=True,
-                 current=True):
+                 current=True, add_returns_cart=False, separate_read=True):
+        self.add_returns_cart, self.separate_read = add_returns_cart, separate_read
         self.qty = 0
         self.qty_step = qty_step  # what "+" sends: 2 (absolute) or 1 (increment)
         self.add_body = add_body
         self.read_method = read_method
         self.loc_post, self.current = loc_post, current
         self.elements = elements or [
-            {"ref": "e1", "tag": "button", "text": "ADD"},
-            {"ref": "e2", "tag": "button", "text": "+"},
+            {"ref": "e1", "tag": "button", "text": "ADD", "row": "Amul Milk"},
+            {"ref": "e2", "tag": "button", "text": "+", "row": "Amul Milk"},
         ]
         self.clicked: list[str] = []
         self.policies: list[CartPolicy] = []
@@ -79,11 +80,14 @@ class FakeSite:
         else:
             value = self.qty_step if self.qty_step != 2 else self.qty + 1
         body = self.add_body(value) if self.add_body else {"product_id": "P1", "quantity": value, "store_id": "S1"}
-        if self.send("POST", HOST + "/api/cart/add", body):
-            self.qty = value if self.qty_step == 2 else self.qty + value
-            cart = {"cart": {"items": [{"id": "P1", "name": "Amul Milk", "qty": self.qty, "price": 30}],
-                             "subtotal": 30 * self.qty, "total": 30 * self.qty + 15}}
-            if self.read_method == "GET":
+        qty = value if self.qty_step == 2 else self.qty + value
+        cart = {"cart": {"items": [{"id": "P1", "name": "Amul Milk", "qty": qty, "price": 30}],
+                         "subtotal": 30 * qty, "total": 30 * qty + 15}}
+        if self.send("POST", HOST + "/api/cart/add", body, resp=cart if self.add_returns_cart else None):
+            self.qty = qty
+            if not self.separate_read:
+                pass
+            elif self.read_method == "GET":
                 self.send("GET", HOST + "/api/cart", resp=cart)
             else:
                 self.send("POST", HOST + "/api/cart/view", {"v": 1}, resp=cart)
@@ -130,6 +134,7 @@ def install(monkeypatch, s):
     monkeypatch.setattr(cart_learn, "_products", lambda items, recipe: [("P1", "Amul Milk")])
     monkeypatch.setattr(cart_learn, "_store_id", lambda page, recipe, location: "S1")
     monkeypatch.setattr(cart_learn, "_location_inputs", fake_location_inputs)
+    monkeypatch.setattr(cart_learn, "_in_row", lambda page, el, name, others: el.get("row") == name)
 
 
 def good_llm(calls=None):
@@ -200,7 +205,16 @@ def test_preapproved_entries_not_asked_again(site):
     out = learn(approve=lambda entries: asked.append(entries) or True, preapproved=pre)
     assert asked == []
     assert out["recipe"]["cart_allowlist"][0]["url_regex"] == pre[1]["url_regex"]
-    assert site.policies[0].cart[0]["url_regex"] == pre[1]["url_regex"]
+    assert site.policies[0].cart == ()  # added through guard.allow's checks, not slipped into the policy
+    assert site.guard.policy.cart[0]["url_regex"] == pre[1]["url_regex"]
+
+
+def test_preapproved_entries_pass_guard_checks(site):
+    for bad in ({"url_regex": r"^https://evil\.example/api/cart/add$", "why": "x", "op": "cart"},
+                {"url_regex": r"^https://www\.zepto\.com/.*$", "why": "x", "op": "read"}):
+        with pytest.raises(RecipeError, match="preapproved"):
+            learn(preapproved=[bad])
+    assert site.clicked == []
 
 
 def test_read_post_needs_approval(monkeypatch):
@@ -239,12 +253,25 @@ def test_odd_quantity_rejects_recipe(monkeypatch):
 def test_learner_never_clicks_refused_elements(monkeypatch):
     s = FakeSite(elements=[{"ref": "c", "tag": "button", "text": "Proceed to Checkout"},
                            {"ref": "r", "tag": "button", "text": "Remove"},
-                           {"ref": "m", "tag": "button", "text": "-"},
-                           {"ref": "e1", "tag": "button", "text": "ADD"},
-                           {"ref": "e2", "tag": "button", "text": "+"}])
+                           {"ref": "m", "tag": "button", "text": "-", "row": "Amul Milk"},
+                           {"ref": "o1", "tag": "button", "text": "ADD", "row": "Nandini Milk"},
+                           {"ref": "o2", "tag": "button", "text": "+", "row": "Nandini Milk"},
+                           {"ref": "e1", "tag": "button", "text": "ADD", "row": "Amul Milk"},
+                           {"ref": "e2", "tag": "button", "text": "+", "row": "Amul Milk"}])
     install(monkeypatch, s)
+    monkeypatch.setattr(cart_learn, "_products", lambda items, recipe: [("P1", "Amul Milk"), ("P2", "Nandini Milk")])
     learn()
-    assert s.clicked == ["ADD", "ADD", "+"]
+    clicked_refs = s.clicked
+    assert clicked_refs == ["ADD", "ADD", "+"]
+
+
+def test_plus_only_in_the_probe_row(monkeypatch):
+    s = FakeSite(elements=[{"ref": "e1", "tag": "button", "text": "ADD", "row": "Amul Milk"},
+                           {"ref": "o2", "tag": "button", "text": "+", "row": "Nandini Milk"}])
+    install(monkeypatch, s)
+    with pytest.raises(RecipeError, match=r"no \+ button"):
+        learn()
+    assert s.clicked == ["ADD", "ADD"]
 
 
 def test_no_add_button(monkeypatch):
@@ -257,9 +284,12 @@ def test_no_add_button(monkeypatch):
 
 def test_agent_uses_cart_click_policy():
     a = cart_learn.CartLearnAgent("zepto", None, None, None, prompt=cart_learn._no_prompt, query="Home")
-    for el in ({"text": "Proceed to Checkout", "tag": "button"}, {"text": "Add to cart", "tag": "button",
-                                                                    "type": "submit"}, {"text": "Remove"}):
+    for el in ({"text": "Proceed to Checkout", "tag": "button"}, {"text": "Remove"},
+               {"text": "Use current location", "tag": "button"}):
         assert a.refuse_click(el) == agent.cart_click_refusal(el)
+    for el in ({"text": "Add to cart", "tag": "button", "type": "submit"}, {"text": "ADD"}, {"text": "+"},
+               {"text": "", "label": "add"}):
+        assert a.refuse_click(el)  # the location agent never adds to the cart
     assert a.GOAL.startswith("Open the delivery-location picker") and "Home" in a.GOAL
     assert "Never add, edit, save or delete an address" in a.GOAL
     assert a.MAX_STEPS == 15
@@ -337,16 +367,64 @@ def test_read_field_map_gives_up_after_3(site):
 
 # --- helpers -------------------------------------------------------------------------------------
 
+NOT_LISTED = cart_learn.PROPOSABLE
+
+
 def test_propose_dedupes_and_anchors():
-    blocked = [{"method": "POST", "url": HOST + "/api/cart/add?x=1", "body": '{"product_id":"P1"}'},
-               {"method": "POST", "url": HOST + "/api/cart/add?x=2", "body": '{"product_id":"P1"}'},
-               {"method": "POST", "url": HOST + "/api/track", "body": '{"e":"view"}'},
-               {"method": "GET", "url": HOST + "/api/P1", "body": ""},
-               {"method": "POST", "url": HOST + "/gql", "body": '{"query":"mutation AddItem { add(id:\\"P1\\") }"}'}]
+    blocked = [{"method": "POST", "url": HOST + "/api/cart/add?x=1", "body": '{"product_id":"P1"}',
+                "reason": NOT_LISTED},
+               {"method": "POST", "url": HOST + "/api/cart/add?x=2", "body": '{"product_id":"P1"}',
+                "reason": NOT_LISTED},
+               {"method": "POST", "url": HOST + "/api/track", "body": '{"e":"view"}', "reason": NOT_LISTED},
+               {"method": "GET", "url": HOST + "/api/P1", "body": "", "reason": NOT_LISTED},
+               {"method": "POST", "url": HOST + "/api/cart/remove", "body": '{"product_id":"P1"}',
+                "reason": "forbidden: cart removal"},
+               {"method": "POST", "url": HOST + "/api/x", "body": '{"product_id":"P1"}', "reason": "binary body"},
+               {"method": "POST", "url": HOST + "/gql", "body": '{"query":"mutation AddItem { add(id:\\"P1\\") }"}',
+                "reason": NOT_LISTED}]
     out = cart_learn.propose(blocked, ["P1"], "cart", "add to cart")
-    assert out == [{"url_regex": r"^https://www\.zepto\.com/api/cart/add$", "why": "add to cart", "op": "cart"},
-                   {"url_regex": r"^https://www\.zepto\.com/gql$", "why": "add to cart", "op": "cart",
+    label = cart_learn.OP_LABELS["cart"] + ": add to cart"
+    assert out == [{"url_regex": r"^https://www\.zepto\.com/api/cart/add$", "why": label, "op": "cart"},
+                   {"url_regex": r"^https://www\.zepto\.com/gql$", "why": label, "op": "cart",
                     "operation": "AddItem"}]
+
+
+def test_propose_never_offers_writes_as_reads():
+    blocked = [{"method": "POST", "url": HOST + "/gql", "reason": NOT_LISTED,
+                "body": '{"query":"mutation UpdateCart { cart(qty: 2) }"}'},
+               {"method": "POST", "url": HOST + "/api/cart/view", "reason": NOT_LISTED, "body": '{"v":1}'}]
+    out = cart_learn.propose(blocked, ["cart"], "read", "read the cart")
+    assert [e["url_regex"] for e in out] == [r"^https://www\.zepto\.com/api/cart/view$"]
+    assert out[0]["why"].startswith("READ")
+
+
+# --- the read is never the add -------------------------------------------------------------------
+
+def test_add_response_with_whole_cart_is_not_the_read(monkeypatch):
+    """The reviewer's probe: "+" answered with the whole cart and no separate read must not save the add as read."""
+    s = FakeSite(add_returns_cart=True, separate_read=False)
+    install(monkeypatch, s)
+    with pytest.raises(RecipeError, match="couldn't find the cart response"):
+        learn()
+
+
+def test_add_response_with_whole_cart_and_separate_read(monkeypatch):
+    s = FakeSite(add_returns_cart=True)
+    install(monkeypatch, s)
+    r = learn()["recipe"]
+    assert (r["read"]["method"], r["read"]["url"]) == ("GET", HOST + "/api/cart")
+    assert r["read"]["url"] != r["add"]["url"]
+
+
+def test_check_cart_recipe_refuses_add_as_read(site):
+    r = learn()["recipe"]
+    as_add = dict(r, read=dict(r["read"], method="POST", url=r["add"]["url"], body=r["add"]["body"]))
+    assert cart_recipe.check_cart_recipe(as_add, "zepto") == "cart read is not a read POST"
+    # even listed as a read entry, the cart entry decides first: still not a read
+    listed = dict(as_add, read_post_allowlist=[{"url_regex": r["cart_allowlist"][0]["url_regex"], "why": "r"}])
+    assert cart_recipe.check_cart_recipe(listed, "zepto") == "cart read is not a read POST"
+    unlisted = dict(r, read=dict(r["read"], method="POST", url=HOST + "/api/cart/view", body={"v": 1}))
+    assert cart_recipe.check_cart_recipe(unlisted, "zepto") == "cart read is not a read POST"
 
 
 def test_find_value_path():

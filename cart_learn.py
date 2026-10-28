@@ -33,6 +33,10 @@ FIELD_TRIES = 3
 CURRENT_NEAR_DEG = 0.001
 DROP_HEADERS = ("sec-", ":", "content-length", "host", "accept-encoding", "user-agent", "referer", "origin", "cookie")
 LLM = Callable[[str], dict | str]
+# The only block reason a learner may turn into an allowlist proposal: forbidden or non-POST writes never are.
+PROPOSABLE = "POST not on cart allowlist"
+OP_LABELS = {"cart": "CART WRITE (adds to the cart)", "location": "LOCATION SELECT (picks an existing location)",
+             "read": "READ (must not change anything)"}
 
 
 def _no_prompt(text: str, kind: str = "question") -> str:
@@ -97,6 +101,9 @@ class CartLearnAgent(agent.Discovery):
         self.steps = 0
 
     def refuse_click(self, el: dict) -> str | None:
+        """Cart click policy, and the location agent never adds: Add / "+" are the learner's own clicks."""
+        if any(ADD_BUTTON.match(str(el.get(k) or "")) for k in ("text", "label")):
+            return "adding to the cart is not part of setting the location"
         return agent.cart_click_refusal(el)
 
     def observe(self) -> None:
@@ -141,21 +148,27 @@ def find_value_path(data, predicate: Callable[[object], bool], path: str = "") -
 
 
 def _entry(url: str, why: str, op: str, body: str | None = None) -> dict:
+    """An anchored entry; `why` starts with the decided op so the admin sees what approving allows."""
     u = urlsplit(url)
-    e = {"url_regex": f"^https://{re.escape(u.netloc)}{re.escape(u.path)}$", "why": why, "op": op}
+    e = {"url_regex": f"^https://{re.escape(u.netloc)}{re.escape(u.path)}$", "why": f"{OP_LABELS[op]}: {why}",
+         "op": op}
     if body and MUTATION.search(body) and (name := operation_name(body)):
         e["operation"] = name
     return e
 
 
 def propose(blocked: list[dict], needles: Iterable[str], op: str, why: str) -> list[dict]:
-    """Allowlist entries for the blocked POSTs whose URL or body carries a needle, anchored and deduplicated."""
+    """Allowlist entries for the blocked POSTs whose URL or body carries a needle, anchored and deduplicated.
+    Only POSTs blocked for not being listed are proposed: a forbidden or non-POST block is never offered, and a
+    write (mutation) body is never offered as a read."""
     needles = [str(n) for n in needles if str(n)]
     out = []
     for b in blocked:
-        if (b.get("method") or "").upper() != "POST":
+        if (b.get("method") or "").upper() != "POST" or b.get("reason") != PROPOSABLE:
             continue
         body = b.get("body") or ""
+        if op == "read" and MUTATION.search(body):
+            continue
         if not any(n in b["url"] or n in body for n in needles):
             continue
         e = _entry(b["url"], why, op, body)
@@ -255,17 +268,37 @@ def _near(target: float) -> Callable[[object], bool]:
     return pred
 
 
-def _clickable(page, pattern: re.Pattern) -> dict | None:
-    """The first element matching pattern that the cart click policy allows."""
+_ROW_JS = """(el, [name, others]) => {
+  let n = el;
+  for (let i = 0; i < 8 && n; i++, n = n.parentElement) {
+    const t = (n.innerText || '').toLowerCase();
+    if (others.some(o => o && t.includes(o))) return false;
+    if (t.includes(name)) return true;
+  }
+  return false;
+}"""
+
+
+def _in_row(page, el: dict, name: str, others: list[str]) -> bool:
+    """The element sits in the probe product's own row: its nearest ancestor naming a product names the probe."""
+    try:
+        return bool(agent.locate(page, el["ref"]).evaluate(
+            _ROW_JS, [name.lower(), [o.lower() for o in others if o and o.lower() != name.lower()]]))
+    except Exception:
+        return False
+
+
+def _clickable(page, pattern: re.Pattern, row: tuple[str, list[str]] | None = None) -> dict | None:
+    """The first element matching pattern that the cart click policy allows (in the probe's row, when given)."""
     for el in agent.snapshot(page)["elements"]:
         text = (el.get("text") or el.get("label") or "")
-        if pattern.match(text) and agent.cart_click_refusal(el) is None:
+        if pattern.match(text) and agent.cart_click_refusal(el) is None and (row is None or _in_row(page, el, *row)):
             return el
     return None
 
 
-def _click(page, pattern: re.Pattern) -> bool:
-    el = _clickable(page, pattern)
+def _click(page, pattern: re.Pattern, row: tuple[str, list[str]] | None = None) -> bool:
+    el = _clickable(page, pattern, row)
     if el is None:
         return False
     agent.click_ref(page, el["ref"])
@@ -374,9 +407,11 @@ def _add_requests(items: list[dict], guard, ids: list[str]) -> list[dict]:
             and any(i in c["url"] or i in (c.get("request_body") or "") for i in ids)]
 
 
-def _learn_add(page, guard, capture, ids: list[str], store_id, approve) -> tuple[dict, str]:
+def _learn_add(page, guard, capture, products: list[tuple[str, str]], store_id, approve) -> tuple[dict, str]:
+    ids = [p[0] for p in products]
+    row = (products[0][1], [n for _, n in products[1:]])  # every click targets the probe product's row only
     guard.blocked.clear()
-    if not _click(page, ADD_BUTTON):
+    if not _click(page, ADD_BUTTON, row):
         raise RecipeError("no Add button found")
     entries = propose(guard.blocked, ids, "cart", "add the planned product to the cart")
     if not entries and not _add_requests(capture.items, guard, ids):
@@ -384,11 +419,11 @@ def _learn_add(page, guard, capture, ids: list[str], store_id, approve) -> tuple
     _ask(guard, "cart", entries, approve, "cart permission rejected")
     start = len(capture.items)
     if entries:  # the first click was blocked: add again, now allowed
-        if not _click(page, ADD_BUTTON):
+        if not _click(page, ADD_BUTTON, row):
             raise RecipeError("no Add button found")
     else:
         start = 0
-    if not _click(page, PLUS_BUTTON):
+    if not _click(page, PLUS_BUTTON, row):
         raise RecipeError("no + button found after adding")
     adds = _add_requests(capture.items[start:], guard, ids)
     if len(adds) < 2:
@@ -480,13 +515,24 @@ def _read_field_map(site: str, c: dict, pid: str, llm: LLM) -> tuple[dict, str |
     raise RecipeError(f"could not map the {site} cart response: {err}")
 
 
-def _learn_read(page, guard, capture, pid: str, approve, home: str) -> dict:
+def _is_write(c: dict, guard, add: dict) -> bool:
+    """A captured request that is (or may be) the add or a location select: never usable as the cart read."""
+    url = c["url"]
+    if _allowed(url, guard.policy.cart) or _allowed(url, guard.policy.location):
+        return True
+    return (c["method"].upper() == add["method"].upper()
+            and urlsplit(url)._replace(query="") == urlsplit(add["url"])._replace(query=""))
+
+
+def _learn_read(page, guard, capture, pid: str, approve, home: str, add: dict) -> dict:
     def latest():
-        return next((c for c in reversed(capture.items) if _ok(c) and _holds_line(c["json"], pid, 2)), None)
+        return next((c for c in reversed(capture.items)
+                     if _ok(c) and not _is_write(c, guard, add) and _holds_line(c["json"], pid, 2)), None)
     c = latest()
     if c is None:
-        reads = [b for b in guard.blocked if not _allowed(b["url"], guard.policy.cart)]
-        entries = propose(reads, ["cart"], "read", "read the cart (read-only)")
+        reads = [b for b in guard.blocked
+                 if not (_allowed(b["url"], guard.policy.cart) or _allowed(b["url"], guard.policy.location))]
+        entries = propose(reads, ["cart"], "read", "read the cart")
         if not entries:
             raise RecipeError("couldn't find the cart response")
         _ask(guard, "read", entries, approve, "cart read permission rejected")
@@ -495,7 +541,7 @@ def _learn_read(page, guard, capture, pid: str, approve, home: str) -> dict:
         if (c := latest()) is None:
             raise RecipeError("couldn't find the cart response")
     if c["method"].upper() == "POST":
-        _ask(guard, "read", [_entry(c["url"], "read the cart (read-only)", "read", c.get("request_body"))], approve,
+        _ask(guard, "read", [_entry(c["url"], "read the cart", "read", c.get("request_body"))], approve,
              "cart read permission rejected")
     return c
 
@@ -517,12 +563,18 @@ def learn_cart(site: str, profile_dir, location: dict, search_recipe: dict, appr
     if not search_recipe or not search_recipe.get("field_map"):
         raise RecipeError("learn the site's search recipe first")
     llm = llm or _default_llm
-    pre = {op: tuple(dict(e) for e in preapproved if e.get("op") == op) for op in ("cart", "location", "read")}
+    pre = {op: [dict(e) for e in preapproved if e.get("op") == op] for op in ("cart", "location", "read")}
     search_read = tuple(dict(e) for e in search_recipe.get("read_post_allowlist") or ())
-    policy = CartPolicy(cart=pre["cart"], location=pre["location"], read=pre["read"] + search_read)
+    policy = CartPolicy(read=search_read)
     home = search_recipe.get("home_url") or browser.home_url(site, location)
     with browser.open_site(site, profile_dir=profile_dir, location=location, proxy_server=proxy_server,
                            cart_policy=policy) as (_, page, guard, capture):
+        for op, entries in pre.items():  # preapproved entries pass the same checks as newly approved ones
+            if entries:
+                try:
+                    guard.allow(op, entries)
+                except ValueError as e:
+                    raise RecipeError(f"preapproved {op} entry can't be used: {e}") from e
         browser.goto(page, home)
         agent.settle(page)
         store_id = _store_id(page, search_recipe, location)
@@ -536,8 +588,8 @@ def learn_cart(site: str, profile_dir, location: dict, search_recipe: dict, appr
         if not products:
             raise RecipeError(f"no products found for {CART_PROBE!r}")
         names = dict(products)
-        add, pid = _learn_add(page, guard, capture, list(names), store_id, approve)
-        c = _learn_read(page, guard, capture, pid, approve, home)
+        add, pid = _learn_add(page, guard, capture, products, store_id, approve)
+        c = _learn_read(page, guard, capture, pid, approve, home, add)
         field_map, line_name = _read_field_map(site, c, pid, llm)
         search_regexes = {e.get("url_regex") for e in search_read}
         recipe = {"kind": "cart", "site": site, "home_url": home, "add": add,
