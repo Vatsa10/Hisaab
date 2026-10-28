@@ -91,7 +91,7 @@ export function FillQuestion({ jobId, question, choices, askedAt }: FillQuestion
         </Button>
       </div>
       <p role="timer" className="mt-2 text-center text-caption tabular-nums text-ink-muted">
-        {expired ? "Skipped — no answer" : `${left}s left`}
+        {expired ? "Skipping…" : `${left}s left`}
       </p>
     </section>
   );

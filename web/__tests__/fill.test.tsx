@@ -181,6 +181,21 @@ describe("confirm sheet", () => {
     expect(screen.getByText("2 fills left today")).toBeInTheDocument();
   });
 
+  it("primary is disabled with nothing to add or when the app is not ready", () => {
+    const { rerender } = render(
+      <FillConfirmSheet open requestId="r1" site="zepto" appName="Zepto" option={option({ preview: { add: [], ask: [], skip: ["Saffron"] } })} onClose={vi.fn()} onStarted={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: "Add 0 items" })).toBeDisabled();
+    rerender(
+      <FillConfirmSheet open requestId="r1" site="zepto" appName="Zepto" option={option({ state: "limit" })} onClose={vi.fn()} onStarted={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: "Add 4 items" })).toBeDisabled();
+    rerender(
+      <FillConfirmSheet open requestId="r1" site="zepto" appName="Zepto" option={null} onClose={vi.fn()} onStarted={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: /^Add/ })).toBeDisabled();
+  });
+
   it("confirm posts and opens the live sheet", async () => {
     api.apiFetch.mockResolvedValue({ fill_id: "f1", job_id: "j1", fills_left: 1 });
     const started = renderConfirm();
@@ -273,7 +288,7 @@ describe("live sheet", () => {
     act(() => {
       vi.advanceTimersByTime(121_000);
     });
-    expect(screen.getByRole("timer")).toHaveTextContent("Skipped — no answer");
+    expect(screen.getByRole("timer")).toHaveTextContent("Skipping…");
     expect(screen.getByRole("button", { name: "Skip item" })).toBeDisabled();
   });
 
@@ -301,23 +316,83 @@ describe("live sheet", () => {
     expect(document.body.textContent ?? "").not.toMatch(/checkout|check out|place order|pay now/i);
   });
 
-  it("check-the-app failures show warning tone and the server line", () => {
+  const CHECK = "Some items may already be in your cart. Check your Zepto cart before filling again.";
+  const APP_CODES: [string, string][] = [
+    ["redirected_write", `Zepto answered one of our adds in a way we didn't expect, so we stopped. ${CHECK}`],
+    ["existing_changed", `We stopped adding. ${CHECK}`],
+    ["cart_changed", `Your Zepto cart changed while we were adding, so we stopped. ${CHECK}`],
+    ["cart_read_failed", `We couldn't read your Zepto cart after adding, so we stopped. ${CHECK}`],
+  ];
+
+  it.each(APP_CODES)("check-the-app code %s shows its line in warning tone right under the title", (code, line) => {
     renderSheet();
     pushFill(
       fill({
         status: "failed",
-        error: "cart_changed",
+        error: code,
         summary: summary({
+          status: "failed",
           title: "Your Zepto cart may be half filled",
           tone: "warning",
-          sections: [],
-          error_line: "Your Zepto cart changed while we were adding, so we stopped. Some items may already be in your cart. Check your Zepto cart before filling again.",
+          error_line: line,
         }),
       }),
     );
-    expect(screen.getByRole("heading", { name: "Your Zepto cart may be half filled" })).toHaveClass("text-up");
-    expect(screen.getByText(/Check your Zepto cart before filling again/)).toBeInTheDocument();
+    const title = screen.getByRole("heading", { name: "Your Zepto cart may be half filled" });
+    expect(title).toHaveClass("text-up");
+    const err = screen.getByText(line);
+    expect(err).toHaveClass("font-medium", "text-up");
+    expect(title.compareDocumentPosition(err) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const firstSection = screen.getByRole("region", { name: "Added" });
+    expect(err.compareDocumentPosition(firstSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("error tone line is danger coloured and success tone line is ink", () => {
+    renderSheet();
+    pushFill(fill({ status: "failed", error: "nothing_added", summary: summary({ tone: "error", title: "Couldn't fill your Zepto cart", error_line: "Zepto didn't accept any of the items. Nothing was added." }) }));
+    expect(screen.getByText("Zepto didn't accept any of the items. Nothing was added.")).toHaveClass("text-danger");
+    pushFill(fill({ status: "done", summary: summary({ tone: "success", error_line: "A note." }) }));
+    expect(screen.getByText("A note.")).toHaveClass("text-ink");
+  });
+
+  it("an interrupted fill with no summary shows check-your-cart at once, never a skeleton", () => {
+    const onClose = vi.fn();
+    renderSheet({ onClose });
+    pushFill(fill({ status: "interrupted", summary: null }));
+    expect(screen.queryByLabelText("Loading")).toBeNull();
+    expect(screen.getByText("Check your Zepto cart before filling again.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+  });
+
+  it("a needs_confirmation fill with no summary falls back after 3 seconds", () => {
+    vi.useFakeTimers();
+    renderSheet();
+    pushFill(fill({ status: "needs_confirmation", summary: null }));
+    expect(screen.getByLabelText("Loading")).toBeInTheDocument();
+    act(() => {
+      vi.advanceTimersByTime(3100);
+    });
+    expect(screen.queryByLabelText("Loading")).toBeNull();
+    expect(screen.getByText("Check your Zepto cart before filling again.")).toBeInTheDocument();
+  });
+
+  it("the item being asked about says it needs your choice", () => {
+    renderSheet();
+    const plan = [0, 1, 2].map((i) => ({
+      idx: i, label: `Thing ${i}`, action: i === 2 ? ("ask" as const) : ("add" as const), product_id: null, name: null,
+      packs: 1, price: null, question: i === 2 ? "Which Chips?" : null, choices: [], reason: null,
+    }));
+    pushFill(fill({ plan, items: [item(0, { status: "added" }), item(1), item(2)] }));
+    pushJob(ask);
+    expect(screen.getByText("Needs your choice")).toBeInTheDocument();
+    expect(screen.getByText("Thing 2").closest("li")).toHaveTextContent("Needs your choice");
+  });
+
+  it("with no job yet, started items show the Adding items line", () => {
+    renderSheet();
+    pushFill(fill({ items: [item(0, { status: "added" }), item(1), item(2)] }));
+    expect(screen.getByText("Adding items · 1 of 3")).toBeInTheDocument();
   });
 
   it("reprice notice confirms a pinned fill", async () => {

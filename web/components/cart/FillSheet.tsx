@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
 import { cn } from "@/lib/cn";
 import { ACTIVE_STATUSES, watchFill, type CartFill, type FillItem, type FillPlanItem } from "@/lib/fill";
@@ -20,9 +21,12 @@ export interface FillSheetProps {
   onChanged: () => void;
 }
 
+const SUMMARY_WAIT_MS = 3000;
+
 type RowState = { text: string; tone: "done" | "wait" | "warn" | "active" };
 
-function rowState(item: FillItem, adding: boolean, firstPending: boolean): RowState {
+function rowState(item: FillItem, adding: boolean, firstPending: boolean, asking = false): RowState {
+  if (asking) return { text: "Needs your choice", tone: "active" };
   switch (item.status) {
     case "added": {
       const n = item.added_qty ?? item.packs ?? 1;
@@ -63,6 +67,9 @@ function stageLine(fill: CartFill, job: Job | null, app: string): string {
     const total = job?.progress.total ?? fill.items.length;
     const done = job?.progress.done ?? fill.items.filter((i) => i.status !== "pending").length;
     return `Adding items · ${done} of ${total}`;
+  }
+  if (!stage && fill.items.some((i) => i.status !== "pending")) {
+    return `Adding items · ${fill.items.filter((i) => i.status !== "pending").length} of ${fill.items.length}`;
   }
   return `Checking ${app}'s delivery location…`;
 }
@@ -113,6 +120,15 @@ export function FillBody({
 }) {
   const app = fill ? siteName(fill.site) : "";
   const summary = fill?.summary ?? null;
+  const [waitedOut, setWaitedOut] = useState(false);
+  const noSummary = fill !== null && summary === null;
+  const fillKey = fill?.id;
+  useEffect(() => {
+    setWaitedOut(false);
+    if (!noSummary) return;
+    const t = setTimeout(() => setWaitedOut(true), SUMMARY_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [noSummary, fillKey]);
   const active = fill ? ACTIVE_STATUSES.has(fill.status) : false;
   const reprice = fill?.status === "needs_confirmation" && summary;
   const finished = fill !== null && !active && fill.status !== "needs_confirmation";
@@ -130,6 +146,13 @@ export function FillBody({
     const adding = job?.progress.stage === "adding" || job?.progress.stage === "answer_received";
     const firstPending = items.find((i) => i.status === "pending")?.idx;
     const asking = job?.progress.stage === "question_needed" && job.progress.question && job.id;
+    // The item the question is about: the plan's ask item with that question, else the first pending ask item.
+    const pendingAsk = fill.plan.filter(
+      (p) => p.action === "ask" && items.find((i) => i.idx === p.idx)?.status === "pending",
+    );
+    const askedIdx = asking
+      ? (pendingAsk.find((p) => p.question === job.progress.question) ?? pendingAsk[0])?.idx
+      : undefined;
     body = (
       <div>
         <p role="status" className="text-body font-medium">
@@ -137,7 +160,7 @@ export function FillBody({
         </p>
         <ul className="mt-2 divide-y divide-line-soft">
           {items.map((item) => {
-            const st = rowState(item, adding, item.idx === firstPending);
+            const st = rowState(item, adding, item.idx === firstPending, item.idx === askedIdx);
             return (
               <li key={item.idx} className="flex min-h-11 items-center gap-3 py-2 text-body">
                 <Check tone={st.tone} />
@@ -182,6 +205,16 @@ export function FillBody({
     );
   } else if (finished && summary) {
     body = <FillResult summary={summary} error={fill.error} onDone={onDone} />;
+  } else if (!active && (fill.status !== "needs_confirmation" || waitedOut)) {
+    // An ended fill whose summary never arrived: say what to do, never sit on a skeleton.
+    body = (
+      <div>
+        <p className="text-body">Check your {app} cart before filling again.</p>
+        <Button variant="secondary" fullWidth className="mt-4" onClick={onDone}>
+          Done
+        </Button>
+      </div>
+    );
   } else {
     body = (
       <div aria-busy="true" aria-label="Loading" className="space-y-3 py-1">

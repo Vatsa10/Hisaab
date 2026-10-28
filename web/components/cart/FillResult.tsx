@@ -18,12 +18,37 @@ export interface FillResultProps {
   onDone: () => void;
 }
 
+type LineTone = "muted" | "ink" | "warning" | "error";
+interface Line {
+  text: string;
+  tone: LineTone;
+}
+
+const LINE_TONES: Record<LineTone, string> = {
+  muted: "text-ink-muted",
+  ink: "text-ink",
+  warning: "font-medium text-up",
+  error: "font-medium text-danger",
+};
+
+function errorTone(tone: FillSummary["tone"]): LineTone {
+  return tone === "success" ? "ink" : tone;
+}
+
 /** What the fill did, as the server worded it. Hands off to the app: there is no checkout here. */
 export function FillResult({ summary, error, onDone }: FillResultProps) {
-  const lines = [summary.cart_line, summary.existing_line, summary.warning_line, summary.location_line, summary.error_line];
+  const problem: Line | null = summary.error_line ? { text: summary.error_line, tone: errorTone(summary.tone) } : null;
+  const lead = problem && summary.tone !== "success" ? problem : null;
+  const notes: Line[] = [];
+  if (summary.cart_line) notes.push({ text: summary.cart_line, tone: "muted" });
+  if (summary.existing_line) notes.push({ text: summary.existing_line, tone: "muted" });
+  if (summary.warning_line) notes.push({ text: summary.warning_line, tone: "warning" });
+  if (summary.location_line) notes.push({ text: summary.location_line, tone: "muted" });
+  if (problem && !lead) notes.push(problem);
   return (
     <div>
       <h3 className={cn("text-headline", TONES[summary.tone])}>{summary.title}</h3>
+      {lead ? <p className={cn("mt-1.5 text-body", LINE_TONES[lead.tone])}>{lead.text}</p> : null}
 
       {summary.sections.map((s) => (
         <section key={s.key} className="mt-4" aria-label={s.heading}>
@@ -39,13 +64,11 @@ export function FillResult({ summary, error, onDone }: FillResultProps) {
       ))}
 
       <div className="mt-4 space-y-1.5 text-label">
-        {lines.map((l, i) =>
-          l ? (
-            <p key={i} className={l === summary.warning_line ? "font-medium text-up" : "text-ink-muted"}>
-              {l}
-            </p>
-          ) : null,
-        )}
+        {notes.map((l, i) => (
+          <p key={i} className={LINE_TONES[l.tone]}>
+            {l.text}
+          </p>
+        ))}
       </div>
 
       <div className="mt-5 flex flex-col gap-2">

@@ -52,7 +52,7 @@ export function FillConfirmSheet({ open, requestId, site, appName, option, onClo
       title={`Fill your ${appName} cart?`}
       footer={
         <div className="flex flex-col gap-2">
-          <Button fullWidth loading={busy} onClick={go}>
+          <Button fullWidth loading={busy} disabled={n === 0 || option?.state !== "ready"} onClick={go}>
             Add {itemsLabel(n)}
           </Button>
           <Button variant="ghost" fullWidth onClick={() => ref.current?.close()}>
