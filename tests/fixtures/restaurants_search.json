@@ -1,0 +1,21 @@
+{
+  "statusCode": 0,
+  "data": {
+    "banner": {"title": "Pizza near you"},
+    "restaurants": [
+      {"info": {"id": "101", "name": "Behrouz Biryani", "locality": "Gorwa", "lat": 22.3301, "lng": 73.1532,
+                "sla": {"lastMileTravel": 1.4}, "isOpen": true},
+       "cta": {"link": "/restaurants/101"}},
+      {"info": {"id": "102", "name": "La Pino'z Pizza", "locality": "Alkapuri", "lat": "22.3105", "lng": "73.1688",
+                "sla": {"lastMileTravel": 3.9}, "isOpen": false},
+       "cta": {"link": "/restaurants/102"}},
+      {"info": {"id": "103", "name": "Domino's Pizza", "locality": "Fatehgunj", "lat": 22.3201, "lng": 73.1801,
+                "sla": {"lastMileTravel": "2.1 km"}, "isOpen": "OPEN"},
+       "cta": {"link": "https://www.swiggy.com/restaurants/103"}},
+      {"info": {"id": 104, "name": "Pizza Hut", "locality": null, "sla": {}, "isOpen": 1},
+       "cta": {"link": "/restaurants/104"}},
+      {"info": {"name": "Sponsored banner"}, "cta": {"link": "/offers"}}
+    ]
+  },
+  "fees": {"deliveryFee": 2900, "isMember": true}
+}

@@ -1,0 +1,24 @@
+{
+  "data": {
+    "restaurant": {"id": "101", "name": "Behrouz Biryani", "isOpen": true},
+    "cards": [
+      {"title": "Biryani",
+       "items": [
+         {"id": "d1", "name": "Chicken Biryani", "variant": "Half", "price": 18900, "isVeg": 0, "inStock": 1,
+          "packagingCharges": 2000},
+         {"id": "d2", "name": "Chicken Biryani", "variant": "Full", "price": 32900, "isVeg": 0, "inStock": 1,
+          "packagingCharges": 2000},
+         {"id": "d3", "name": "Veg Biryani", "variant": null, "price": 22900, "isVeg": 1, "inStock": 0,
+          "packagingCharges": null}
+       ]},
+      {"title": "Starters",
+       "items": [
+         {"id": "d4", "name": "Paneer Tikka", "price": 24900, "isVeg": "VEG", "inStock": "available",
+          "packagingCharges": 1500},
+         {"id": "d5", "name": "Chicken 65", "price": "27900", "isVeg": "NONVEG", "inStock": "SOLD_OUT"}
+       ]},
+      {"title": "Offers", "banner": "20% off"}
+    ],
+    "fees": {"deliveryFee": 4000, "platformFee": 1000, "smallOrderFee": 0, "isGold": false, "distanceKm": 1.4}
+  }
+}
