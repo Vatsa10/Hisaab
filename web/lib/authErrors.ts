@@ -4,7 +4,7 @@ const GENERIC = "Sign-in didn't finish. Try again.";
 export function authErrorMessage(code: string, email?: string): string {
   if (code === "invite_only") {
     const who = email ? email : "you";
-    return `Expense Agent is invite-only for now. We've added ${who} to the waitlist and will email you when a spot opens.`;
+    return `Hisaab is invite-only for now. We've added ${who} to the waitlist and will email you when a spot opens.`;
   }
   if (code === "signups_paused") return "Sign-ups are paused until next month. Please try again then.";
   return GENERIC;

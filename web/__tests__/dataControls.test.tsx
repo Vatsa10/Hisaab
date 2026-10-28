@@ -17,8 +17,11 @@ vi.mock("@/lib/supabase/client", () => ({
     }),
   }),
 }));
-const push = vi.hoisted(() => ({ disablePush: vi.fn(async () => undefined) }));
-vi.mock("@/lib/push", () => ({ disablePush: push.disablePush, pushState: vi.fn(async () => "unsupported") }));
+const push = vi.hoisted(() => ({
+  disablePush: vi.fn(async () => undefined),
+  unsubscribePushLocal: vi.fn(async () => undefined),
+}));
+vi.mock("@/lib/push", () => ({ disablePush: push.disablePush, unsubscribePushLocal: push.unsubscribePushLocal, pushState: vi.fn(async () => "unsupported") }));
 vi.mock("@/lib/pwa", () => ({ clearPageCache: vi.fn(async () => undefined) }));
 vi.mock("@/lib/me", () => ({
   getMe: vi.fn(async () => ({ is_admin: false })),
@@ -46,6 +49,7 @@ beforeEach(() => {
   api.apiFetch.mockReset();
   auth.signOut.mockClear();
   push.disablePush.mockClear();
+  push.unsubscribePushLocal.mockClear();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -123,7 +127,7 @@ describe("delete account", () => {
     await done;
     expect(api.apiFetch).toHaveBeenCalledTimes(3);
     expect(api.apiFetch).toHaveBeenLastCalledWith("/account", { method: "DELETE", body: JSON.stringify({ confirm: "DELETE" }) });
-    expect(push.disablePush).toHaveBeenCalled();
+    expect(push.unsubscribePushLocal).toHaveBeenCalled();
     expect(auth.signOut).toHaveBeenCalled();
     expect(assign).toHaveBeenCalledWith("/login?deleted=1");
   });
@@ -138,6 +142,96 @@ describe("delete account", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(api.apiFetch).toHaveBeenCalledTimes(4);
     expect(auth.signOut).not.toHaveBeenCalled();
+  });
+});
+
+describe("round 1 fixes", () => {
+  it("offers Disconnect for every app with a connection row, whatever its status", () => {
+    render(
+      <AccountsScreen
+        initialConnections={[
+          { site: "zepto", status: "needs_login", last_synced_at: null },
+          { site: "blinkit", status: "syncing", last_synced_at: null },
+          { site: "swiggy", status: "error", last_synced_at: null },
+          { site: "zomato", status: "connected", last_synced_at: "2026-10-27T10:00:00Z" },
+        ]}
+        initialConsents={[]}
+        initialProfile={null}
+        initialJobs={[]}
+      />,
+    );
+    for (const n of ["Zepto", "Blinkit", "Swiggy", "Zomato"]) {
+      expect(screen.getByRole("button", { name: `Disconnect ${n}` })).toBeInTheDocument();
+    }
+  });
+
+  it("offers no Disconnect for an app with no connection row", () => {
+    render(<AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    expect(screen.queryByRole("button", { name: /^Disconnect/ })).toBeNull();
+  });
+
+  it("delete sheet ignores Escape while the delete is running", async () => {
+    api.apiFetch.mockReturnValue(new Promise(() => {}));
+    render(<DataCard connected={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Type DELETE to confirm"), "DELETE");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete my account" }));
+    await userEvent.keyboard("{Escape}");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("disconnect sheet ignores Escape while the disconnect is running", async () => {
+    api.apiFetch.mockReturnValue(new Promise(() => {}));
+    render(<DataCard connected={[zepto]} />);
+    await userEvent.click(screen.getByRole("button", { name: /Disconnect Zepto/ }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Disconnect Zepto" }));
+    await userEvent.keyboard("{Escape}");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("shows a delete failure as its own alert, not on the field", async () => {
+    api.apiFetch.mockRejectedValue(new ApiError(500, "boom"));
+    render(<DataCard connected={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    const dialog = await screen.findByRole("dialog");
+    const field = within(dialog).getByLabelText("Type DELETE to confirm");
+    await userEvent.type(field, "DELETE");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete my account" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Couldn't delete your account");
+    expect(field).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("erase copy names everything the delete removes", async () => {
+    render(<DataCard connected={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "app sessions, orders, saved addresses, cart and price-check data, notifications, push subscriptions and your sign-in",
+    );
+  });
+
+  it("disconnect copy says what stays", async () => {
+    render(<DataCard connected={[zepto]} />);
+    await userEvent.click(screen.getByRole("button", { name: /Disconnect Zepto/ }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Your saved addresses and price checks stay until you delete your account.",
+    );
+  });
+
+  it("delete unsubscribes push locally only", async () => {
+    vi.stubGlobal("location", { assign: vi.fn() });
+    api.apiFetch.mockResolvedValue({ deleted: true });
+    const { deleteAccount } = await import("@/lib/account");
+    await deleteAccount();
+    expect(push.unsubscribePushLocal).toHaveBeenCalled();
+    expect(push.disablePush).not.toHaveBeenCalled();
   });
 });
 

@@ -98,3 +98,9 @@ export async function disablePush(): Promise<void> {
   await sub.unsubscribe();
   await apiFetch("/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) });
 }
+
+/** Drops this device's push subscription without telling the server (the account is already gone). */
+export async function unsubscribePushLocal(): Promise<void> {
+  const sub = await currentSubscription();
+  if (sub) await sub.unsubscribe();
+}

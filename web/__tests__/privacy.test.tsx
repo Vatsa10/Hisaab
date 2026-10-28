@@ -34,7 +34,26 @@ describe("privacy page", () => {
     const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
     expect(headings).toEqual(names);
     expect(screen.getByText(/We never touch payment: we can't see or use your cards, UPI or wallets/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Back/ })).toHaveAttribute("href", "/");
+  });
+
+  it("privacy page is truthful about Claude, what is stored and retention", () => {
+    render(<PrivacyPage />);
+    expect(screen.getByText(/We never sell your data/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Answers to your questions are written by Claude \(Anthropic\)\. We send it only the order and spend data needed to answer, never your app logins, phone or OTPs\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/cart and price-check data, saved app addresses \(read from the apps\), notifications and push subscriptions/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/We keep your data until you delete it\./)).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("Expense Agent");
+  });
+
+  it("back link falls back to /login", () => {
+    render(<PrivacyPage />);
+    expect(screen.getByRole("link", { name: /Back/ })).toHaveAttribute("href", "/login");
   });
 
   it("privacy is reachable signed out", () => {

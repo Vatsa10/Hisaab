@@ -1,7 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "destructive";
 export type ButtonSize = "md" | "lg";
 
 export interface ButtonStyle {
@@ -23,6 +23,8 @@ const VARIANTS: Record<ButtonVariant, string> = {
   secondary: "bg-surface text-accent ring-1 ring-inset ring-accent hover:bg-accent-soft",
   ghost: "text-accent hover:bg-accent/5 active:bg-accent/10",
   danger: "bg-surface text-danger ring-1 ring-inset ring-line hover:bg-danger-soft",
+  /** Filled red: the confirm button of an irreversible action. */
+  destructive: "bg-danger text-white hover:opacity-90 active:opacity-90",
 };
 
 // Every size keeps at least a 44px hit area.

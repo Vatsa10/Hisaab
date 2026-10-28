@@ -8,7 +8,7 @@ import { disablePush, enablePush, pushState, type PushState } from "@/lib/push";
 const NOTE: Partial<Record<PushState, string>> = {
   denied: "Notifications are off in Settings. We'll email you instead.",
   needs_install:
-    "Add Expense Agent to your Home Screen (Share → Add to Home Screen) to get notifications. We'll email you meanwhile.",
+    "Add Hisaab to your Home Screen (Share → Add to Home Screen) to get notifications. We'll email you meanwhile.",
 };
 
 /** Accounts: turn push notifications on or off for this device. Permission is asked only on the tap. */

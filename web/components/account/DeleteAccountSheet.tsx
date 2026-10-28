@@ -36,16 +36,21 @@ export function DeleteAccountSheet({ onClose }: { onClose: () => void }) {
       open
       title="Delete your account?"
       onClose={onClose}
+      dismissible={!busy}
       footer={
         <div className="flex flex-col gap-2">
+          {error ? (
+            <p role="alert" className="text-label text-danger">
+              {error}
+            </p>
+          ) : null}
           <Button
-            variant="danger"
+            variant="destructive"
             size="lg"
             fullWidth
             loading={busy}
             disabled={typed !== "DELETE"}
             onClick={confirm}
-            className="!bg-danger !text-white !ring-0"
           >
             Delete my account
           </Button>
@@ -57,8 +62,8 @@ export function DeleteAccountSheet({ onClose }: { onClose: () => void }) {
     >
       <div className="flex flex-col gap-4">
         <p className="text-body">
-          This deletes everything we hold for you: app sessions, every order, price checks, notifications and your
-          sign-in. It can&apos;t be undone. Your delivery-app accounts aren&apos;t touched.
+          This deletes everything we hold for you: app sessions, orders, saved addresses, cart and price-check data,
+          notifications, push subscriptions and your sign-in. It can&apos;t be undone. Your delivery-app accounts aren&apos;t touched.
         </p>
         <TextField
           label="Type DELETE to confirm"
@@ -68,7 +73,7 @@ export function DeleteAccountSheet({ onClose }: { onClose: () => void }) {
           autoComplete="off"
           autoCorrect="off"
           spellCheck={false}
-          error={error ?? undefined}
+          disabled={busy}
         />
       </div>
     </Sheet>

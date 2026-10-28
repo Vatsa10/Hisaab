@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { BackLink } from "@/components/account/BackLink";
 import { Card } from "@/components/ui/Card";
 
 export const metadata: Metadata = { title: "Privacy" };
@@ -7,7 +7,7 @@ export const metadata: Metadata = { title: "Privacy" };
 const PRIVACY_SECTIONS: ReadonlyArray<{ heading: string; body: string }> = [
   {
     heading: "What we do",
-    body: "Expense Agent reads your order history and the prices of groceries you ask about. We never touch payment: we can't see or use your cards, UPI or wallets, and we never place an order.",
+    body: "Hisaab reads your order history and the prices of groceries you ask about. We never touch payment: we can't see or use your cards, UPI or wallets, and we never place an order.",
   },
   {
     heading: "What we read",
@@ -15,7 +15,7 @@ const PRIVACY_SECTIONS: ReadonlyArray<{ heading: string; body: string }> = [
   },
   {
     heading: "What we store",
-    body: "Your orders, your delivery address and its map position, and an encrypted copy of each app's sign-in session so you don't need a new code every day. We never store the one-time codes you type. Your phone number is kept only while a sign-in is running.",
+    body: "Your orders, your delivery address and its map position, cart and price-check data, saved app addresses (read from the apps), notifications and push subscriptions, and an encrypted copy of each app's sign-in session so you don't need a new code every day. We never store the one-time codes you type. Your phone number is kept only while a sign-in is running. We keep your data until you delete it.",
   },
   {
     heading: "Filling a cart",
@@ -23,7 +23,7 @@ const PRIVACY_SECTIONS: ReadonlyArray<{ heading: string; body: string }> = [
   },
   {
     heading: "Who sees it",
-    body: "Only you. We never sell or share your data. The admin view shows cost and usage per account, not your orders.",
+    body: "Only you. We never sell your data. The admin view shows cost and usage per account, not your orders. Answers to your questions are written by Claude (Anthropic). We send it only the order and spend data needed to answer, never your app logins, phone or OTPs.",
   },
   {
     heading: "The risk",
@@ -39,12 +39,7 @@ const PRIVACY_SECTIONS: ReadonlyArray<{ heading: string; body: string }> = [
 export default function PrivacyPage() {
   return (
     <main className="px-safe mx-auto w-full max-w-[560px] pb-[calc(env(safe-area-inset-bottom)+2rem)] pt-[calc(env(safe-area-inset-top)+0.5rem)]">
-      <Link
-        href="/"
-        className="-ml-3 inline-flex min-h-11 items-center gap-1 rounded-control px-3 text-body font-medium text-accent active:bg-accent/10"
-      >
-        <span aria-hidden="true">‹</span> Back
-      </Link>
+      <BackLink />
       <header className="mb-5 mt-2">
         <h1 className="text-title">Privacy</h1>
         <p className="mt-0.5 text-label text-ink-muted">Updated 27 October 2026</p>

@@ -26,6 +26,8 @@ export interface SheetProps {
   /** Pinned under the scrollable body, e.g. the sheet's primary action. */
   footer?: ReactNode;
   className?: string;
+  /** false: Escape, backdrop, the X button and dragging do nothing (e.g. while an action runs). */
+  dismissible?: boolean;
   /** Imperative controls for content that drives the sheet (e.g. a "Done" button). */
   ref?: Ref<SheetHandle>;
 }
@@ -68,7 +70,11 @@ type Closing = false | "animate" | "drag";
  * is preferred). Focus moves into the sheet, is kept there, and returns to the opener. A `ref`
  * exposes `close()` (the same animated close) and `focusTitleIfLost()`.
  */
-export function Sheet({ open, onClose, title, description, children, footer, className, ref }: SheetProps) {
+export function Sheet({ open, onClose, title, description, children, footer, className, dismissible = true, ref }: SheetProps) {
+  const dismissibleRef = useRef(dismissible);
+  useEffect(() => {
+    dismissibleRef.current = dismissible;
+  }, [dismissible]);
   const isClient = useSyncExternalStore(noopSubscribe, () => true, () => false);
   const titleId = useId();
   const descId = useId();
@@ -97,8 +103,8 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
   }, []);
 
   const requestClose = useCallback(
-    (how: Exclude<Closing, false> = "animate") => {
-      if (closingRef.current) return;
+    (how: Exclude<Closing, false> = "animate", force = false) => {
+      if (closingRef.current || (!force && !dismissibleRef.current)) return;
       if (prefersReducedMotion()) {
         finish();
         return;
@@ -114,7 +120,7 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
   useImperativeHandle(
     ref,
     () => ({
-      close: () => requestClose(),
+      close: () => requestClose("animate", true), // the owner's own close (e.g. "Done") always works
       focusTitleIfLost: () => {
         const panel = panelRef.current;
         const active = document.activeElement;
@@ -170,7 +176,7 @@ export function Sheet({ open, onClose, title, description, children, footer, cla
 
   // Drag-to-dismiss on the handle. The panel follows the finger directly (no re-renders).
   function onHandleDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (closingRef.current) return;
+    if (closingRef.current || !dismissibleRef.current) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
     dragRef.current = { startY: e.clientY, startT: Date.now(), dy: 0 };
     if (panelRef.current) panelRef.current.style.transition = "none";

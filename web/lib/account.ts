@@ -1,5 +1,5 @@
 import { ApiError, apiFetch } from "@/lib/api";
-import { disablePush } from "@/lib/push";
+import { unsubscribePushLocal } from "@/lib/push";
 import { clearPageCache } from "@/lib/pwa";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
@@ -50,7 +50,7 @@ export async function deleteAccount(): Promise<void> {
     }
   }
   try {
-    await disablePush();
+    await unsubscribePushLocal();
   } catch {
     // the account is gone; a stale subscription can't be reached anyway
   }

@@ -62,6 +62,7 @@ export function DisconnectSheet({ app, onClose, onDone }: DisconnectSheetProps) 
       open
       title={`Disconnect ${app.name}?`}
       onClose={onClose}
+      dismissible={!busy}
       footer={
         <div className="flex flex-col gap-2">
           {error ? (
@@ -69,7 +70,7 @@ export function DisconnectSheet({ app, onClose, onDone }: DisconnectSheetProps) 
               {error}
             </p>
           ) : null}
-          <Button variant="danger" size="lg" fullWidth loading={busy} onClick={confirm}>
+          <Button variant="destructive" size="lg" fullWidth loading={busy} onClick={confirm}>
             Disconnect {app.name}
           </Button>
           <Button variant="ghost" fullWidth disabled={busy} onClick={() => sheetRef.current?.close()}>
@@ -80,7 +81,7 @@ export function DisconnectSheet({ app, onClose, onDone }: DisconnectSheetProps) 
     >
       <p className="text-body">
         We&apos;ll delete your {app.name} sign-in session and {stored}. Your {app.name} account itself isn&apos;t
-        touched. You can connect again any time.
+        touched. You can connect again any time. Your saved addresses and price checks stay until you delete your account.
         {app.id === "swiggy" ? " Instamart orders go too, because they come through your Swiggy sign-in." : ""}
       </p>
     </Sheet>

@@ -109,7 +109,7 @@ describe("NotificationsCard", () => {
     render(<NotificationsCard />);
     expect(
       await screen.findByText(
-        "Add Expense Agent to your Home Screen (Share → Add to Home Screen) to get notifications. We'll email you meanwhile.",
+        "Add Hisaab to your Home Screen (Share → Add to Home Screen) to get notifications. We'll email you meanwhile.",
       ),
     ).toBeInTheDocument();
   });

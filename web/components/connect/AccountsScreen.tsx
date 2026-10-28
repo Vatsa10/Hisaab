@@ -225,7 +225,7 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
 
       <AddressRow profile={profile} onSaved={setProfile} />
 
-      <DataCard connected={APPS.filter((a) => rowState(connectionFor.get(a.id), false) === "synced")} />
+      <DataCard connected={APPS.filter((a) => connectionFor.has(a.id))} />
 
       {flow && flowApp ? (
         <ConnectFlow

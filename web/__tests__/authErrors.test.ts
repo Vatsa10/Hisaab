@@ -4,10 +4,10 @@ import { authErrorMessage } from "@/lib/authErrors";
 describe("authErrorMessage", () => {
   it("maps invite_only and signups_paused", () => {
     expect(authErrorMessage("invite_only", "a@b.co")).toBe(
-      "Expense Agent is invite-only for now. We've added a@b.co to the waitlist and will email you when a spot opens.",
+      "Hisaab is invite-only for now. We've added a@b.co to the waitlist and will email you when a spot opens.",
     );
     expect(authErrorMessage("invite_only")).toBe(
-      "Expense Agent is invite-only for now. We've added you to the waitlist and will email you when a spot opens.",
+      "Hisaab is invite-only for now. We've added you to the waitlist and will email you when a spot opens.",
     );
     expect(authErrorMessage("signups_paused")).toBe("Sign-ups are paused until next month. Please try again then.");
   });
