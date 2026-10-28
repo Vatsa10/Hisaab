@@ -1,4 +1,4 @@
-"""Worker: claims connect/sync jobs from Postgres and runs the browser login/sync code per user."""
+"""Worker: claims connect/sync/learn jobs from Postgres and runs the browser login/sync/learn code per user."""
 import _thread
 import contextlib
 import logging
@@ -22,15 +22,16 @@ from psycopg import sql
 
 import browser
 import llm
+import metering
 import sync
-from server import categorize_pg, fake_sites, jobs, store, vault
-from server.config import Settings, settings
+from server import categorize_pg, fake_sites, jobs, notify, recipe_admin, store, usage, vault
+from server.config import SITE_NAMES, Settings, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
 
 log = logging.getLogger("worker")
 
-JOB_TYPES = ("connect", "sync")
+JOB_TYPES = ("connect", "sync", "learn")
 MAX_ERROR_LEN = 300
 
 
@@ -245,7 +246,9 @@ def _categorize(conn) -> None:
 
 
 def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profile_dir: Path,
-             proxy_server: str | None, fetch: Callable | None = None) -> None:
+             proxy_server: str | None, fetch: Callable | None = None,
+             block_media: bool = False) -> tuple[int, float]:
+    """Fetch and store the user's orders; returns (orders stored, their counted total)."""
     own = store.get_connection(conn, job.user_id, db_site) or {}  # the orders page this user landed on at login
     jobs.set_progress(conn, job.id, stage="syncing")
     # The app shows "Found so far" from these, live; throttled so a fast fetch does not flood Realtime.
@@ -254,7 +257,8 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
     orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                    allow_learn=False, proxy_server=proxy_server,
                    recipe_loader=lambda site: store.get_recipe(conn, site),
-                   orders_page_url=own.get("orders_page_url"), on_progress=found_so_far)
+                   orders_page_url=own.get("orders_page_url"), on_progress=found_so_far,
+                   block_media=block_media)
     n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
     total = conn.execute(
         "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "
@@ -263,6 +267,101 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
     jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2))
     store.set_connection(conn, job.user_id, db_site, status="connected",
                          last_synced_at=datetime.now(timezone.utc))
+    return n, float(total)
+
+
+def _app(site: str) -> str:
+    return SITE_NAMES.get(site, site.capitalize())
+
+
+def _dispatch(conn, s: Settings) -> None:
+    """Send what is in the outbox now; best effort (the scheduler retries whatever is left)."""
+    try:
+        notify.dispatch(conn, s)
+    except Exception as e:
+        log.warning("notification dispatch failed (%s)", type(e).__name__)
+
+
+def _notify_user(conn, s: Settings, **row) -> None:
+    """Enqueue one user notification and dispatch; a failure never fails the job."""
+    try:
+        notify.enqueue(conn, **row)
+    except Exception as e:
+        log.warning("notification enqueue failed (%s)", type(e).__name__)
+        return
+    _dispatch(conn, s)
+
+
+NO_LEARNER_BODY = "Its order recipe stopped working and no admin account is connected to re-learn it."
+RELEARN_FAILED_BODY = ("Its order recipe stopped working and the automatic re-learn did not publish a new one. "
+                       "Review it in the admin view.")
+
+
+def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str) -> None:
+    """Pause the site's orders recipe and email every admin (once per site per IST day)."""
+    try:
+        recipe_admin.pause_site(conn, site, "orders", note)
+        notify.alert_admins(conn, kind="site_paused", title=f"{_app(site)} sync paused", body=body,
+                            dedupe_key=f"site_paused:{site}:{usage.today(tz=s.app_tz)}")
+    except Exception as e:
+        log.error("could not pause %s after drift (%s)", site, type(e).__name__)
+        return
+    _dispatch(conn, s)
+
+
+def _on_drift(conn, s: Settings, job: jobs.Job, db_site: str, note: str) -> None:
+    """Ruling R8: on the healthy -> unhealthy transition, enqueue an unattended learn on a connected admin
+    account, or, with none, pause the site and alert the admins. Later drifted syncs do nothing more."""
+    try:
+        if not recipe_admin.mark_drift(conn, job.site, "orders", note[:MAX_ERROR_LEN]):
+            return
+        learner = recipe_admin.admin_learner(conn, db_site)
+    except Exception as e:
+        log.error("drift handling for %s failed (%s)", job.site, type(e).__name__)
+        return
+    if learner is None:
+        return _pause_and_alert(conn, s, job.site, "drift: no admin account connected", NO_LEARNER_BODY)
+    try:
+        jobs.enqueue(conn, learner, "learn", job.site, {"reason": "drift", "auto": True})
+    except jobs.Conflict:
+        pass
+    except Exception as e:
+        log.error("could not enqueue a re-learn for %s (%s)", job.site, type(e).__name__)
+
+
+def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay, seconds: float) -> None:
+    """Add this job's proxy, AI and worker time to the user's usage for today (IST). Never fails the job."""
+    try:
+        usage.record(conn, job.user_id, usage.today(tz=s.app_tz),
+                     proxy_mb=(relay.bytes_total if relay is not None else 0) / 1e6,
+                     ai_tokens=meter.ai_tokens(s.jev_tokens_per_call),
+                     worker_seconds=seconds,
+                     syncs=1 if job.type in ("connect", "sync") else 0)
+    except Exception as e:
+        log.warning("job %s: usage not recorded (%s)", job.id, type(e).__name__)
+
+
+def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server: str | None,
+              listen: Callable[[], object], fake: bool) -> dict:
+    """Learn the site's orders recipe on the admin's account and publish or file it (recipe_admin.apply_learned).
+    An auto (drift) learn never lets a new POST through; a supervised one asks the admin for each."""
+    auto = bool((job.payload or {}).get("auto"))
+    jobs.set_progress(conn, job.id, stage="learning")
+    if auto:
+        approve = recipe_admin.deny_new_posts
+    else:
+        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, "orders", s.approval_timeout_s)
+    current = store.get_recipe(conn, job.site) or {}
+    preapproved = [e["url_regex"] for e in current.get("read_post_allowlist") or []
+                   if isinstance(e, dict) and e.get("url_regex")]
+    recipe = (fake_sites.learn if fake else sync.learn)(
+        job.site, profile_dir=profile_dir, location=_location(conn, job.user_id), proxy_server=proxy_server,
+        approve=approve, preapproved=preapproved, save=False)
+    result = recipe_admin.apply_learned(conn, job.site, "orders", recipe, set(getattr(approve, "approved", ())),
+                                        job.id, reason="drift_relearn" if auto else "learned")
+    jobs.set_progress(conn, job.id, stage="learned", approval_id=result["approval_id"], status=result["status"],
+                      version=result["version"])
+    return result
 
 
 def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
@@ -274,45 +373,74 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     A job still running after s.max_job_s is presumed hung: its heartbeat stops and exit_process(non-zero) is
     called from the heartbeat thread (default os._exit), so the container restarts and the job is reclaimed."""
     exit_process = exit_process or os._exit
+    started = time.monotonic()
     cfg = browser.SITES[job.site]
     db_site, sub_platform = cfg.get("db_site", job.site), cfg.get("sub_platform")
     phone = (job.payload or {}).get("phone")
+    auto_learn = job.type == "learn" and bool((job.payload or {}).get("auto"))
     profile_name = jobs.SITE_PROFILE.get(job.site, job.site)
     profile_dir = _profiles_root() / job.id
     runs_dir = Path(tempfile.mkdtemp(prefix="ea-runs-"))
     stop_hb = threading.Event()
+    max_s = s.max_learn_job_s if job.type == "learn" else s.max_job_s
     heartbeat = threading.Thread(target=_heartbeat_loop, name="job-heartbeat", daemon=True,
                                  args=(s.database_url, job.id, job.worker_id, s.heartbeat_s, stop_hb,
-                                       s.max_job_s, lambda: exit_process(EXIT_JOB_OVERRUN)))
+                                       max_s, lambda: exit_process(EXIT_JOB_OVERRUN)))
     vault_store = None
     fake = _fake_mode()
+    restored = False
+    relay = None
+    metered = contextlib.ExitStack()
+    meter = metered.enter_context(metering.meter())
 
     def fail(error: str, status: str | None = None) -> None:
-        if status is None and _status(conn, job.user_id, db_site) == "syncing":
+        before = _status(conn, job.user_id, db_site)
+        if status is None and before == "syncing":
             status = "error"
         if status:
             store.set_connection(conn, job.user_id, db_site, status=status)
         jobs.finish(conn, job.id, error=error, worker_id=job.worker_id)
+        if status == "needs_login" and before != "needs_login":
+            _notify_user(conn, s, kind="needs_login", title=f"{_app(job.site)} logged you out",
+                         body="Reconnect to keep your spending up to date.", url="/accounts",
+                         user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
+        if auto_learn:
+            _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN],
+                             RELEARN_FAILED_BODY)
 
     def save_profile() -> None:
         if fake:
             return
+        if not restored:  # a fresh profile (nothing restored, or the stored one was unusable) is ours now
+            vault.stamp(profile_dir, job.user_id, profile_name)
         key = vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
         store.set_connection(conn, job.user_id, db_site, profile_blob_key=key)
+
+    def listen():
+        nonlocal listen_conn
+        listen_conn = _connect(s.database_url)
+        return listen_conn
 
     listen_conn = None
     heartbeat.start()
     try:
+        if job.type == "learn" and not recipe_admin.is_admin(conn, job.user_id):
+            return fail("not_admin")
         shutil.rmtree(profile_dir, ignore_errors=True)
         vault_store = None if fake else vault.store_from_url(s.profile_store_url)
         try:
             if not fake:
-                vault.restore_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
+                restored = vault.restore_profile(vault_store, s.profile_master_key, job.user_id, profile_name,
+                                                 profile_dir)
+        except (vault.VaultKeyMismatch, vault.ProfileOwnerMismatch):
+            raise  # handled below: never "start empty" over a profile we cannot or may not read
         except vault.VaultError as e:
             log.warning("job %s: stored profile unusable (%s); starting empty", job.id, type(e).__name__)
             shutil.rmtree(profile_dir, ignore_errors=True)
-            if job.type == "sync":
+            if job.type in ("sync", "learn"):
                 return fail("needs_login", "needs_login")
+        if job.type == "learn" and not restored and not fake:
+            return fail("needs_login", "needs_login")  # a learn runs on the admin's logged-in account
         profile_dir.mkdir(parents=True, exist_ok=True)
         session_id = _ensure_proxy_session(conn, job.user_id, db_site)
 
@@ -333,10 +461,17 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                     return fail("proxy_unavailable")
                 proxy_server = relay.url
 
+            if job.type == "learn":
+                result = _do_learn(job, conn, s, profile_dir, proxy_server, listen, fake)
+                save_profile()
+                jobs.finish(conn, job.id, worker_id=job.worker_id)
+                if auto_learn and result["status"] == "pending":
+                    _pause_and_alert(conn, s, job.site, "drift re-learn needs admin approval", RELEARN_FAILED_BODY)
+                return
+
             if job.type == "connect":
                 store.set_connection(conn, job.user_id, db_site, status="syncing")
-                listen_conn = _connect(s.database_url)
-                prompt = make_prompt(listen_conn, conn, job.id, s.otp_timeout_s)
+                prompt = make_prompt(listen(), conn, job.id, s.otp_timeout_s)
                 ok = (fake_sites.login if fake else sync.login)(job.site, phone, prompt=prompt, profile_dir=profile_dir,
                                 location=_location(conn, job.user_id), runs_dir=runs_dir,
                                 on_orders_url=lambda url: store.set_connection(conn, job.user_id, db_site,
@@ -347,17 +482,35 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                     return fail("login_failed", "error")
                 store.set_connection(conn, job.user_id, db_site, status="connected")
                 save_profile()  # a good login is kept even if the first sync below fails
-            _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
-                     fetch=fake_sites.fetch_orders if fake else sync.fetch_orders)
+            n, total = _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
+                                fetch=fake_sites.fetch_orders if fake else sync.fetch_orders,
+                                block_media=job.type == "sync" and s.sync_block_media)  # R12: user syncs only
             save_profile()
             _categorize(conn)
         jobs.finish(conn, job.id, worker_id=job.worker_id)
+        if job.type == "connect":
+            _notify_user(conn, s, kind="first_sync_done", title=f"{_app(job.site)} is connected",
+                         body=f"{n} orders · {notify.format_inr(total)} found", url="/spend",
+                         user_id=job.user_id, dedupe_key=f"first_sync:{job.id}")
     except browser.SessionExpired:
         fail("needs_login", "needs_login")
     except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
         fail(f"{e.kind}_timeout", "error")
+    except sync.RecipeDrift as e:
+        fail("recipe_drift")
+        if job.type != "learn":
+            _on_drift(conn, s, job, db_site, (str(e).splitlines() or [""])[0])
     except sync.RecipeError as e:
-        fail(f"no_recipe: {(str(e).splitlines() or [''])[0]}"[:MAX_ERROR_LEN])
+        label = "learn_failed" if job.type == "learn" else "no_recipe"
+        fail(f"{label}: {(str(e).splitlines() or [''])[0]}"[:MAX_ERROR_LEN])
+    except vault.VaultKeyMismatch:
+        # A configuration error (PROFILE_MASTER_KEY changed), not the user's session: nothing is saved over the
+        # stored profile and the connection keeps its status.
+        log.error("job %s: PROFILE_MASTER_KEY does not match the stored profile; check the worker's key", job.id)
+        fail("vault_key_mismatch")
+    except vault.ProfileOwnerMismatch:
+        log.error("job %s: profile owner check failed; nothing uploaded", job.id)
+        fail("profile_owner_mismatch")
     except Exception as e:
         msg = _clean_error(e, phone)
         log.error("job %s failed: %s", job.id, msg)
@@ -368,6 +521,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         _close(listen_conn)
         shutil.rmtree(profile_dir, ignore_errors=True)
         shutil.rmtree(runs_dir, ignore_errors=True)
+        metered.close()
+        _record_usage(conn, job, s, meter, relay, time.monotonic() - started)
 
 
 def _connect(url: str):
@@ -386,11 +541,12 @@ def _close(*conns) -> None:
 def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str) -> bool:
     """Abort a job this worker is still running because the worker is going away. A connect job cannot be
     resumed (its OTP exchange dies with us): it fails with "worker_shutdown" and a connection left "syncing"
-    becomes "error". A sync job goes straight back to the queue for another worker. Both updates only touch a
-    job still running under worker_id. Returns whether the job was aborted (False: already finished, or the
-    database could not be reached; then the stale-job requeue deals with it)."""
+    becomes "error"; so does a learn job (its approval exchange dies with us). A sync job goes straight back to
+    the queue for another worker. Both updates only touch a job still running under worker_id. Returns whether
+    the job was aborted (False: already finished, or the database could not be reached; then the stale-job
+    requeue deals with it)."""
     try:
-        if job.type == "connect":
+        if job.type in ("connect", "learn"):
             if not jobs.finish(conn, job.id, error="worker_shutdown", worker_id=worker_id):
                 return False
             db_site = browser.SITES[job.site].get("db_site", job.site)

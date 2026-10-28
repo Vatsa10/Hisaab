@@ -170,3 +170,38 @@ def test_fake_refusal_not_masked_by_other_config_errors(monkeypatch):
     monkeypatch.setenv("PROFILE_MASTER_KEY", "!!!not base64!!!")
     with pytest.raises(RuntimeError, match="WORKER_FAKE"):
         worker.main(max_loops=0)
+
+
+FAKE_POST = {"url_regex": "^https://fake\\.zepto\\.test/api/orders$", "why": "fake order list"}
+
+
+def test_fake_learn_asks_for_approval():
+    asked = []
+    recipe = fake_sites.learn("zepto", lambda entries: asked.append(entries) or True)
+    assert asked == [[FAKE_POST]]
+    assert recipe["endpoint"] == "https://fake.zepto.test/api/orders" and recipe["method"] == "POST"
+    assert recipe["read_post_allowlist"] == [FAKE_POST]
+    assert fake_sites.learn("zepto", lambda e: asked.append(e) or True) == recipe  # deterministic
+    asked.clear()
+    assert fake_sites.learn("zepto", lambda e: asked.append(e) or True,
+                            preapproved=[FAKE_POST["url_regex"]]) == recipe
+    assert asked == []
+    with pytest.raises(sync.RecipeError, match="POST allowlist rejected"):
+        fake_sites.learn("zepto", lambda e: False)
+
+
+def test_fake_mode_routes_learn_jobs(pg, fake_mode, monkeypatch):
+    from helpers import add_user
+
+    from server import store
+    monkeypatch.setattr(sync, "learn", lambda *a, **k: pytest.fail("real learn must not run"))
+    add_user(pg, A, "admin@example.com")
+    pg.execute("insert into admins(email) values ('admin@example.com')")
+    store.put_recipe(pg, "zepto", {"orders_page_url": "https://fake.zepto.test/orders",
+                                   "read_post_allowlist": [FAKE_POST]})
+    jobs.enqueue(pg, A, "learn", "zepto", {"reason": "drift", "auto": True})
+    worker.run_job(jobs.claim(pg, "w", ("learn",)), pg, settings_for_tests())
+    assert pg.execute("select status, error, progress->>'status' from jobs").fetchone() == \
+        ("done", None, "auto_applied")
+    assert pg.execute("select version, recipe->>'endpoint' from recipes").fetchone() == \
+        (2, "https://fake.zepto.test/api/orders")

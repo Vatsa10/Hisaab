@@ -363,3 +363,12 @@ def test_scaler_query_refuses_odd_type_names():
     for bad in ((), ("sync'); drop table jobs; --",), ("Sync",)):
         with pytest.raises(ValueError):
             jobs.scaler_query(bad)
+
+def test_stale_learn_is_failed_not_requeued(pg):
+    learn = jobs.enqueue(pg, A, "learn", "zepto", {"auto": True})
+    jobs.claim(pg, "w1", ("learn",))
+    pg.execute("update jobs set started_at = now() - interval '11 minutes', heartbeat_at = now() - interval '11 minutes'")
+    assert jobs.requeue_stale(pg, 600) == 1
+    assert pg.execute("select status, error, finished_at is not null from jobs where id=%s", (learn,)).fetchone() == \
+        ("failed", "worker_lost", True)
+    assert jobs.claim(pg, "w2", ("learn",)) is None

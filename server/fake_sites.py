@@ -31,6 +31,16 @@ def login(site, phone, prompt, **_) -> bool:
     return prompt("Enter the OTP sent to your phone", "otp") == FAKE_OTP
 
 
+def learn(site, approve, preapproved=(), **_) -> dict:
+    """A deterministic orders recipe for the fake site. Its one POST-allowlist entry goes to approve([entry])
+    unless preapproved already holds its regex; a refusal is sync.RecipeError("POST allowlist rejected")."""
+    entry = {"url_regex": f"^https://fake\\.{site}\\.test/api/orders$", "why": "fake order list"}
+    if entry["url_regex"] not in set(preapproved) and not approve([entry]):
+        raise sync.RecipeError("POST allowlist rejected")
+    return {"orders_page_url": f"https://fake.{site}.test/orders", "endpoint": f"https://fake.{site}.test/api/orders",
+            "method": "POST", "fast_path_ok": True, "read_post_allowlist": [entry]}
+
+
 def _order(rng, site, n, placed, grocery, instamart):
     if grocery:
         names = rng.sample(GROCERIES, rng.randint(2, 6))
