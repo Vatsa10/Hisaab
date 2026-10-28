@@ -87,7 +87,9 @@ class SiteThrottled(Exception):
 
 CHALLENGE_MARKERS = re.compile(
     r"cf-chl|challenge-platform|cf_chl_opt|Attention Required! \| Cloudflare|px-captcha|_pxCaptcha|perimeterx"
-    r"|captcha-delivery|datadome|Access Denied.{0,200}Reference #|Request unsuccessful\. Incapsula",
+    r"|captcha-delivery|datadome|Access Denied.{0,200}Reference #|Request unsuccessful\. Incapsula"
+    r"|Just a moment\.\.\.|Checking your browser|Verify you are human|Press & Hold"
+    r"|Enable JavaScript and cookies to continue",
     re.I | re.S)
 RETRY_AFTER_CAP = 3600
 BLOCK_SCAN_CHARS = 20_000
