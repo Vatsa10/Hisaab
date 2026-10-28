@@ -6,7 +6,16 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { TextField } from "@/components/ui/TextField";
 import { getInvites, isForbidden, problem, revokeInvite, sendInvite } from "@/lib/admin";
-import { Badge, ListSkeleton, LoadError, Notice, SectionLabel, useAdminLoad, type PanelProps } from "./parts";
+import {
+  Badge,
+  ConfirmSheet,
+  ListSkeleton,
+  LoadError,
+  Notice,
+  SectionLabel,
+  useAdminLoad,
+  type PanelProps,
+} from "./parts";
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -53,10 +62,24 @@ export function InvitesPanel({ onForbidden }: PanelProps) {
 
   const invite = (address: string) =>
     run(address, () => sendInvite(address), `Couldn't invite ${address}.`).then((ok) => ok && setSent(address));
-  const revoke = (address: string) => run(address, () => revokeInvite(address), `Couldn't revoke ${address}.`);
+  const [revoking, setRevoking] = useState<string | null>(null);
 
   return (
     <div>
+      <ConfirmSheet
+        open={revoking !== null}
+        title="Revoke this invite?"
+        description={`${revoking ?? ""} won't be able to sign up with this address. You can invite them again later.`}
+        confirmLabel="Revoke invite"
+        onConfirm={async () => {
+          if (!revoking) return;
+          await revokeInvite(revoking);
+          setSent(null);
+          data.reload();
+        }}
+        onClose={() => setRevoking(null)}
+        onForbidden={onForbidden}
+      />
       <Card as="section" aria-label="Invite someone">
         <form noValidate onSubmit={onSubmit} className="flex flex-col gap-3">
           <TextField
@@ -130,9 +153,8 @@ export function InvitesPanel({ onForbidden }: PanelProps) {
                         <Button
                           variant="ghost"
                           className="px-3 text-danger hover:bg-danger-soft active:bg-danger-soft"
-                          loading={busy === inv.email}
-                          disabled={busy !== null && busy !== inv.email}
-                          onClick={() => revoke(inv.email)}
+                          disabled={busy !== null}
+                          onClick={() => setRevoking(inv.email)}
                           aria-label={`Revoke invite for ${inv.email}`}
                         >
                           Revoke

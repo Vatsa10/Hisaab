@@ -10,6 +10,7 @@ import {
   formatMinutes,
   formatTokens,
   getCosts,
+  maskEmail,
   shiftMonth,
   type Costs,
 } from "@/lib/admin";
@@ -20,8 +21,9 @@ import { ListSkeleton, LoadError, SectionLabel, useAdminLoad, type PanelProps } 
 function MonthStepper({ month, onChange }: { month: string; onChange: (m: string) => void }) {
   const latest = month >= currentMonthIST();
   const btn =
-    "grid size-11 place-items-center rounded-full text-ink-muted transition-colors duration-150 " +
-    "hover:bg-surface hover:text-ink active:bg-line-soft disabled:opacity-40";
+    "grid size-11 place-items-center rounded-full text-ink transition-colors duration-150 " +
+    "hover:bg-surface active:bg-line-soft " +
+    "disabled:cursor-not-allowed disabled:text-line disabled:hover:bg-transparent";
   return (
     <div className="mb-3 flex items-center justify-between gap-2">
       <button type="button" className={btn} aria-label="Previous month" onClick={() => onChange(shiftMonth(month, -1))}>
@@ -54,11 +56,11 @@ function Arrow({ dir }: { dir: "left" | "right" }) {
 function unitLine(c: Costs): string {
   const u = c.unit_costs;
   const parts = [
-    `${formatINR(u.proxy_inr_per_gb)} per GB proxy`,
-    `${formatINR(u.ai_inr_per_1k_tokens)} per 1k AI tokens`,
-    `${formatINR(u.worker_inr_per_minute)} per worker minute`,
+    `${formatINR(u.proxy_inr_per_gb)} / GB proxy`,
+    `${formatINR(u.ai_inr_per_1k_tokens)} / 1k AI tokens`,
+    `${formatINR(u.worker_inr_per_minute)} / worker min`,
   ];
-  if (c.fixed_inr > 0) parts.push(`${formatINR(c.fixed_inr)} fixed`);
+  if (c.fixed_inr > 0) parts.push(`${formatINR(c.fixed_inr)} fixed / month`);
   return parts.join(" · ");
 }
 
@@ -111,13 +113,13 @@ function CostsBody({ costs }: { costs: Costs }) {
             {users.map((u) => (
               <li key={u.user_id} className="flex items-center gap-3 border-b border-line-soft px-4 py-3 last:border-b-0">
                 <div className="min-w-0 flex-1">
-                  <p data-email="" className="truncate font-medium" title={u.email}>
-                    {u.email}
+                  <p data-email="" className="truncate font-medium" title={maskEmail(u.email)}>
+                    {maskEmail(u.email)}
                   </p>
                   <p className="mt-0.5 text-label tabular-nums text-ink-muted">
                     {formatGB(u.proxy_gb)} · {formatTokens(u.ai_tokens)} · {formatMinutes(u.worker_minutes)}
                   </p>
-                  <p className="text-label tabular-nums text-ink-muted">
+                  <p className="text-label font-light tabular-nums text-ink-muted">
                     {u.syncs} {u.syncs === 1 ? "sync" : "syncs"} · {u.cart_checks}{" "}
                     {u.cart_checks === 1 ? "cart check" : "cart checks"}
                   </p>

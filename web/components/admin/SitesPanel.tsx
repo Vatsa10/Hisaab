@@ -3,11 +3,9 @@
 import { useEffect, useState } from "react";
 import { relativeTime } from "@/components/connect/copy";
 import { Spinner } from "@/components/connect/icons";
-import { AppDot } from "@/components/spend/parts";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import {
-  appDot,
   appName,
   decideApproval,
   getSites,
@@ -21,7 +19,16 @@ import {
   type SiteHealth,
 } from "@/lib/admin";
 import { isTerminal, watchJob, type Job } from "@/lib/jobs";
-import { Badge, ListSkeleton, LoadError, Notice, useAdminLoad, type PanelProps } from "./parts";
+import {
+  Badge,
+  ConfirmSheet,
+  ListSkeleton,
+  LoadError,
+  Notice,
+  SiteMark,
+  useAdminLoad,
+  type PanelProps,
+} from "./parts";
 
 /** Sites tab: each site's recipe and health, with Learn and Pause/Resume. */
 export function SitesPanel({ onForbidden }: PanelProps) {
@@ -84,8 +91,9 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
     return watchJob(jobId, setJob);
   }, [jobId]);
 
+  const [confirmPause, setConfirmPause] = useState(false);
   const learning = Boolean(jobId) && !isTerminal(job);
-  const finished = job && isTerminal(job);
+  const finished = Boolean(job && isTerminal(job));
   useEffect(() => {
     if (finished) onChanged();
   }, [finished, onChanged]);
@@ -114,34 +122,36 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
       `Couldn't start learning ${name}.`,
     );
 
-  const togglePause = () =>
+  const resume = () =>
     act(
       "pause",
       async () => {
-        await (s.paused ? resumeSite(s.site) : pauseSite(s.site));
+        await resumeSite(s.site);
         onChanged();
       },
-      s.paused ? `Couldn't resume ${name}.` : `Couldn't pause ${name}.`,
+      `Couldn't resume ${name}.`,
     );
 
   const label = s.kind && s.kind !== "orders" ? `${name} ${s.kind}` : name;
 
   return (
     <Card as="li" aria-label={label}>
-      <div className="flex items-center gap-2.5">
-        <AppDot className={appDot(s.site)} />
-        <h3 className="min-w-0 flex-1 truncate text-headline">
-          {name}
-          {s.kind && s.kind !== "orders" ? <span className="ml-1.5 text-label font-normal text-ink-muted">{s.kind}</span> : null}
-        </h3>
+      <div className="flex items-center gap-3">
+        <SiteMark site={s.site} />
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-headline">
+            {name}
+            {s.kind && s.kind !== "orders" ? <span className="ml-1.5 text-label font-normal text-ink-muted">{s.kind}</span> : null}
+          </h3>
+          <p className="text-label text-ink-muted" suppressHydrationWarning>
+            {s.version != null ? `Recipe v${s.version}` : "No recipe yet"}
+            {s.learned_at ? ` · learned ${relativeTime(s.learned_at, now)}` : ""}
+          </p>
+        </div>
         {healthBadge(s)}
       </div>
 
-      <p className="mt-1.5 text-label text-ink-muted" suppressHydrationWarning>
-        {s.version != null ? `Recipe v${s.version}` : "No recipe yet"}
-        {s.learned_at ? ` · learned ${relativeTime(s.learned_at, now)}` : ""}
-      </p>
-      <p className="text-label tabular-nums text-ink-muted" suppressHydrationWarning>
+      <p className="mt-3 text-label tabular-nums text-ink-muted" suppressHydrationWarning>
         <span className="text-ink">{s.syncs_ok_7d}</span> ok ·{" "}
         <span className={s.syncs_failed_7d > 0 ? "font-semibold text-up" : "text-ink"}>{s.syncs_failed_7d}</span> failed
         in 7 days
@@ -167,8 +177,8 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
               Learn
             </Button>
             <Button
-              variant={s.paused ? "secondary" : "danger"}
-              onClick={togglePause}
+              variant="secondary"
+              onClick={s.paused ? resume : () => setConfirmPause(true)}
               loading={busy === "pause"}
               aria-label={s.paused ? `Resume ${name}` : `Pause ${name}`}
             >
@@ -185,6 +195,19 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
 
       {jobId ? <LearnProgress job={job} onForbidden={onForbidden} /> : null}
       {error ? <Notice className="mt-3">{error}</Notice> : null}
+
+      <ConfirmSheet
+        open={confirmPause}
+        title={`Pause ${name}?`}
+        description={`Pauses ${name} for every user. Scheduled syncs and Refresh now stop until you resume it.`}
+        confirmLabel={`Pause ${name}`}
+        onConfirm={async () => {
+          await pauseSite(s.site);
+          onChanged();
+        }}
+        onClose={() => setConfirmPause(false)}
+        onForbidden={onForbidden}
+      />
     </Card>
   );
 }
@@ -271,10 +294,14 @@ function LearnProgress({ job, onForbidden }: { job: Job | null; onForbidden: () 
     );
   }
 
-  if (stage === "approval_needed" || stage === "approval_received") {
-    const rejected = decided?.decision === "reject";
-    return <Status spinning>{rejected ? "Rejected. Finishing without it…" : "Approved. Finishing…"}</Status>;
+  if (stage === "approval_needed") {
+    // No approval row yet, or one this screen has already answered.
+    if (!approvalId || decided?.id !== approvalId) return <Status spinning>Waiting for the approval…</Status>;
+    return (
+      <Status spinning>{decided.decision === "reject" ? "Rejected. Finishing without it…" : "Approved. Finishing…"}</Status>
+    );
   }
+  if (stage === "approval_received") return <Status spinning>Approved. Finishing…</Status>;
   if (stage === "learned") return <Status spinning>{learnedLine(job)}</Status>;
   return <Status spinning>Learning…</Status>;
 }

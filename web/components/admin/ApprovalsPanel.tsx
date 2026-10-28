@@ -2,11 +2,9 @@
 
 import { useCallback, useState } from "react";
 import { relativeTime } from "@/components/connect/copy";
-import { AppDot } from "@/components/spend/parts";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import {
-  appDot,
   appName,
   decideApproval,
   getApprovals,
@@ -20,7 +18,17 @@ import {
   type DiffEntry,
 } from "@/lib/admin";
 import { RecipeDiff } from "./RecipeDiff";
-import { Badge, ListSkeleton, LoadError, Notice, SectionLabel, useAdminLoad, type PanelProps, type Tone } from "./parts";
+import {
+  Badge,
+  ListSkeleton,
+  LoadError,
+  Notice,
+  SectionLabel,
+  SiteMark,
+  useAdminLoad,
+  type PanelProps,
+  type Tone,
+} from "./parts";
 
 const HISTORY = 20;
 
@@ -42,11 +50,10 @@ function statusTone(status: string): Tone {
 
 function Title({ a }: { a: Approval }) {
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <AppDot className={appDot(a.site)} />
+    <p className="flex min-w-0 items-baseline gap-2">
       <span className="truncate font-semibold">{appName(a.site)}</span>
       <span className="text-label text-ink-muted">{a.kind}</span>
-    </div>
+    </p>
   );
 }
 
@@ -103,7 +110,8 @@ export function ApprovalsPanel({ onForbidden }: PanelProps) {
         <Card padding="none">
           <ul aria-label="Recent decisions">
             {history.map((a) => (
-              <li key={a.id} className="flex items-center gap-3 border-b border-line-soft px-4 py-3 last:border-b-0">
+              <li key={a.id} data-id={a.id} className="flex items-center gap-3 border-b border-line-soft px-4 py-3 last:border-b-0">
+                <SiteMark site={a.site} />
                 <div className="min-w-0 flex-1">
                   <Title a={a} />
                   <p className="mt-0.5 text-label text-ink-muted" suppressHydrationWarning>
@@ -141,22 +149,27 @@ function PendingCard({
       onDecided();
     } catch (e) {
       if (isForbidden(e)) onForbidden();
-      else {
-        setError(problem(e, "Couldn't save your decision. Try again."));
-        setBusy(null);
-      }
+      else setError(problem(e, "Couldn't save your decision. Try again."));
+    } finally {
+      setBusy(null);
     }
   }
 
   return (
     <Card as="li" aria-label={`${appName(a.site)} ${a.kind}, ${reasonLabel(a.reason)}`}>
-      <div className="flex items-start justify-between gap-3">
-        <Title a={a} />
-        <span className="shrink-0 text-label text-ink-muted" suppressHydrationWarning>
-          {relativeTime(a.created_at)}
-        </span>
+      <div className="flex items-center gap-3">
+        <SiteMark site={a.site} />
+        <div className="min-w-0 flex-1">
+          <p className="flex items-baseline gap-2">
+            <span className="truncate text-headline">{appName(a.site)}</span>
+            <span className="text-label text-ink-muted">{a.kind}</span>
+          </p>
+          <p className="text-label text-ink-muted" suppressHydrationWarning>
+            {relativeTime(a.created_at)}
+          </p>
+        </div>
       </div>
-      <p className="mt-1 text-label text-ink">{reasonLabel(a.reason)}</p>
+      <p className="mt-3 text-label font-medium text-ink">{reasonLabel(a.reason)}</p>
       <RecipeDiff diff={changesOf(a)} className="mt-3" />
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Button onClick={() => decide("approve")} loading={busy === "approve"} disabled={busy !== null}>

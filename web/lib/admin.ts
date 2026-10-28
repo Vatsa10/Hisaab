@@ -128,6 +128,13 @@ export function problem(e: unknown, fallback: string): string {
   return fallback;
 }
 
+/** "ananya@example.com" -> "a***@example.com": the Costs tab never shows a full address. */
+export function maskEmail(email: string): string {
+  const at = email.lastIndexOf("@");
+  if (at < 1) return "***";
+  return `${email[0]}***${email.slice(at)}`;
+}
+
 /** "zepto" -> "Zepto" (falls back to capitalising unknown sites). */
 export function appName(site: string): string {
   return APPS.find((a) => a.id === site)?.name ?? (site ? site[0]!.toUpperCase() + site.slice(1) : site);

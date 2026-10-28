@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
 import { Skeleton } from "@/components/spend/parts";
-import { isForbidden } from "@/lib/admin";
+import { appDot, isForbidden, problem } from "@/lib/admin";
 import { cn } from "@/lib/cn";
 
 export interface PanelProps {
@@ -67,7 +68,7 @@ export function Badge({ tone, children, className }: { tone: Tone; children: Rea
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-caption font-semibold",
+        "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-label font-semibold",
         TONES[tone],
         className,
       )}
@@ -116,6 +117,73 @@ export function Notice({ children, className }: { children: ReactNode; className
     <p role="alert" className={cn("rounded-field bg-danger-soft px-3.5 py-2.5 text-label text-danger", className)}>
       {children}
     </p>
+  );
+}
+
+/** The app's 40px rounded square, as on the Accounts screen. Decorative: the name sits beside it. */
+export function SiteMark({ site }: { site: string }) {
+  return <span aria-hidden="true" data-site-mark="" className={cn("size-10 shrink-0 rounded-tile", appDot(site))} />;
+}
+
+export interface ConfirmSheetProps {
+  open: boolean;
+  title: string;
+  /** What the action does, in one or two plain sentences. */
+  description: ReactNode;
+  /** The destructive button's label, e.g. "Pause Zepto". */
+  confirmLabel: string;
+  /** Runs the action; the sheet closes when it resolves and shows the error when it throws. */
+  onConfirm: () => Promise<unknown>;
+  onClose: () => void;
+  onForbidden: () => void;
+}
+
+/**
+ * A bottom sheet that asks before a destructive admin action. The danger style lives only here,
+ * on the confirm button; Cancel (or Escape, the backdrop, a drag) leaves everything as it was.
+ */
+export function ConfirmSheet({ open, title, description, confirmLabel, onConfirm, onClose, onForbidden }: ConfirmSheetProps) {
+  const sheetRef = useRef<SheetHandle>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      sheetRef.current?.close();
+    } catch (e) {
+      if (isForbidden(e)) onForbidden();
+      else setError(problem(e, "That didn't work. Try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Sheet
+      ref={sheetRef}
+      open={open}
+      onClose={() => {
+        setError(null);
+        onClose();
+      }}
+      title={title}
+      footer={
+        <div className="flex flex-col gap-2">
+          <Button variant="danger" size="lg" fullWidth loading={busy} onClick={confirm}>
+            {confirmLabel}
+          </Button>
+          <Button variant="ghost" size="lg" fullWidth disabled={busy} onClick={() => sheetRef.current?.close()}>
+            Cancel
+          </Button>
+        </div>
+      }
+    >
+      <p className="text-body text-ink-muted">{description}</p>
+      {error ? <Notice className="mt-3">{error}</Notice> : null}
+    </Sheet>
   );
 }
 

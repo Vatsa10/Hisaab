@@ -22,12 +22,13 @@ vi.mock("@/lib/jobs", async (importOriginal) => {
 });
 
 import { AdminScreen } from "@/components/admin/AdminScreen";
+import { ApprovalsPanel } from "@/components/admin/ApprovalsPanel";
 import { CostsPanel } from "@/components/admin/CostsPanel";
 import { InvitesPanel } from "@/components/admin/InvitesPanel";
 import { RecipeDiff } from "@/components/admin/RecipeDiff";
 import { SitesPanel } from "@/components/admin/SitesPanel";
 import { ApiError } from "@/lib/api";
-import type { Costs, SiteHealth } from "@/lib/admin";
+import type { Approval, Costs, SiteHealth } from "@/lib/admin";
 import type { Job } from "@/lib/jobs";
 
 type Route = (init?: RequestInit) => unknown;
@@ -104,10 +105,10 @@ describe("admin view", () => {
 
     const list = await screen.findByRole("list", { name: "Cost per user" });
     const rows = within(list).getAllByRole("listitem");
-    expect(rows.map((r) => r.querySelector("[data-email]")?.textContent)).toEqual([
-      "ananya@example.com",
-      "kabir@example.com",
-    ]);
+    const emails = rows.map((r) => r.querySelector("[data-email]"));
+    expect(emails.map((e) => e?.textContent)).toEqual(["a***@example.com", "k***@example.com"]);
+    expect(emails.map((e) => e?.getAttribute("title"))).toEqual(["a***@example.com", "k***@example.com"]);
+    expect(list).not.toHaveTextContent("ananya");
     expect(rows[0]).toHaveTextContent("₹1,033");
     expect(rows[0]).toHaveTextContent("2.50 GB");
     expect(rows[0]).toHaveTextContent("81.2k tokens");
@@ -118,7 +119,7 @@ describe("admin view", () => {
     expect(screen.getByText("October 2026")).toBeInTheDocument();
     expect(screen.getByTestId("budget-fill").className).toContain("bg-up");
     expect(screen.getByText(/82%/)).toBeInTheDocument();
-    expect(screen.getByText(/₹400 per GB proxy/)).toBeInTheDocument();
+    expect(screen.getByText(/₹400 \/ GB proxy · ₹0\.05 \/ 1k AI tokens · ₹0\.20 \/ worker min/)).toBeInTheDocument();
     expect(screen.queryByText("Sign-ups and cart checks paused")).not.toBeInTheDocument();
     unmount();
 
@@ -211,5 +212,144 @@ describe("admin view", () => {
     const learn = await screen.findByRole("button", { name: "Learn Blinkit" });
     expect(learn).toBeDisabled();
     expect(screen.getByText("Connect Blinkit on your own account first")).toBeInTheDocument();
+  });
+});
+
+function approval(over: Partial<Approval> & { id: string }): Approval {
+  return {
+    site: "zepto",
+    kind: "orders",
+    reason: "post_allowlist",
+    status: "pending",
+    proposed: {},
+    current: {},
+    diff: [{ op: "change", path: "$.endpoint", old: "/v1", new: "/v2" }],
+    job_id: null,
+    created_at: "2026-10-20T10:00:00Z",
+    decided_at: null,
+    ...over,
+  };
+}
+
+describe("admin view, review round 1", () => {
+  it("a 403 that arrives after the first load swaps in the admin-only message", async () => {
+    routes({
+      "GET /admin/costs": () => costs(),
+      "GET /admin/sites": () => {
+        throw new ApiError(403, "admin only");
+      },
+    });
+    render(<AdminScreen />);
+    expect(await screen.findByRole("list", { name: "Cost per user" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Sites" }));
+    expect(await screen.findByText("This page is for the admin.")).toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  });
+
+  it("learn shows the 409 detail from the API", async () => {
+    routes({
+      "GET /admin/sites": () => [site()],
+      "POST /admin/learn/zepto": () => {
+        throw new ApiError(409, "A learn for Zepto is already running.");
+      },
+    });
+    render(<SitesPanel onForbidden={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Learn Zepto" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("A learn for Zepto is already running.");
+    expect(live.jobs.size).toBe(0);
+  });
+
+  it("approval_needed without an approval id waits instead of claiming approval", async () => {
+    routes({ "GET /admin/sites": () => [site()], "POST /admin/learn/zepto": () => ({ job_id: "L2" }) });
+    render(<SitesPanel onForbidden={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Learn Zepto" }));
+    await waitFor(() => expect(live.jobs.has("L2")).toBe(true));
+    act(() =>
+      live.jobs.get("L2")!({ id: "L2", site: "zepto", type: "learn", status: "running", progress: { stage: "approval_needed" }, error: null }),
+    );
+    expect(screen.getByText("Waiting for the approval…")).toBeInTheDocument();
+    expect(screen.queryByText(/Approved/)).not.toBeInTheDocument();
+  });
+
+  it("pause asks first, says it affects every user, then posts", async () => {
+    routes({ "GET /admin/sites": () => [site()], "POST /admin/sites/zepto/pause": () => undefined });
+    render(<SitesPanel onForbidden={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Pause Zepto" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Pauses Zepto for every user");
+    expect(calls("POST", "/admin/sites/zepto/pause")).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Pause Zepto" }));
+    await waitFor(() => expect(calls("POST", "/admin/sites/zepto/pause")).toHaveLength(1));
+  });
+
+  it("reject posts the decision and the card can be answered again after a failure", async () => {
+    let attempts = 0;
+    routes({
+      "GET /admin/approvals": () => [approval({ id: "p1" })],
+      "POST /admin/approvals/p1/decide": () => {
+        attempts += 1;
+        if (attempts === 1) throw new ApiError(409, "This approval has expired.");
+        return { status: "rejected" };
+      },
+    });
+    render(<ApprovalsPanel onForbidden={vi.fn()} />);
+    const card = await screen.findByRole("listitem", { name: /Zepto orders/ });
+
+    fireEvent.click(within(card).getByRole("button", { name: "Reject" }));
+    expect(await within(card).findByRole("alert")).toHaveTextContent("This approval has expired.");
+    // busy is cleared in finally, so both buttons work again
+    expect(within(card).getByRole("button", { name: "Reject" })).toBeEnabled();
+    expect(within(card).getByRole("button", { name: "Approve" })).toBeEnabled();
+
+    fireEvent.click(within(card).getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(calls("POST", "/admin/approvals/p1/decide")).toHaveLength(2));
+    const bodies = calls("POST", "/admin/approvals/p1/decide").map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+    expect(bodies).toEqual([{ decision: "reject" }, { decision: "reject" }]);
+  });
+
+  it("revoke asks first, then deletes the invite", async () => {
+    routes({
+      "GET /admin/invites": () => ({
+        invites: [{ email: "rohan@example.com", invited_at: "2026-10-20T10:00:00Z", accepted_at: null }],
+        waitlist: [],
+      }),
+      "DELETE /admin/invites/rohan%40example.com": () => undefined,
+    });
+    render(<InvitesPanel onForbidden={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke invite for rohan@example.com" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("rohan@example.com won't be able to sign up");
+    expect(calls("DELETE", "/admin/invites/rohan%40example.com")).toHaveLength(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke invite" }));
+    await waitFor(() => expect(calls("DELETE", "/admin/invites/rohan%40example.com")).toHaveLength(1));
+  });
+
+  it("history shows only decided rows, newest first, at most 20", async () => {
+    const decided = Array.from({ length: 25 }, (_, i) =>
+      approval({
+        id: `h${i}`,
+        status: i % 2 ? "approved" : "rejected",
+        // shuffled order: decided_at spread over days, not in array order
+        decided_at: new Date(Date.UTC(2026, 9, 1 + ((i * 7) % 25), 12)).toISOString(),
+      }),
+    );
+    routes({
+      "GET /admin/approvals?status=pending": () => [approval({ id: "p1" })],
+      "GET /admin/approvals?status=all": () => [approval({ id: "p1" }), ...decided],
+    });
+    render(<ApprovalsPanel onForbidden={vi.fn()} />);
+    const list = await screen.findByRole("list", { name: "Recent decisions" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows).toHaveLength(20);
+    expect(within(list).queryByText("Pending")).not.toBeInTheDocument();
+
+    const expected = [...decided]
+      .sort((a, b) => Date.parse(b.decided_at!) - Date.parse(a.decided_at!))
+      .slice(0, 20)
+      .map((a) => a.id);
+    expect(rows.map((r) => r.getAttribute("data-id"))).toEqual(expected);
   });
 });
