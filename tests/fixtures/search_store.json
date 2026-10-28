@@ -1,0 +1,7 @@
+{
+  "data": {
+    "serviceable": true,
+    "store": {"id": "store-77", "eta_minutes": 11},
+    "fees": {"handling": 400, "small_cart": 1500}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "data": {
+    "widgets": [
+      {"type": "BANNER", "items": [{"title": "Fresh deals every morning", "image_url": "https://img.example.test/banner.png"}]},
+      {"type": "PRODUCT_GRID", "items": [
+        {"product": {"id": "p-101", "name": "Amul Taaza Toned Milk", "brand": "Amul", "unit": "500 ml"},
+         "pricing": {"selling_price": 2900, "mrp": 3000}, "inventory": 14},
+        {"product": {"id": "p-102", "name": "Amul Gold Full Cream Milk", "brand": "Amul", "unit": "500 ml"},
+         "pricing": {"selling_price": 3400, "mrp": 3400}, "inventory": 0},
+        {"product": {"id": "p-103", "name": "Mother Dairy Toned Milk", "brand": "Mother Dairy", "unit": "1 L"},
+         "pricing": {"selling_price": 6800, "mrp": 7000}, "inventory": 6},
+        {"product": {"id": "p-104", "name": "Milk sachet sample"},
+         "pricing": {"selling_price": 0, "mrp": 0}, "inventory": 3}
+      ]}
+    ]
+  },
+  "user": {"pass_active": true, "pass_name": "Zepto Pass"},
+  "delivery_fee": 0
+}
