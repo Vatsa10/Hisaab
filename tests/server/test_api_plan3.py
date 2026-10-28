@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import time
 from types import SimpleNamespace
 
 import psycopg
@@ -132,8 +133,18 @@ ASK_PASSWORD = "ask-test-password-7f3a9c"
 
 @pytest.fixture
 def ask_url(pg):
-    """The ask_reader login (migration 0006 creates it NOLOGIN; production sets the password out of band)."""
-    pg.execute(f"alter role ask_reader login password '{ASK_PASSWORD}'")
+    """The ask_reader login (migration 0006 creates it NOLOGIN; production sets the password out of band).
+
+    Roles are cluster-wide, so parallel suites on other databases of the same server alter this same role; a
+    concurrent ALTER ROLE fails with "tuple concurrently updated". Retry briefly instead of erroring the test."""
+    for attempt in range(5):
+        try:
+            pg.execute(f"alter role ask_reader login password '{ASK_PASSWORD}'")
+            break
+        except psycopg.errors.InternalError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
     return make_conninfo(os.environ["TEST_DATABASE_URL"], user="ask_reader", password=ASK_PASSWORD)
 
 
