@@ -13,8 +13,11 @@ import {
   pauseSite,
   problem,
   resumeSite,
+  SITE_GROUPS,
+  groupOf,
   startLearn,
   type Decision,
+  type SiteGroup,
   type PostEntry,
   type SiteHealth,
 } from "@/lib/admin";
@@ -25,6 +28,7 @@ import {
   ListSkeleton,
   LoadError,
   Notice,
+  SectionLabel,
   SiteMark,
   useAdminLoad,
   type PanelProps,
@@ -44,24 +48,48 @@ export function SitesPanel({ onForbidden }: PanelProps) {
     );
   }
 
-  // Learn and pause act on a whole site, so only the first row of a site carries them.
-  const seen = new Set<string>();
+  // Rows are grouped by what they learn. Pause acts on a whole site, so only the first row
+  // of a site carries it; every row has its own Learn for its kind.
+  const pausable = new Set<string>();
+  const sections = SITE_GROUPS.map((g) => {
+    const seenInGroup = new Set<string>();
+    const rows = sites.data.filter((s) => {
+      if (groupOf(s.kind) !== g.id) return false;
+      // Restaurants and menus are learned together (kind food), so they share one row per site.
+      if (seenInGroup.has(s.site)) return false;
+      seenInGroup.add(s.site);
+      return true;
+    });
+    return { ...g, rows };
+  }).filter((g) => g.rows.length > 0);
+
   return (
-    <ul aria-label="Sites" className="flex flex-col gap-3">
-      {sites.data.map((s) => {
-        const primary = !seen.has(s.site);
-        seen.add(s.site);
-        return (
-          <SiteCard
-            key={`${s.site}:${s.kind}`}
-            site={s}
-            actions={primary}
-            onChanged={sites.reload}
-            onForbidden={onForbidden}
-          />
-        );
-      })}
-    </ul>
+    <div aria-label="Sites">
+      {sections.map((g) => (
+        <section key={g.id} aria-labelledby={`sites-group-${g.id}`} className="mt-6 first:mt-0">
+          <SectionLabel>
+            <span id={`sites-group-${g.id}`}>{g.title}</span>
+          </SectionLabel>
+          <ul aria-label={g.title} className="flex flex-col gap-3">
+            {g.rows.map((s) => {
+              const pause = !pausable.has(s.site);
+              pausable.add(s.site);
+              return (
+                <SiteCard
+                  key={`${s.site}:${s.kind}`}
+                  site={s}
+                  group={g.id}
+                  learnLabel={g.learnLabel}
+                  pause={pause}
+                  onChanged={sites.reload}
+                  onForbidden={onForbidden}
+                />
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -81,12 +109,16 @@ function healthBadge(s: SiteHealth) {
 
 interface SiteCardProps {
   site: SiteHealth;
-  actions: boolean;
+  group: SiteGroup;
+  /** Words after the app name in the Learn button's label ("" for order history). */
+  learnLabel: string;
+  /** This card carries Pause/Resume (the first row of a site). */
+  pause: boolean;
   onChanged: () => void;
   onForbidden: () => void;
 }
 
-function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
+function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }: SiteCardProps) {
   const name = appName(s.site);
   const [busy, setBusy] = useState<"learn" | "pause" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -126,7 +158,7 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
     act(
       "learn",
       async () => {
-        const res = await startLearn(s.site);
+        const res = await startLearn(s.site, group);
         setJob(null);
         setJobId(res.job_id);
       },
@@ -143,7 +175,8 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
       `Couldn't resume ${name}.`,
     );
 
-  const label = s.kind && s.kind !== "orders" ? `${name} ${s.kind}` : name;
+  const label = learnLabel ? `${name} ${learnLabel}` : name;
+  const hintId = `learn-hint-${s.site}-${group}`;
 
   return (
     <Card as="li" aria-label={label}>
@@ -152,7 +185,6 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-headline">
             {name}
-            {s.kind && s.kind !== "orders" ? <span className="ml-1.5 text-label font-normal text-ink-muted">{s.kind}</span> : null}
           </h3>
           <p className="text-label text-ink-muted" suppressHydrationWarning>
             {s.version != null ? `Recipe v${s.version}` : "No recipe yet"}
@@ -196,34 +228,32 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
         </p>
       ) : null}
 
-      {actions ? (
-        <>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <Button
-              variant="secondary"
-              onClick={learn}
-              loading={busy === "learn"}
-              disabled={!s.admin_connected || learning}
-              aria-label={`Learn ${name}`}
-              aria-describedby={!s.admin_connected ? `learn-hint-${s.site}` : undefined}
-            >
-              Learn
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={s.paused ? resume : () => setConfirmPause(true)}
-              loading={busy === "pause"}
-              aria-label={s.paused ? `Resume ${name}` : `Pause ${name}`}
-            >
-              {s.paused ? "Resume" : "Pause"}
-            </Button>
-          </div>
-          {!s.admin_connected ? (
-            <p id={`learn-hint-${s.site}`} className="mt-2 text-label text-ink-muted">
-              Connect {name} on your own account first
-            </p>
-          ) : null}
-        </>
+      <div className={`mt-3 grid gap-2 ${pause ? "grid-cols-2" : "grid-cols-1"}`}>
+        <Button
+          variant="secondary"
+          onClick={learn}
+          loading={busy === "learn"}
+          disabled={!s.admin_connected || learning}
+          aria-label={`Learn ${label}`}
+          aria-describedby={!s.admin_connected ? hintId : undefined}
+        >
+          Learn
+        </Button>
+        {pause ? (
+          <Button
+            variant="secondary"
+            onClick={s.paused ? resume : () => setConfirmPause(true)}
+            loading={busy === "pause"}
+            aria-label={s.paused ? `Resume ${name}` : `Pause ${name}`}
+          >
+            {s.paused ? "Resume" : "Pause"}
+          </Button>
+        ) : null}
+      </div>
+      {!s.admin_connected ? (
+        <p id={hintId} className="mt-2 text-label text-ink-muted">
+          Connect {name} on your own account first
+        </p>
       ) : null}
 
       {jobId ? <LearnProgress job={job} onForbidden={onForbidden} /> : null}

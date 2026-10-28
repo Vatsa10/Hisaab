@@ -110,8 +110,9 @@ export const getCosts = (month?: string) =>
 export const getSites = () => apiFetch<SiteHealth[]>("/admin/sites");
 export const pauseSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/pause`, { method: "POST" });
 export const resumeSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/resume`, { method: "POST" });
-export const startLearn = (site: string) =>
-  apiFetch<{ job_id: string }>(`/admin/learn/${enc(site)}`, { method: "POST" });
+export type LearnKind = "orders" | "search" | "food";
+export const startLearn = (site: string, kind: LearnKind = "orders") =>
+  apiFetch<{ job_id: string }>(`/admin/learn/${enc(site)}${kind === "orders" ? "" : `?kind=${kind}`}`, { method: "POST" });
 export const getInvites = () => apiFetch<Invites>("/admin/invites");
 export const sendInvite = (email: string) => apiFetch<unknown>("/admin/invites", json({ email }));
 export const revokeInvite = (email: string) => apiFetch<void>(`/admin/invites/${enc(email)}`, { method: "DELETE" });
@@ -210,4 +211,40 @@ export function proposedEntries(a: Pick<Approval, "proposed">): PostEntry[] {
   return raw
     .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === "object")
     .map((e) => ({ url_regex: String(e.url_regex ?? ""), why: typeof e.why === "string" ? e.why : undefined }));
+}
+
+// ---- fee rules (Plan 5) -----------------------------------------------------------------
+
+export type FeeRules = Record<string, unknown>;
+
+/** One site's row of GET /admin/fees. */
+export interface FeeRow {
+  site: string;
+  rules: FeeRules;
+  version: number;
+  verified: boolean;
+  source?: string;
+  updated_at?: string;
+}
+
+export const getFees = () => apiFetch<FeeRow[]>("/admin/fees");
+export const putFees = (site: string, rules: FeeRules, verified: boolean) =>
+  apiFetch<{ version: number }>(`/admin/fees/${enc(site)}`, {
+    method: "PUT",
+    body: JSON.stringify({ rules, verified }),
+  });
+
+/** The groups the Sites tab lists recipes under, and the learn kind each one runs. */
+export type SiteGroup = "orders" | "search" | "food";
+export const SITE_GROUPS: { id: SiteGroup; title: string; learnLabel: string }[] = [
+  { id: "orders", title: "Order history", learnLabel: "" },
+  { id: "search", title: "Grocery prices", learnLabel: "grocery prices" },
+  { id: "food", title: "Restaurants & menus", learnLabel: "restaurants and menus" },
+];
+
+export function groupOf(kind: string): SiteGroup | null {
+  if (!kind || kind === "orders") return "orders";
+  if (kind === "search") return "search";
+  if (kind === "restaurants" || kind === "menu" || kind === "food") return "food";
+  return null;
 }

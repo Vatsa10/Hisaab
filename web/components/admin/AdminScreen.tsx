@@ -7,12 +7,14 @@ import { ADMIN_ONLY } from "@/lib/admin";
 import { cn } from "@/lib/cn";
 import { ApprovalsPanel } from "./ApprovalsPanel";
 import { CostsPanel } from "./CostsPanel";
+import { FeesPanel } from "./FeesPanel";
 import { InvitesPanel } from "./InvitesPanel";
 import { SitesPanel } from "./SitesPanel";
 
 const TABS = [
   { id: "costs", label: "Costs" },
   { id: "sites", label: "Sites" },
+  { id: "fees", label: "Fees" },
   { id: "invites", label: "Invites" },
   { id: "approvals", label: "Approvals" },
 ] as const;
@@ -20,7 +22,7 @@ const TABS = [
 type TabId = (typeof TABS)[number]["id"];
 
 /**
- * The admin view: a segmented control over Costs · Sites · Invites · Approvals. Every panel reads
+ * The admin view: a segmented control over Costs · Sites · Fees · Invites · Approvals. Every panel reads
  * /admin/* with the admin's own token; the first 403 from any of them swaps the whole screen for
  * the admin-only message (the server is the gate, this only explains it).
  */
@@ -65,7 +67,7 @@ export function AdminScreen({ initialTab = "costs" }: { initialTab?: TabId }) {
         role="tablist"
         aria-label="Admin sections"
         onKeyDown={onKeyDown}
-        className="mb-4 grid grid-cols-4 gap-1 rounded-control bg-line-soft p-1"
+        className="mb-4 grid grid-cols-5 gap-1 rounded-control bg-line-soft p-1"
       >
         {TABS.map((t) => (
           <button
@@ -89,6 +91,7 @@ export function AdminScreen({ initialTab = "costs" }: { initialTab?: TabId }) {
       <div id="admin-panel" role="tabpanel" aria-labelledby={`admin-tab-${tab}`}>
         {tab === "costs" ? <CostsPanel onForbidden={onForbidden} /> : null}
         {tab === "sites" ? <SitesPanel onForbidden={onForbidden} /> : null}
+        {tab === "fees" ? <FeesPanel onForbidden={onForbidden} /> : null}
         {tab === "invites" ? <InvitesPanel onForbidden={onForbidden} /> : null}
         {tab === "approvals" ? <ApprovalsPanel onForbidden={onForbidden} /> : null}
       </div>

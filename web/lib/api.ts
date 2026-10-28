@@ -26,7 +26,9 @@ async function readDetail(res: Response): Promise<string> {
     if (typeof detail === "string") return detail;
     if (Array.isArray(detail)) {
       const msgs = detail
-        .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : ""))
+        .map((d) =>
+          typeof d === "string" ? d : d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : "",
+        )
         .filter(Boolean);
       if (msgs.length) return msgs.join("; ");
     }
