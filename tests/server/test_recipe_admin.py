@@ -302,6 +302,15 @@ def test_mark_drift_transitions_once(pg):
     assert recipe_admin.is_paused(pg, "zepto") is False
 
 
+def test_missing_recipe_row_is_not_paused_or_marked(pg):
+    assert recipe_admin.mark_drift(pg, "zepto", "orders", "drift") is False
+    assert recipe_admin.pause_site(pg, "zepto", "orders", "paused") is False
+    assert pg.execute("select count(*) from recipes").fetchone()[0] == 0  # no placeholder row
+    store.put_recipe(pg, "zepto", BASE)
+    assert recipe_admin.pause_site(pg, "zepto", "orders", "paused") is True
+    assert recipe_admin.pause_site(pg, "zepto", "cart", "paused") is False
+
+
 def test_pause_and_resume_site(pg):
     assert recipe_admin.is_paused(pg, "zepto") is False  # no recipe row
     store.put_recipe(pg, "zepto", BASE)

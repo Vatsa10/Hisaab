@@ -55,12 +55,15 @@ def alert_admins(conn, *, kind: str, title: str, body: str, dedupe_key: str) -> 
 
 
 def save_subscription(conn, user_id: str, endpoint: str, p256dh: str, auth: str) -> None:
+    """Upsert the caller's subscription. An endpoint already held by another user is left untouched: it never
+    moves to the caller (nor are its keys replaced)."""
     if not endpoint.startswith("https://"):
         raise ValueError("push endpoint must be https")
     conn.execute(
         "INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth) VALUES (%s,%s,%s,%s) "
         "ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, "
-        "auth = excluded.auth", (endpoint, user_id, p256dh, auth))
+        "auth = excluded.auth WHERE push_subscriptions.user_id = excluded.user_id",
+        (endpoint, user_id, p256dh, auth))
 
 
 def delete_subscription(conn, user_id: str, endpoint: str) -> None:

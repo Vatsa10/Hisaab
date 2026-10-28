@@ -6,14 +6,13 @@ from datetime import datetime, timedelta
 
 from psycopg.rows import dict_row
 
-from browser import SITES
-from server import budget, notify
+from server import budget, notify, sites
 from server.config import Settings
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
 MAX_EMAIL_LEN = 254
 # Sites a user connects (and so an admin can learn on): Instamart arrives through the swiggy connection.
-CONNECTABLE_SITES = tuple(s for s in SITES if s != "instamart")
+CONNECTABLE_SITES = sites.CONNECTABLE
 SYNC_TYPES = ("connect", "sync")  # every connect/sync job run is a sync (R5)
 
 
@@ -53,11 +52,13 @@ def invite(conn, email: str, invited_by: str | None) -> bool:
 
 
 def send_invite(conn, email: str, invited_by: str | None, s: Settings) -> bool:
-    """invite() plus the invite email in the outbox (deduplicated per address). Returns invite()'s result."""
+    """invite() plus the invite email in the outbox (deduplicated per address), in one transaction: an invite
+    is never recorded without its email. Returns invite()'s result."""
     email = normalize_email(email)
-    new = invite(conn, email, invited_by)
-    notify.enqueue(conn, kind="invite", email=email, title="You're invited to Hisaab",
-                   body=f"Sign up with this email at {s.app_url}/login.", dedupe_key=f"invite:{email}")
+    with conn.transaction():
+        new = invite(conn, email, invited_by)
+        notify.enqueue(conn, kind="invite", email=email, title="You're invited to Hisaab",
+                       body=f"Sign up with this email at {s.app_url}/login.", dedupe_key=f"invite:{email}")
     return new
 
 

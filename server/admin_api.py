@@ -41,9 +41,9 @@ def _known(site: str) -> None:
         raise HTTPException(400, "unknown site")
 
 
-def _recipe_exists(conn, site: str) -> None:
-    if conn.execute("SELECT 1 FROM recipes WHERE site=%s AND kind='orders'", (site,)).fetchone() is None:
-        raise HTTPException(404, f"{_app(site)} has no recipe yet")
+def _no_recipe(site: str) -> HTTPException:
+    """A never-learned site has nothing to pause or resume (its jobs already fail as no_recipe)."""
+    return HTTPException(404, f"{_app(site)} has no recipe yet")
 
 
 def build_router(current_user, get_conn) -> APIRouter:
@@ -82,15 +82,15 @@ def build_router(current_user, get_conn) -> APIRouter:
     @router.post("/sites/{site}/pause", status_code=204)
     def pause(site: str, _admin: str = Depends(require_admin), conn=Depends(get_conn)):
         _known(site)
-        _recipe_exists(conn, site)
-        recipe_admin.pause_site(conn, site, "orders", ADMIN_PAUSE_NOTE)
+        if not recipe_admin.pause_site(conn, site, "orders", ADMIN_PAUSE_NOTE):
+            raise _no_recipe(site)
         return Response(status_code=204)
 
     @router.post("/sites/{site}/resume", status_code=204)
     def resume(site: str, _admin: str = Depends(require_admin), conn=Depends(get_conn)):
         _known(site)
-        _recipe_exists(conn, site)
-        recipe_admin.resume_site(conn, site, "orders")
+        if not recipe_admin.resume_site(conn, site, "orders"):
+            raise _no_recipe(site)
         return Response(status_code=204)
 
     @router.post("/learn/{site}", status_code=202)

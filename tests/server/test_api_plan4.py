@@ -53,8 +53,14 @@ def test_refresh_limit_is_per_app(client, pg):
         _manual_job(pg)
     assert _refresh(client).status_code == 429
     assert _refresh(client, "blinkit").status_code == 202
-    _manual_job(pg, user=B)  # another user's refreshes never count
-    assert pg.execute("select count(*) from jobs where user_id=%s", (A,)).fetchone()[0] == 4
+    # A's three Zepto refreshes never count against B
+    _connected(pg, user=B)
+    assert client.get("/me/limits", headers=auth_header(B)).json()["refresh_left"]["zepto"] == 3
+    r = _refresh(client, token=auth_header(B))
+    assert r.status_code == 202 and r.json()["refresh_left"] == 2
+    # and B's refresh does not change A's count
+    assert client.get("/me/limits", headers=auth_header(A)).json()["refresh_left"] == \
+        {"zepto": 0, "blinkit": 2, "swiggy": 3, "instamart": 3, "zomato": 3}
 
 
 def test_refresh_conflict_does_not_consume_limit(client, pg):
@@ -322,9 +328,39 @@ def test_admin_decide_stale_recipe_is_409(client, pg):
     assert store.get_recipe(pg, "zepto") == {"other": True}
 
 
+def test_admin_pause_resume_never_learned_site_is_404(client, pg):
+    """A site with no recipe row has nothing to pause; no placeholder recipe is created."""
+    h = _admin(pg)
+    for action in ("pause", "resume"):
+        r = client.post(f"/admin/sites/zepto/{action}", headers=h)
+        assert (r.status_code, r.json()["detail"]) == (404, "Zepto has no recipe yet")
+    assert pg.execute("select count(*) from recipes").fetchone()[0] == 0
+    assert client.post("/admin/sites/nowhere/pause", headers=h).status_code == 400
+
+
+def test_push_subscribe_cannot_take_another_users_endpoint(client, pg):
+    sub = {"endpoint": "https://push.example.com/abc", "keys": {"p256dh": "pk", "auth": "ak"}}
+    assert client.post("/push/subscribe", json=sub, headers=auth_header(A)).status_code == 204
+    stolen = {"endpoint": sub["endpoint"], "keys": {"p256dh": "evil", "auth": "evil"}}
+    client.post("/push/subscribe", json=stolen, headers=auth_header(B))
+    assert pg.execute("select user_id::text, p256dh, auth from push_subscriptions").fetchall() == \
+        [(A, "pk", "ak")]
+
+
+def test_admin_invite_and_email_are_one_transaction(client, pg, monkeypatch):
+    from server import notify
+    h = _admin(pg)
+
+    def boom(*a, **k):
+        raise RuntimeError("outbox down")
+    monkeypatch.setattr(notify, "enqueue", boom)
+    with pytest.raises(RuntimeError):
+        client.post("/admin/invites", json={"email": "new@example.com"}, headers=h)
+    assert pg.execute("select count(*) from invites").fetchone()[0] == 0  # rolled back with the email
+
+
 def test_admin_pause_resume_site(client, pg):
     h = _admin(pg)
-    assert client.post("/admin/sites/zepto/pause", headers=h).status_code == 404  # no recipe yet
     store.put_recipe(pg, "zepto", {"x": 1})
     assert client.post("/admin/sites/zepto/pause", headers=h).status_code == 204
     assert recipe_admin.is_paused(pg, "zepto") is True

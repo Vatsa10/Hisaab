@@ -174,6 +174,13 @@ def test_default_push_send_maps_gone(monkeypatch):
         notify.push_send({"endpoint": EP, "keys": {"p256dh": "a", "auth": "b"}}, {"title": "t"}, S())
 
 
+def test_subscription_endpoint_never_moves_to_another_user(pg):
+    sub(pg)
+    before = pg.execute("select user_id::text, p256dh, auth, created_at from push_subscriptions").fetchall()
+    notify.save_subscription(pg, str(uuid.uuid4()), EP, "evil-p", "evil-a")
+    assert pg.execute("select user_id::text, p256dh, auth, created_at from push_subscriptions").fetchall() == before
+
+
 def test_subscription_requires_https(pg):
     with pytest.raises(ValueError):
         notify.save_subscription(pg, U, "http://push.example.com/x", "p", "a")
