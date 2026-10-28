@@ -763,6 +763,53 @@ Add `test_guard.sh` cases: `clean repo` → 0, `untracked file` → 1, `modified
 
 ## Wave C
 
+
+### Task 16: Speed budgets — measured, shown and enforced (owner request 2026-10-28)
+
+**Why:** the owner requires the web automation to be fast end to end. Jev (TypeSafe computer-use) and the Friday
+step pattern drive the browser only when a recipe is learned; every user job replays the recipe through the
+in-page API call. This task measures that and fails the build when it regresses.
+
+**Files:**
+- Create: `server/timing.py`, `tests/server/test_timing.py`.
+- Modify:
+  - `server/worker.py`: wrap each phase.
+  - `sync.py`, `search.py`, `food_search.py`, `cart_fill.py`: phase hooks only.
+  - `server/admin.py`: per-site p50 and p95.
+  - `web/components/admin/SitesPanel.tsx`: show the timings.
+  - The e2e specs: speed assertions.
+
+**Interfaces:**
+- `timing.Phase` context manager.
+  - It records `{phase, ms}` for open, session_check, fetch (per page or query), parse and store.
+  - Progress gets `phase_ms`, and the job row gets `timings jsonb`. Add that column in 0010.
+  - Logs carry phase names and milliseconds only.
+- Budgets live in `config.py`; the numbers are owner targets:
+  - `SYNC_BUDGET_S=30` per app;
+  - `COMPARE_BUDGET_S=20` for groceries across 3 apps;
+  - `FOOD_COMPARE_BUDGET_S=20`;
+  - `FILL_BUDGET_S=30`.
+- A job over budget logs `slow_job site=… phase=…` and counts in the admin site health. It is never a user-facing failure.
+- Speed levers, implemented here wherever they're still missing:
+  - Reuse one Chrome per worker across consecutive jobs for the same profile. Close it after 120 s idle.
+  - Run independent page or query fetches concurrently inside the one page (`Promise.all` in `fetch_in_page`), at most 4 at a time.
+  - `wait_until="commit"` for the carrier page.
+  - Media blocking on every replay job.
+  - Skip `goto` when the session is already on the app's origin.
+- The e2e specs (fake mode, `FAKE_PAGE_DELAY_S=0`) assert the end-to-end time of connect→synced, compare→ranked and fill→done against the budgets.
+- The real-account test (owner, after Plan 7) prints the measured times per app.
+
+- [ ] **Steps:**
+  1. Write failing tests:
+     - `test_phase_records_ms`
+     - `test_over_budget_flags_slow_job`
+     - `test_parallel_fetch_caps_at_4`
+     - `test_chrome_reused_for_same_profile`
+     - e2e speed assertions
+  2. Implement.
+  3. Run `pytest -q`, the web tests and the e2e.
+  4. Commit `perf: speed budgets per job phase, warm Chrome reuse and parallel in-page fetches`.
+
 ### Carry-overs folded into Task 12 and Task 15 (controller, Plan 3 ledger)
 
 - Task 12: make `tests/server/test_worker.py::test_heartbeat_runs_during_job` deterministic (drive the heartbeat by an
