@@ -23,6 +23,7 @@ import food_search
 import guard as guard_mod
 import recipes
 import sync
+from search_learn import find_location_inputs, find_query_param, json_body, request_inputs  # noqa: F401
 from food_search import FOOD_PAGES, FOOD_SITES, RESTAURANT_PROBE, SearchDrift, SearchError, SearchTransient, Unserviceable  # noqa: F401
 
 log = logging.getLogger("food_learn")
@@ -31,7 +32,6 @@ MIN_RESTAURANTS = 3
 MIN_DISHES = 5
 LLM_TRIES = 3
 SETTLE_MS = 3000
-COORD_TOLERANCE = 0.005
 RESTAURANTISH_KEY = re.compile(r"restaurant|name|locality|area|lat|lng|lon|distance|rating|cuisine|open|outlet|"
                                r"res_?id|sla|eta|delivery", re.I)
 DISHISH_KEY = re.compile(r"dish|item|name|price|veg|variant|stock|packag|categor|menu|addon|serv", re.I)
@@ -109,81 +109,14 @@ def check_food_recipe(recipe: dict) -> str | None:
     return None
 
 
-# --- request binding discovery (duplicated from search_learn, Plan 5 Task 4; merge later) --------------------
-
-def _walk(obj, path: str = ""):
-    """(dotted path, leaf value) pairs of a JSON value."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from _walk(v, f"{path}.{k}" if path else str(k))
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield from _walk(v, f"{path}.{i}" if path else str(i))
-    else:
-        yield path, obj
-
-
-def _body_json(captured: dict):
-    body = captured.get("request_body")
-    if not body:
-        return None
-    try:
-        return json.loads(body)
-    except (ValueError, TypeError):
-        return None
-
-
-def _inputs(captured: dict):
-    """("query" | "header" | "body", name, value) for every scalar the captured request carried."""
-    for k, v in parse_qsl(urlsplit(captured["url"]).query, keep_blank_values=True):
-        yield "query", k, v
-    for k, v in (captured.get("request_headers") or {}).items():
-        yield "header", k, v
-    body = _body_json(captured)
-    if isinstance(body, (dict, list)):
-        for p, v in _walk(body):
-            yield "body", p, v
-
-
-def find_query_param(captured: dict, probe: str) -> str | None:
-    """Where the search text went: a query param (GET) or a dotted body path (POST)."""
-    want = probe.lower()
-    for where, name, v in _inputs(captured):
-        if where != "header" and isinstance(v, str) and want in v.lower():
-            return name
-    return None
-
+# --- request binding discovery (shared with the grocery search: search_learn) -----------------------------
 
 def find_value_param(captured: dict, value: str) -> str | None:
     """The query param or body path whose value is exactly `value` (a restaurant id)."""
-    for where, name, v in _inputs(captured):
+    for where, name, v in request_inputs(captured):
         if where != "header" and not isinstance(v, bool) and v is not None and str(v) == str(value):
             return name
     return None
-
-
-def _coord(v) -> float | None:
-    if isinstance(v, bool) or v is None:
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str) and re.fullmatch(r"\s*-?\d{1,3}\.\d+\s*", v):
-        return float(v)
-    return None
-
-
-def find_location_inputs(captured: dict, lat: float, lon: float) -> list[dict]:
-    """Every query param, header or body path carrying the location's lat or lon (lat entries first)."""
-    found = []
-    for where, name, v in _inputs(captured):
-        n = _coord(v)
-        if n is None:
-            continue
-        if abs(n - lat) <= COORD_TOLERANCE:
-            found.append({"in": where, "name": name, "value": "lat"})
-        elif abs(n - lon) <= COORD_TOLERANCE:
-            found.append({"in": where, "name": name, "value": "lon"})
-    return sorted(found, key=lambda i: i["value"])
 
 
 # --- POST approval -----------------------------------------------------------
@@ -384,7 +317,7 @@ def keep_fee_map(fee_map: dict | None, data) -> dict | None:
 
 def _request_parts(c: dict) -> dict:
     parts = urlsplit(c["url"])
-    body = _body_json(c)
+    body = json_body(c)
     return {"endpoint": urlunsplit(parts._replace(query="", fragment="")),
             "method": c["method"].upper(),
             "query": dict(parse_qsl(parts.query, keep_blank_values=True)),

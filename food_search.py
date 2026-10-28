@@ -7,10 +7,11 @@ Two recipe kinds, both learned by an admin (food_learn) and only replayed here:
 
 Each call opens the caller's (the user's) Chrome profile with the read-only guard (never login mode, never a
 click), checks the session is still logged in, then tries the fast path (the request replayed from inside the
-page) and falls back to opening the page and reading the site's own captured response. Errors match the grocery
-search (Plan 5 Task 4):
-- SearchDrift only when a 2xx response is missing the recipe's path or cannot be parsed;
-- SearchTransient for transport errors, 429 and 5xx (and when no path produced a 2xx at all): retry later;
+page) and falls back to opening the page and reading the site's own captured response. Errors and the drift rule are the
+grocery search's (search.py, Plan 5 Task 4; see search.is_drift):
+- SearchDrift for a 2xx missing the recipe's path, a 410, or a 404 while the page loads without calling the
+  endpoint; a 2xx that is not JSON only when the page then returns a 2xx missing the path;
+- SearchTransient for everything else (transport errors, 429, 5xx, other 4xx, a failed navigation): retry later;
 - Unserviceable when the user's location cannot be served;
 - browser.SessionExpired for a logged-out session, from the replay or from the page's own 401/403.
 An empty menu or a closed restaurant is a result ({"is_open": False, "dishes": []}), never drift.
@@ -26,6 +27,8 @@ import agent
 import browser
 import recipes
 import sync
+from search import (SearchDrift, SearchError, SearchTransient, Unserviceable, fail, fast_attempt,  # noqa: F401
+                    page_attempt, to_stock)
 
 log = logging.getLogger("food_search")
 
@@ -34,26 +37,6 @@ FOOD_PAGES = {"swiggy": "https://www.swiggy.com/search?query={q}",
               "zomato": "https://www.zomato.com/{city}/delivery?q={q}"}
 RESTAURANT_PROBE = "pizza"
 FEE_KEYS = ("delivery", "packaging", "platform", "small_order", "surge", "member", "distance_km")
-CAPTURE_WAIT_MS = 8000
-CAPTURE_POLL_MS = 500
-
-
-# Same names and meaning as the grocery search module's (Plan 5 Task 4, built in parallel). Controller ruling:
-# once both are on main these become `from search import ...` (a pure import swap), before Task 9.
-class SearchError(Exception):
-    pass
-
-
-class SearchDrift(SearchError):
-    """The recipe no longer works: a 2xx response is missing the recipe's path or cannot be parsed."""
-
-
-class SearchTransient(SearchError):
-    """A transport error, 429 or 5xx: the recipe may be fine, try again later."""
-
-
-class Unserviceable(SearchError):
-    """The app cannot serve the user's delivery location."""
 
 
 # --- path language: "*" fans out ---------------------------------------------
@@ -133,21 +116,6 @@ def _first(data, path):
 
 
 # --- value normalisation -----------------------------------------------------
-
-_OOS = {"out_of_stock", "sold_out", "unavailable", "oos", "false", "0"}
-
-
-def to_stock(v) -> bool:
-    """Same rules as the grocery search's to_stock: unknown means in stock."""
-    if v is None:
-        return True
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return v > 0
-    s = str(v).strip().lower()
-    return not (s in _OOS or "out of stock" in s or "sold out" in s)
-
 
 def to_veg(v) -> bool | None:
     """Veg flag: True veg, False non-veg (egg counts as non-veg), None unknown."""
@@ -340,75 +308,6 @@ def own_page(site: str, url: str) -> str:
     return url
 
 
-_HTTP_STATUS = re.compile(r"^HTTP (\d{3})\b")
-
-
-def _transient_status(status: int) -> bool:
-    return status == 429 or status >= 500
-
-
-def _fast(page, req: dict) -> tuple[str, object]:
-    """The fast path: ("ok", data); ("drift", None) for a 2xx that is not JSON; ("transient", None) for a
-    transport error, 429 or 5xx; ("failed", None) for any other HTTP error. A logout propagates."""
-    try:
-        return "ok", browser.fetch_in_page(page, req)
-    except browser.SessionExpired:
-        raise
-    except json.JSONDecodeError:
-        log.info("fast path: unparseable response")
-        return "drift", None
-    except Exception as e:
-        m = _HTTP_STATUS.match(str(e)) if isinstance(e, RuntimeError) else None
-        log.info("fast path failed: %s", f"HTTP {m[1]}" if m else type(e).__name__)
-        return ("failed" if m and not _transient_status(int(m[1])) else "transient"), None
-
-
-def _same_endpoint(c: dict, recipe: dict) -> bool:
-    """agent._same_endpoint without the 2xx filter of agent.captured_for: the fallback also has to see the
-    endpoint's 401/403 (logout) and 429/5xx (transient) answers."""
-    a, b = urlsplit(c["url"]), urlsplit(recipe["endpoint"])
-    if (a.netloc, a.path) != (b.netloc, b.path) or c["method"].upper() != recipe.get("method", "GET").upper():
-        return False
-    op = (recipe.get("body") or {}).get("operationName") if isinstance(recipe.get("body"), dict) else None
-    return not op or op in (c.get("request_body") or "")
-
-
-def _page_capture(page, capture, recipe: dict, url: str | None) -> tuple[list[dict], str | None]:
-    """Open the page and wait up to CAPTURE_WAIT_MS for the site's own call to the recipe's endpoint. Returns
-    (its 2xx responses, "transient" when the page failed to load or the endpoint answered 429/5xx). The
-    endpoint answering 401/403 is a logout: browser.SessionExpired."""
-    if not url:
-        return [], None
-    mark = len(capture.items)
-    try:
-        browser.goto(page, url)
-    except browser.SessionExpired:
-        raise
-    except Exception as e:
-        log.info("page fallback: navigation failed (%s)", type(e).__name__)
-        return [], "transient"
-    sync.ensure_logged_in(page)
-    waited = 0
-    while True:
-        seen = [c for c in capture.items[mark:] if _same_endpoint(c, recipe)]
-        if denied := [c for c in seen if c["status"] in (401, 403)]:
-            raise browser.SessionExpired(f"HTTP {denied[0]['status']}")
-        ok = [c for c in seen if 200 <= c["status"] < 300]
-        if ok:
-            return ok, None
-        if waited >= CAPTURE_WAIT_MS:
-            return [], "transient" if any(_transient_status(c["status"]) for c in seen) else None
-        page.wait_for_timeout(CAPTURE_POLL_MS)
-        waited += CAPTURE_POLL_MS
-
-
-def _fail(site: str, what: str, evidence: set[str]):
-    """Drift needs evidence (a 2xx without the path, or unparseable); anything else is worth retrying."""
-    if "drift" in evidence:
-        raise SearchDrift(f"{site} {what}: the response no longer matches the recipe")
-    raise SearchTransient(f"{site} {what}: no usable response (retry later)")
-
-
 def _absolute(url: str | None, base: str) -> str | None:
     return urljoin(base, url) if url else None
 
@@ -436,17 +335,14 @@ def search_restaurants(site: str, query: str, location: dict, recipe: dict, prof
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         home = browser.home_url(site, location)
         _goto(page, home)
-        evidence: set[str] = set()
-        kind, data = _fast(page, build_request(recipe, location, recipe.get("query_param"), query))
+        kind, data = fast_attempt(page, build_request(recipe, location, recipe.get("query_param"), query))
         fast = kind == "ok" and path_exists(data, rows_path)
         if not fast:
-            evidence.add("drift" if kind == "ok" else kind)
-            hits, trouble = _page_capture(page, capture, recipe, page_url)
+            kind = "shape" if kind == "ok" else kind
+            hits, outcome = page_attempt(page, capture, recipe, page_url)
             good = [h for h in hits if path_exists(h["json"], rows_path)]
             if not good:
-                evidence |= {"drift"} if hits else set()
-                evidence |= {trouble} if trouble else set()
-                _fail(site, "restaurant search", evidence)
+                fail(site, "restaurant search", kind, "shape" if hits else outcome)
             data = good[-1]["json"]
         base = recipe.get("search_page_url") or home
         rows = extract_restaurants(data, fm)[:max_results]
@@ -488,24 +384,22 @@ def fetch_menu(site: str, restaurant_id: str, location: dict, recipe: dict, prof
     fm = recipe["field_map"]
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         _goto(page, browser.home_url(site, location))
-        evidence: set[str] = set()
-        menu, data = None, None
+        menu, data, kind = None, None, "none"
         if recipe.get("restaurant_param"):
-            kind, data = _fast(page, build_request(recipe, location, recipe["restaurant_param"], str(restaurant_id)))
+            kind, data = fast_attempt(page, build_request(recipe, location, recipe["restaurant_param"],
+                                                          str(restaurant_id)))
             menu = menu_result(data, fm) if kind == "ok" else None
-            if menu is None:
-                evidence.add("drift" if kind == "ok" else kind)
+            if menu is None and kind == "ok":
+                kind = "shape"
         fast = menu is not None
         if not fast:
-            hits, trouble = _page_capture(page, capture, recipe, page_url)
+            hits, outcome = page_attempt(page, capture, recipe, page_url)
             for h in reversed(hits):
                 if (m := menu_result(h["json"], fm)) is not None:
                     menu, data = m, h["json"]
                     break
             if menu is None:
-                evidence |= {"drift"} if hits else set()
-                evidence |= {trouble} if trouble else set()
-                _fail(site, "menu", evidence)
+                fail(site, "menu", kind, "shape" if hits else outcome)
         fee_info = extract_fee_info(data, recipe.get("fee_map"))
     log.info("%s menu: %d dishes, open %s (fast path %s)", site, len(menu["dishes"]), menu["is_open"], fast)
     return {"is_open": menu["is_open"], "dishes": menu["dishes"], "fee_info": fee_info}

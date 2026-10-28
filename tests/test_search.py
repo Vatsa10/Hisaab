@@ -278,11 +278,66 @@ def test_drift_when_captured_2xx_lacks_products_path(monkeypatch):
         search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
 
 
-def test_drift_when_2xx_body_is_unparseable(monkeypatch):
-    fake_env(monkeypatch, fetch=failing_api(json.JSONDecodeError("Expecting value", "<html>", 0)),
-             capture_on_goto=lambda url: [])
+NOT_JSON = json.JSONDecodeError("Expecting value", "<html>", 0)
+
+
+def test_unparseable_2xx_alone_is_transient(monkeypatch):
+    """A captive portal or proxy page answers 2xx HTML: not evidence the recipe is wrong."""
+    fake_env(monkeypatch, fetch=failing_api(NOT_JSON), capture_on_goto=lambda url: [])
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+    fake_env(monkeypatch, fetch=failing_api(NOT_JSON), capture_on_goto=captured(503, {"e": 1}))
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_unparseable_2xx_is_drift_when_page_2xx_lacks_products_path(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(NOT_JSON), capture_on_goto=captured(200, {"x": 1}))
     with pytest.raises(search.SearchDrift):
         search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_410_alone_is_drift(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 410: gone")), capture_on_goto=captured(503, {}))
+    with pytest.raises(search.SearchDrift):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_404_is_drift_when_page_loads_without_calling_the_endpoint(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 404: not found")), capture_on_goto=lambda url: [])
+    with pytest.raises(search.SearchDrift):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_404_is_transient_when_page_fails_or_answers_5xx(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 404: not found")), capture_on_goto=captured(502, {}))
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+    seen = fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 404: not found")))
+
+    def goto(p, url, *a, **k):
+        seen["goto"].append(url)
+        if "/search?query=" in url:
+            raise RuntimeError("net::ERR_TIMED_OUT")
+        p.url = url
+    monkeypatch.setattr(browser, "goto", goto)
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_other_4xx_is_transient(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 400: bad")), capture_on_goto=lambda url: [])
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+@pytest.mark.parametrize("fast,page,drift", [
+    ("shape", "no_page", True), ("gone", "transient", True), ("ok", "shape", True), ("unparseable", "shape", True),
+    ("not_found", "no_call", True), ("unparseable", "no_call", False), ("unparseable", "no_page", False),
+    ("not_found", "transient", False), ("not_found", "no_page", False), ("transient", "no_call", False),
+    ("failed", "no_call", False), ("none", "no_call", False)])
+def test_is_drift_table(fast, page, drift):
+    assert search.is_drift(fast, page) is drift
 
 
 def test_transient_when_search_page_navigation_fails(monkeypatch):

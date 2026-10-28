@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import random
+import re
 import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
@@ -218,55 +219,113 @@ def search_page_url(recipe: dict, text: str) -> str:
 
 
 def endpoint_responses(recipe: dict, items: list[dict]) -> list[dict]:
-    """Captured responses (any status) of the recipe's endpoint: same host, path and method."""
+    """Captured responses (any status) of the recipe's endpoint: same host, path and method (and the GraphQL
+    operationName when the recipe's body names one). Any status, so callers also see 401/403 and 429/5xx."""
     want = urlsplit(recipe["endpoint"])
     method = (recipe.get("method") or "GET").upper()
-    return [c for c in items if (urlsplit(c["url"]).netloc, urlsplit(c["url"]).path) == (want.netloc, want.path)
-            and c["method"].upper() == method]
+    body = recipe.get("body")
+    op = body.get("operationName") if isinstance(body, dict) else None
+    out = []
+    for c in items:
+        got = urlsplit(c["url"])
+        if (got.netloc, got.path) == (want.netloc, want.path) and c["method"].upper() == method \
+                and (not op or op in (c.get("request_body") or "")):
+            out.append(c)
+    return out
+
+
+# --- failure evidence: drift (the recipe is wrong for everyone) vs transient (this run only) -------------------
+# Fast path (the in-page replay) outcomes: "ok" (2xx JSON), "shape" (the caller found the 2xx JSON lacks its path),
+# "unparseable" (2xx, not JSON: may be a captive portal or proxy page), "gone" (410), "not_found" (404),
+# "transient" (timeout, transport error, 429, 5xx), "failed" (any other HTTP error), "none" (not tried).
+# Page fallback outcomes: "hits" (2xx calls of the endpoint), "shape" (the caller found they lack its path),
+# "no_call" (the page loaded but made no 2xx call to the endpoint within 8 s), "transient" (navigation failed or
+# the endpoint answered 429/5xx), "no_page" (no page to open).
+
+_HTTP_STATUS = re.compile(r"^HTTP (\d{3})\b")
+
+
+def _transient_status(status: int) -> bool:
+    return status == 429 or status >= 500
+
+
+def fast_attempt(page, req: dict) -> tuple[str, object]:
+    """The in-page replay: ("ok", data) or (outcome, None). A logout (401/403, login redirect) propagates."""
+    try:
+        return "ok", browser.fetch_in_page(page, req)
+    except browser.SessionExpired:
+        raise
+    except ValueError:  # json.JSONDecodeError: a 2xx body that is not JSON
+        log.info("fast path: unparseable 2xx response")
+        return "unparseable", None
+    except Exception as e:
+        m = _HTTP_STATUS.match(str(e)) if isinstance(e, RuntimeError) else None
+        log.info("fast path failed: %s", f"HTTP {m[1]}" if m else type(e).__name__)
+        if not m:
+            return "transient", None
+        status = int(m[1])
+        if status == 410:
+            return "gone", None
+        if status == 404:
+            return "not_found", None
+        return ("transient" if _transient_status(status) else "failed"), None
+
+
+def page_attempt(page, capture, recipe: dict, url: str | None) -> tuple[list[dict], str]:
+    """Open the app's own page and wait up to 8 s for its call to the recipe's endpoint.
+    Returns (the 2xx responses, outcome); an endpoint 401/403 or a login redirect raises browser.SessionExpired."""
+    if not url:
+        return [], "no_page"
+    mark = len(capture.items)
+    try:
+        browser.goto(page, url)
+    except browser.SessionExpired:
+        raise
+    except Exception as e:
+        log.info("page fallback: navigation failed (%s)", type(e).__name__)
+        return [], "transient"
+    sync.ensure_logged_in(page)
+    for i in range(CAPTURE_POLLS + 1):
+        seen = endpoint_responses(recipe, capture.items[mark:])
+        if denied := [c for c in seen if c["status"] in (401, 403)]:
+            raise browser.SessionExpired(f"HTTP {denied[0]['status']}")
+        if ok := [c for c in seen if 200 <= c["status"] < 300]:
+            return ok, "hits"
+        if i < CAPTURE_POLLS:
+            page.wait_for_timeout(CAPTURE_WAIT_MS)
+    return [], "transient" if any(_transient_status(c["status"]) for c in seen) else "no_call"
+
+
+def is_drift(fast: str, page: str) -> bool:
+    """Drift needs evidence that the recipe itself is wrong:
+    - a 2xx JSON missing the recipe's path (from the replay or from the page's own call), or a 410;
+    - a 404 from the replay while the page loads but makes no 2xx call to the endpoint within 8 s.
+    A 2xx that is not JSON is drift only when the page then returns a 2xx missing the path (the "shape" rule);
+    on its own it may be a captive portal or proxy page. Everything else is transient."""
+    return fast in ("shape", "gone") or page == "shape" or (fast == "not_found" and page == "no_call")
+
+
+def fail(site: str, what: str, fast: str, page: str):
+    if is_drift(fast, page):
+        raise SearchDrift(f"{site} {what}: the response no longer matches the recipe")
+    raise SearchTransient(f"{site} {what}: no usable response (retry later)")
 
 
 def search_once(page, capture, recipe: dict, text: str, location: dict, store_id: str | None = None):
-    """One query: the in-page API replay, else the search page and the last captured response of the endpoint.
-
-    Returns the response body whose products_path leads to a list. Raises SearchDrift only when the app answered
-    2xx with a body that is unparseable or has no products_path (the recipe is wrong for everyone); anything else
-    (timeouts, 429, 5xx, a failed navigation, no response in time) raises SearchTransient. 401/403 and login
-    redirects raise browser.SessionExpired."""
+    """One query: the in-page API replay, else the search page and the endpoint's captured response.
+    Returns the body whose products_path leads to a list; else raises SearchDrift / SearchTransient (see is_drift).
+    401/403 and login redirects raise browser.SessionExpired."""
     site, path = recipe.get("site"), recipe["field_map"].get("products_path")
-    drift = False
-    req = build_request(recipe, text, location, store_id)
-    try:
-        data = browser.fetch_in_page(page, req)
+    fast, data = fast_attempt(page, build_request(recipe, text, location, store_id))
+    if fast == "ok":
         if rows_at(data, path) is not None:
             return data
-        drift = True  # 2xx, parsed, but no product list where the recipe says
-    except browser.SessionExpired:
-        raise
-    except ValueError as e:  # json.JSONDecodeError: a 2xx body that is not JSON
-        drift = True
-        log.info("%s search replay unparseable (%s); trying the search page", site, type(e).__name__)
-    except Exception as e:
-        log.info("%s search replay failed (%s); trying the search page", site, type(e).__name__)
-    capture.clear()
-    try:
-        browser.goto(page, search_page_url(recipe, text))
-    except Exception as e:
-        log.info("%s search page failed (%s)", site, type(e).__name__)
-        if drift:
-            raise SearchDrift(f"{site} search response has no product list") from e
-        raise SearchTransient(f"{site} search page did not load ({type(e).__name__})") from e
-    sync.ensure_logged_in(page)
-    for _ in range(CAPTURE_POLLS):
-        hits = endpoint_responses(recipe, capture.items)
-        if any(c["status"] in (401, 403) for c in hits):
-            raise browser.SessionExpired("search API returned 401/403")
-        for c in reversed(hits):
-            if 200 <= c["status"] < 300 and rows_at(c.get("json"), path) is not None:
-                return c["json"]
-        page.wait_for_timeout(CAPTURE_WAIT_MS)
-    if drift or any(200 <= c["status"] < 300 for c in endpoint_responses(recipe, capture.items)):
-        raise SearchDrift(f"{site} search response has no product list")
-    raise SearchTransient(f"{site} search gave no usable response in time")
+        fast = "shape"
+    hits, outcome = page_attempt(page, capture, recipe, search_page_url(recipe, text))
+    good = [h["json"] for h in hits if rows_at(h.get("json"), path) is not None]
+    if good:
+        return good[-1]
+    fail(site, "search", fast, "shape" if hits else outcome)
 
 
 def search_products(site: str, queries, location: dict, recipe: dict, profile_dir, proxy_server: str | None = None,

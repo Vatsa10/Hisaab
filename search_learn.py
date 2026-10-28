@@ -38,7 +38,7 @@ def _ok(c: dict) -> bool:
     return 200 <= c.get("status", 0) < 300 and isinstance(c.get("json"), (dict, list))
 
 
-def _json_body(c: dict):
+def json_body(c: dict):
     try:
         body = json.loads(c.get("request_body") or "")
     except (TypeError, ValueError):
@@ -58,11 +58,11 @@ def _leaves(obj, path: str = "", depth: int = 0):
         yield from _leaves(v, f"{path}.{k}" if path else str(k), depth + 1)
 
 
-def _inputs(c: dict) -> list[tuple[str, str, object]]:
+def request_inputs(c: dict) -> list[tuple[str, str, object]]:
     """Every value the request carried: (in, name, value) for query parameters, headers and JSON-body leaves."""
     out = [("query", k, v) for k, v in parse_qsl(urlsplit(c["url"]).query)]
     out += [("header", k, v) for k, v in (c.get("request_headers") or {}).items()]
-    body = _json_body(c)
+    body = json_body(c)
     if body is not None:
         out += [("body", p, v) for p, v in _leaves(body)]
     return out
@@ -144,7 +144,7 @@ def candidates(captured: list[dict], probe: str) -> list[dict]:
 def find_query_param(c: dict, probe: str) -> str | None:
     """Where the search text goes: a dotted JSON-body path for a POST with a JSON body, else a query parameter."""
     p = probe.strip().lower()
-    body = _json_body(c)
+    body = json_body(c)
     if c["method"].upper() == "POST" and body is not None:
         return next((path for path, v in _leaves(body) if isinstance(v, str) and v.strip().lower() == p), None)
     return next((k for k, v in parse_qsl(urlsplit(c["url"]).query) if v.strip().lower() == p), None)
@@ -152,7 +152,7 @@ def find_query_param(c: dict, probe: str) -> str | None:
 
 def find_location_inputs(c: dict, lat: float, lon: float) -> list[dict]:
     """Query parameters, headers and body paths carrying the saved lat/lon."""
-    return [{"in": where, "name": name, "value": which} for where, name, v in _inputs(c)
+    return [{"in": where, "name": name, "value": which} for where, name, v in request_inputs(c)
             if (which := _coord(v, lat, lon))]
 
 
@@ -177,7 +177,7 @@ def find_store_binding(captured: list[dict], c: dict, lat: float, lon: float) ->
     lookups = [o for o in captured if o is not c and _ok(o) and find_location_inputs(o, lat, lon)]
     if not lookups:
         return None
-    mine = _inputs(c)
+    mine = request_inputs(c)
     for _, _, v in mine:
         s = _scalar_text(v)
         if not s or len(s) < 3 or s.lower() in ("true", "false", "null", "none") or _coord(v, lat, lon):
@@ -185,7 +185,7 @@ def find_store_binding(captured: list[dict], c: dict, lat: float, lon: float) ->
         for o in lookups:
             path = _find_value_path(o["json"], s)
             if path:
-                return {"lookup": {"method": o["method"].upper(), "url": o["url"], "body": _json_body(o)},
+                return {"lookup": {"method": o["method"].upper(), "url": o["url"], "body": json_body(o)},
                         "location_inputs": find_location_inputs(o, lat, lon), "store_id_path": path,
                         "inputs": [{"in": w, "name": n} for w, n, x in mine if _scalar_text(x) == s]}
     return None
@@ -416,7 +416,7 @@ def _recipe_from(site: str, home: str, c: dict, items: list[dict], lat: float, l
     bound = loc + (store["inputs"] if store else [])
     bound_query = {i["name"] for i in bound if i["in"] == "query"}
     bound_headers = {i["name"].lower() for i in bound if i["in"] == "header"}
-    body = _json_body(c) if method == "POST" else None
+    body = json_body(c) if method == "POST" else None
     if body is None:
         bound_query.add(qp)
     return {"kind": "search", "site": site, "home_url": home, "search_page_url": search.SEARCH_PAGES[site],

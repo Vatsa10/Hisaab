@@ -269,7 +269,7 @@ def test_menu_drift_when_both_paths_fail(monkeypatch, tmp_path):
     with pytest.raises(food_search.SearchDrift):  # categories still there, items renamed: drift, not "closed"
         food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
     fake_env(monkeypatch, fetch=raiser(json.JSONDecodeError("x", "<html>", 0)), on_goto=lambda url: [])
-    with pytest.raises(food_search.SearchDrift):  # a 2xx that is not JSON
+    with pytest.raises(food_search.SearchTransient):  # a 2xx that is not JSON, alone: maybe a captive portal
         food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
     fake_env(monkeypatch, fetch=lambda req: {"data": {}}, on_goto=lambda url: [])
     with pytest.raises(food_search.SearchDrift):
@@ -295,6 +295,53 @@ def test_transient_errors_are_not_drift(monkeypatch, tmp_path, exc):
     fake_env(monkeypatch, fetch=raiser(exc), on_goto=lambda url: [])
     with pytest.raises(food_search.SearchTransient):
         food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+
+MENU_PAGE_RECIPE = MENU_PARAM_RECIPE | {"page_url_template": "https://www.swiggy.com/restaurants/{restaurant_id}"}
+MENU_API = "https://www.swiggy.com/dapi/menu/pl?restaurantId=101"
+SEARCH_API = "https://www.swiggy.com/dapi/restaurants/search?str=pizza"
+
+
+def test_food_410_alone_is_drift(monkeypatch, tmp_path):
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 410: gone")),
+             on_goto=lambda url: [captured(MENU_API, {}, status=503)] if "/restaurants/" in url else [])
+    with pytest.raises(food_search.SearchDrift):
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PAGE_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 410: gone")))
+    with pytest.raises(food_search.SearchDrift):
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)  # no page at all
+
+
+def test_food_404_is_drift_only_when_page_loads_without_calling_the_endpoint(monkeypatch, tmp_path):
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 404: missing")), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchDrift):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 404: missing")), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchDrift):
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PAGE_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 404: missing")))
+    with pytest.raises(food_search.SearchTransient):  # no page to confirm the endpoint is gone
+        food_search.fetch_menu("swiggy", "101", LOC, MENU_PARAM_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=raiser(RuntimeError("HTTP 400: bad request")), on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchTransient):  # any other 4xx
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+
+def test_food_unparseable_is_drift_only_with_page_2xx_missing_path(monkeypatch, tmp_path):
+    not_json = raiser(json.JSONDecodeError("x", "<html>", 0))
+    fake_env(monkeypatch, fetch=not_json, on_goto=lambda url: [captured(SEARCH_API, {"data": {}})])
+    with pytest.raises(food_search.SearchDrift):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+    fake_env(monkeypatch, fetch=not_json, on_goto=lambda url: [])
+    with pytest.raises(food_search.SearchTransient):
+        food_search.search_restaurants("swiggy", "pizza", LOC, REST_RECIPE, tmp_path)
+
+
+def test_food_uses_the_grocery_search_errors_and_helpers():
+    import search
+    assert food_search.SearchDrift is search.SearchDrift and food_search.SearchTransient is search.SearchTransient
+    assert food_search.Unserviceable is search.Unserviceable and food_search.to_stock is search.to_stock
+    assert not hasattr(food_search, "_same_endpoint")
 
 
 def test_transient_page_capture_and_navigation_errors(monkeypatch, tmp_path):
