@@ -7,7 +7,10 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import {
   appName,
+  connectionName,
   decideApproval,
+  hasRiskyEntry,
+  toPermissionEntry,
   getSites,
   isForbidden,
   pauseSite,
@@ -22,6 +25,7 @@ import {
   type SiteHealth,
 } from "@/lib/admin";
 import { isTerminal, watchJob, type Job } from "@/lib/jobs";
+import { NEVER_LINE, PermissionEntry, RiskWarning } from "./CartPermissions";
 import {
   Badge,
   ConfirmSheet,
@@ -72,8 +76,8 @@ export function SitesPanel({ onForbidden }: PanelProps) {
           </SectionLabel>
           <ul aria-label={g.title} className="flex flex-col gap-3">
             {g.rows.map((s) => {
-              const pause = !pausable.has(s.site);
-              pausable.add(s.site);
+              const pause = g.id !== "cart" && !pausable.has(s.site);
+              if (g.id !== "cart") pausable.add(s.site);
               return (
                 <SiteCard
                   key={`${s.site}:${s.kind}`}
@@ -178,6 +182,8 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
   const label = learnLabel ? `${name} ${learnLabel}` : name;
   const hintId = `learn-hint-${s.site}-${group}`;
   const canLearn = group !== "other";
+  const cart = group === "cart";
+  const conn = connectionName(s.site);
 
   return (
     <Card as="li" aria-label={label}>
@@ -192,7 +198,7 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
             {s.learned_at ? ` · learned ${relativeTime(s.learned_at, now)}` : ""}
           </p>
         </div>
-        {healthBadge(s)}
+        {cart && s.pending_approval ? <Badge tone="warn">Waiting for approval</Badge> : healthBadge(s)}
       </div>
 
       {cooling ? (
@@ -201,12 +207,14 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
         </Badge>
       ) : null}
 
+      {cart ? null : (
       <p className="mt-3 text-label tabular-nums text-ink-muted" suppressHydrationWarning>
         <span className="text-ink">{s.syncs_ok_7d}</span> ok ·{" "}
         <span className={s.syncs_failed_7d > 0 ? "font-semibold text-up" : "text-ink"}>{s.syncs_failed_7d}</span> failed
         in 7 days
         {s.last_ok_at ? ` · last ok ${relativeTime(s.last_ok_at, now)}` : ""}
       </p>
+      )}
       {jobs > 0 ? (
         <p
           className={`mt-1 text-label tabular-nums ${
@@ -236,7 +244,7 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
             onClick={learn}
             loading={busy === "learn"}
             disabled={!s.admin_connected || learning}
-            aria-label={`Learn ${label}`}
+            aria-label={cart ? `Learn ${name} cart` : `Learn ${label}`}
             aria-describedby={!s.admin_connected ? hintId : undefined}
           >
             Learn
@@ -255,11 +263,11 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
       </div>
       {canLearn && !s.admin_connected ? (
         <p id={hintId} className="mt-2 text-label text-ink-muted">
-          Connect {name} on your own account first
+          Connect {conn} on your own account first
         </p>
       ) : null}
 
-      {jobId ? <LearnProgress job={job} onForbidden={onForbidden} /> : null}
+      {jobId ? <LearnProgress job={job} site={s.site} cart={cart} onForbidden={onForbidden} /> : null}
       {error ? <Notice className="mt-3">{error}</Notice> : null}
 
       <ConfirmSheet
@@ -285,11 +293,21 @@ function entriesOf(job: Job): PostEntry[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === "object")
-    .map((e) => ({ url_regex: String(e.url_regex ?? ""), why: typeof e.why === "string" ? e.why : undefined }));
+    .map((e) => toPermissionEntry(e, typeof e.op === "string" ? e.op : undefined));
 }
 
-function learnedLine(job: Job): string {
+const CART_WAITING = "Waiting for your approval in Approvals";
+
+/** A finished cart learn: its note (what the probe added), then where the approval is. */
+function cartLearnedLine(job: Job): string {
   const p = job.progress as Record<string, unknown>;
+  const note = typeof p.note === "string" ? p.note : "";
+  return note ? `${note} ${CART_WAITING}` : CART_WAITING;
+}
+
+function learnedLine(job: Job, cart = false): string {
+  const p = job.progress as Record<string, unknown>;
+  if (cart && (p.status === "pending" || p.stage === "learned")) return cartLearnedLine(job);
   if (p.status === "pending") return "Learned. Waiting for your review in Approvals.";
   if (typeof p.version === "number") return `Recipe updated to v${p.version}.`;
   return "Learn finished.";
@@ -306,14 +324,24 @@ function Status({ children, spinning = false, tone = "muted" }: { children: stri
 }
 
 /** What a running learn job is doing; asks for approval inline when the job waits on one. */
-function LearnProgress({ job, onForbidden }: { job: Job | null; onForbidden: () => void }) {
+function LearnProgress({
+  job,
+  site,
+  cart = false,
+  onForbidden,
+}: {
+  job: Job | null;
+  site: string;
+  cart?: boolean;
+  onForbidden: () => void;
+}) {
   const [decided, setDecided] = useState<{ id: string; decision: Decision } | null>(null);
   const [busy, setBusy] = useState<Decision | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   if (!job || job.status === "queued") return <Status spinning>Waiting for a worker…</Status>;
   if (job.status === "failed") return <Status tone="bad">{`Learn failed${job.error ? ` (${job.error})` : ""}.`}</Status>;
-  if (job.status === "done") return <Status tone="ok">{learnedLine(job)}</Status>;
+  if (job.status === "done") return <Status tone="ok">{learnedLine(job, cart)}</Status>;
 
   const stage = job.progress.stage;
   const approvalId = String((job.progress as Record<string, unknown>).approval_id ?? "");
@@ -336,17 +364,29 @@ function LearnProgress({ job, onForbidden }: { job: Job | null; onForbidden: () 
     return (
       <div className="mt-3 rounded-control bg-up-soft p-3">
         <p className="text-label font-semibold text-ink">
-          Allow {entries.length === 1 ? "this POST request" : `these ${entries.length} POST requests`}?
+          {cart
+            ? `Allow ${entries.length === 1 ? "this request" : `these ${entries.length} requests`} on your cart?`
+            : `Allow ${entries.length === 1 ? "this POST request" : `these ${entries.length} POST requests`}?`}
         </p>
         <p className="text-label text-ink-muted">The job waits for you, then gives up after a few minutes.</p>
         <ul aria-label="Requested POST requests" className="mt-2 flex flex-col gap-1.5">
-          {entries.map((e, i) => (
-            <li key={`${e.url_regex}-${i}`} className="rounded-tile bg-surface px-2.5 py-1.5">
-              <code className="block font-mono text-label text-ink [overflow-wrap:anywhere]">{e.url_regex}</code>
-              {e.why ? <span className="mt-0.5 block text-label text-ink-muted">{e.why}</span> : null}
-            </li>
-          ))}
+          {entries.map((e, i) =>
+            cart ? (
+              <PermissionEntry key={`${e.url_regex}-${i}`} entry={e} />
+            ) : (
+              <li key={`${e.url_regex}-${i}`} className="rounded-tile bg-surface px-2.5 py-1.5">
+                <code className="block font-mono text-label text-ink [overflow-wrap:anywhere]">{e.url_regex}</code>
+                {e.why ? <span className="mt-0.5 block text-label text-ink-muted">{e.why}</span> : null}
+              </li>
+            ),
+          )}
         </ul>
+        {cart ? (
+          <>
+            <p className="mt-2 text-label font-medium text-ink">{NEVER_LINE(appName(site))}</p>
+            {hasRiskyEntry(entries) ? <RiskWarning /> : null}
+          </>
+        ) : null}
         <div className="mt-3 grid grid-cols-2 gap-2">
           <Button onClick={() => decide("approve")} loading={busy === "approve"} disabled={busy !== null}>
             Approve
@@ -368,6 +408,6 @@ function LearnProgress({ job, onForbidden }: { job: Job | null; onForbidden: () 
     );
   }
   if (stage === "approval_received") return <Status spinning>Approved. Finishing…</Status>;
-  if (stage === "learned") return <Status spinning>{learnedLine(job)}</Status>;
+  if (stage === "learned") return <Status spinning>{learnedLine(job, cart)}</Status>;
   return <Status spinning>Learning…</Status>;
 }

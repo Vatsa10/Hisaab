@@ -125,7 +125,7 @@ describe("sites tab, search and food learning", () => {
 
 describe("sites tab, other kinds", () => {
   it("unknown kinds show under Other with pause but no Learn", async () => {
-    routes({ "GET /admin/sites": () => [site({ site: "zepto", kind: "cart" }), site({ site: "swiggy", kind: "addresses" })] });
+    routes({ "GET /admin/sites": () => [site({ site: "zepto", kind: "addresses" }), site({ site: "swiggy", kind: "future_kind" })] });
     render(<SitesPanel onForbidden={vi.fn()} />);
     expect(await screen.findByRole("heading", { name: "Other" })).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);

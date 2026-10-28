@@ -17,6 +17,7 @@ import {
   type Decision,
   type DiffEntry,
 } from "@/lib/admin";
+import { CartPermissions } from "./CartPermissions";
 import { RecipeDiff } from "./RecipeDiff";
 import {
   Badge,
@@ -170,6 +171,11 @@ function PendingCard({
         </div>
       </div>
       <p className="mt-3 text-label font-medium text-ink">{reasonLabel(a.reason)}</p>
+      {a.kind === "cart" ? (
+        <div className="mt-3">
+          <CartPermissions approval={a} />
+        </div>
+      ) : null}
       <RecipeDiff diff={changesOf(a)} className="mt-3" />
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Button onClick={() => decide("approve")} loading={busy === "approve"} disabled={busy !== null}>

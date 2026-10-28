@@ -121,7 +121,8 @@ function CostsBody({ costs }: { costs: Costs }) {
                   </p>
                   <p className="text-label font-light tabular-nums text-ink-muted">
                     {u.syncs} {u.syncs === 1 ? "sync" : "syncs"} · {u.cart_checks}{" "}
-                    {u.cart_checks === 1 ? "cart check" : "cart checks"}
+                    {u.cart_checks === 1 ? "cart check" : "cart checks"} · {u.cart_fills ?? 0}{" "}
+                    {(u.cart_fills ?? 0) === 1 ? "fill" : "fills"}
                   </p>
                 </div>
                 <Money amount={u.inr} className="shrink-0 text-body font-semibold" />

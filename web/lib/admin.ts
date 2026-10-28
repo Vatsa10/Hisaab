@@ -15,6 +15,8 @@ export interface UserCost {
   worker_minutes: number;
   syncs: number;
   cart_checks: number;
+  /** Cart fills the user ran this month (absent on older servers). */
+  cart_fills?: number;
   inr: number;
 }
 
@@ -49,6 +51,8 @@ export interface SiteHealth {
   backoff_level?: number;
   failures_window?: number;
   jobs_window?: number;
+  /** Cart rows only: a cart recipe is waiting in Approvals. */
+  pending_approval?: boolean;
 }
 
 export interface Invite {
@@ -96,6 +100,10 @@ export interface Approval {
 export interface PostEntry {
   url_regex: string;
   why?: string;
+  /** Cart learns only: what the request does ("cart" | "location" | "read"). */
+  op?: string;
+  /** GraphQL mutation or operation name, when the request has one. */
+  operation?: string;
 }
 
 export type Decision = "approve" | "reject";
@@ -110,7 +118,7 @@ export const getCosts = (month?: string) =>
 export const getSites = () => apiFetch<SiteHealth[]>("/admin/sites");
 export const pauseSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/pause`, { method: "POST" });
 export const resumeSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/resume`, { method: "POST" });
-export type LearnKind = "orders" | "search" | "food";
+export type LearnKind = "orders" | "search" | "food" | "cart";
 export const startLearn = (site: string, kind: LearnKind = "orders") =>
   apiFetch<{ job_id: string }>(`/admin/learn/${enc(site)}${kind === "orders" ? "" : `?kind=${kind}`}`, { method: "POST" });
 export const getInvites = () => apiFetch<Invites>("/admin/invites");
@@ -237,12 +245,13 @@ export const putFees = (site: string, rules: FeeRules, verified: boolean) =>
   });
 
 /** The groups the Sites tab lists recipes under, and the learn kind each one runs. */
-export type SiteGroup = "orders" | "search" | "food" | "other";
+export type SiteGroup = "orders" | "search" | "food" | "cart" | "other";
 export const SITE_GROUPS: { id: SiteGroup; title: string; learnLabel: string }[] = [
   { id: "orders", title: "Order history", learnLabel: "" },
   { id: "search", title: "Grocery prices", learnLabel: "grocery prices" },
   { id: "food", title: "Restaurants & menus", learnLabel: "restaurants and menus" },
-  // Anything else (cart, addresses, future kinds): health and pause, never Learn.
+  { id: "cart", title: "Cart filling", learnLabel: "cart filling" },
+  // Anything else (addresses, future kinds): health and pause, never Learn.
   { id: "other", title: "Other", learnLabel: "" },
 ];
 
@@ -250,5 +259,104 @@ export function groupOf(kind: string): SiteGroup {
   if (!kind || kind === "orders") return "orders";
   if (kind === "search") return "search";
   if (kind === "restaurants" || kind === "menu" || kind === "food") return "food";
+  if (kind === "cart") return "cart";
   return "other";
+}
+
+// ---- cart learning (Plan 6) -------------------------------------------------------------
+
+/** The connection a cart learn needs: Instamart rides on Swiggy's. */
+export function connectionName(site: string): string {
+  return appName(site === "instamart" ? "swiggy" : site);
+}
+
+/** "cart" -> "Add to cart", "location" -> "Select location", "read" -> "Read cart". */
+export function opLabel(op: string | undefined): string {
+  switch (op) {
+    case "cart":
+      return "Add to cart";
+    case "location":
+      return "Select location";
+    case "read":
+      return "Read cart";
+    default:
+      return "Request";
+  }
+}
+
+/** "set" -> "Quantity: set", "increment" -> "Quantity: add" (null without an add step). */
+export function qtyModeLabel(mode: unknown): string | null {
+  if (mode === "set") return "Quantity: set";
+  if (mode === "increment") return "Quantity: add";
+  return null;
+}
+
+/** "CART WRITE (adds to the cart): adds a pack" -> "adds a pack" (the op label already says it). */
+export function stripOpPrefix(why: string | undefined): string | undefined {
+  if (why === undefined) return undefined;
+  const out = why.replace(/^[A-Z][A-Z ]*(\([^)]*\))?:\s*/, "").trim();
+  return out || undefined;
+}
+
+/** One allowlist entry from API data: why without its op prefix, plus the GraphQL operation name. */
+export function toPermissionEntry(e: Record<string, unknown>, op: string | undefined): PostEntry {
+  return {
+    url_regex: String(e.url_regex ?? ""),
+    why: stripOpPrefix(typeof e.why === "string" ? e.why : undefined),
+    op,
+    operation: typeof e.operation === "string" && e.operation ? e.operation : undefined,
+  };
+}
+
+function entryList(raw: unknown, op: string): PostEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((e): e is Record<string, unknown> => Boolean(e) && typeof e === "object")
+    .map((e) => toPermissionEntry(e, op));
+}
+
+/** "^https://api\\.x\\.test/cart/add$" -> { host: "api.x.test", path: "/cart/add" } (null if not a URL). */
+export function parseRegexUrl(regex: string): { host: string; path: string } | null {
+  const plain = regex.replace(/^\^/, "").replace(/\$$/, "").replace(/\\(.)/g, "$1");
+  const m = /^https?:\/\/([^/]+)(\/.*)?$/.exec(plain);
+  return m ? { host: m[1]!, path: m[2] ?? "/" } : null;
+}
+
+const RISKY = /\b(checkout|pay(ment)?|address(es)?|place[-_]?order|order)\b/i;
+
+/**
+ * True when any entry's regex or operation mentions checkout, payment, address or order as a
+ * whole word. Location entries are skipped: selecting a saved address is what they do.
+ */
+export function hasRiskyEntry(entries: PostEntry[]): boolean {
+  return entries.some((e) => e.op !== "location" && (RISKY.test(e.url_regex) || RISKY.test(e.operation ?? "")));
+}
+
+function regexSet(raw: unknown): Set<string> {
+  const out = new Set<string>();
+  if (Array.isArray(raw)) {
+    for (const e of raw) if (e && typeof e === "object") out.add(String((e as Record<string, unknown>).url_regex ?? ""));
+  }
+  return out;
+}
+
+/**
+ * A cart approval's permissions: cart, location and read regexes (reads already allowed by the
+ * current recipe are left out), and how quantity is sent.
+ */
+export function cartPermissions(a: Pick<Approval, "proposed"> & { current?: Approval["current"] }): {
+  cart: PostEntry[];
+  location: PostEntry[];
+  read: PostEntry[];
+  qty: string | null;
+} {
+  const p = a.proposed ?? {};
+  const add = p.add && typeof p.add === "object" ? (p.add as Record<string, unknown>) : {};
+  const already = regexSet(a.current?.read_post_allowlist);
+  return {
+    cart: entryList(p.cart_allowlist, "cart"),
+    location: entryList(p.location_allowlist, "location"),
+    read: entryList(p.read_post_allowlist, "read").filter((e) => !already.has(e.url_regex)),
+    qty: qtyModeLabel(add.qty_mode),
+  };
 }
