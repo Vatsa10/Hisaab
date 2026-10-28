@@ -66,6 +66,7 @@ class FakeShop:
         self.cap: dict[str, int] = {}
         self.fail_add: str | None = None           # "500" | "expired"
         self.read_fails = False
+        self.fail_reads: set[int] = set()          # 1-based cart-read numbers that fail
         self.read_expired = False
         self.drop_on_add: dict[str, tuple[str, int]] = {}
         self.redirect_on_add: set[str] = set()
@@ -126,7 +127,7 @@ class FakeShop:
         self.reads += 1
         if self.read_expired:
             raise browser.SessionExpired("HTTP 401")
-        if self.read_fails:
+        if self.read_fails or self.reads in self.fail_reads:
             raise RuntimeError("HTTP 500: down")
         items = [{"pid": pid, "name": NAMES.get(pid, pid), "count": qty, "price": 10.0, "oos": False}
                  for pid, qty in self.cart.items() if qty > 0]
@@ -319,10 +320,16 @@ def test_redirected_location_select_adds_nothing(monkeypatch, shop):
     assert shop.add_calls == 0 and out["status"] == "failed" and out["error"] == "redirected_write"
 
 
-def test_guard_without_redirected_writes_attribute_is_tolerated(monkeypatch, shop):
+def test_guard_without_redirected_writes_fails_closed(monkeypatch, shop):
     del shop.guard.redirected_writes
-    out = run_fill(shop, plan=[add("p1", 1)])
-    assert out["status"] == "done"
+    with pytest.raises(cart_fill.CartError, match="redirected writes"):
+        run_fill(shop, plan=[add("p1", 1)])
+    assert shop.add_calls == 0 and shop.reads == 0
+
+
+def test_real_cart_guard_has_redirected_writes():
+    from cart_guard import CartGuard
+    assert CartGuard(CartPolicy()).redirected_writes == []
 
 
 def test_out_of_stock_at_fill_time(monkeypatch, shop):
@@ -349,6 +356,19 @@ def test_ask_choice_adds_chosen_product(monkeypatch, shop):
     assert out["status"] == "done"
 
 
+def test_choice_ids_compare_as_strings(monkeypatch, shop):
+    item = ask_item()
+    for n, c in enumerate(item["choices"], 1):
+        c["id"] = n
+    out = run_fill(shop, plan=[item], ask=lambda q, c: "2")
+    assert shop.requests_sent == [{"product_id": "p9", "qty": 1, "store_id": "S1"}] and out["status"] == "done"
+
+
+def test_user_skip_still_done(monkeypatch, shop):
+    out = run_fill(shop, plan=[skip_item("you_skipped"), skip_item("no_answer"), add("p1", 1)])
+    assert out["status"] == "done"
+
+
 def test_unanswered_question_skips_item_and_continues(monkeypatch, shop):
     out = run_fill(shop, plan=[ask_item(), add("p1", 1)], ask=lambda q, c: None)
     assert [i["status"] for i in out["items"]] == ["skipped", "added"] and out["items"][0]["skip_reason"] == "no_answer"
@@ -367,7 +387,7 @@ def test_skip_items_reported_with_reason(monkeypatch, shop):
     out = run_fill(shop, plan=[skip_item("out_of_stock"), skip_item("not_found"), add("p1", 1)], on_item=seen)
     assert [(i["status"], i["skip_reason"]) for i in out["items"]] == [("skipped", "out_of_stock"),
                                                                       ("skipped", "not_found"), ("added", None)]
-    assert len(seen) == 3 and shop.add_calls == 1 and out["status"] == "done"
+    assert len(seen) == 3 and shop.add_calls == 1 and out["status"] == "partial"   # plan-time skips count
 
 
 def test_everything_skipped_is_failed_nothing_added(monkeypatch, shop):
@@ -490,6 +510,24 @@ def test_cart_read_failure_is_drift(monkeypatch, shop):
     assert shop.add_calls == 0
 
 
+def test_mid_fill_read_failure_stops_adding_and_reports(monkeypatch, shop):
+    shop.fail_reads = {2}                              # 1 before, 2 the check after p1
+    out = run_fill(shop, plan=[add("p1", 1), add("p2", 1)])
+    assert [r["product_id"] for r in shop.requests_sent] == ["p1"]
+    assert out["status"] == "failed" and out["error"] == "cart_read_failed"
+    assert [i["status"] for i in out["items"]] == ["added", "not_added"] and out["cart"]["line_count"] == 1
+
+
+def test_final_read_failure_after_adds_returns_results(monkeypatch, shop):
+    shop.fail_reads = {4}                              # before, two checks, then the final read
+    seen = []
+    out = run_fill(shop, plan=[add("p1", 1), add("p2", 1)], on_item=seen)
+    assert shop.add_calls == 2 and len(seen) == 2
+    assert out["status"] == "failed" and out["error"] == "cart_read_failed" and out["cart"] is None
+    assert [(i["product_id"], i["status"]) for i in out["items"]] == [("p1", "added"), ("p2", "added")]
+    assert out["app_location"]["store_id"] == "S1"
+
+
 def test_session_expired_propagates(monkeypatch, shop):
     shop.read_expired = True
     with pytest.raises(browser.SessionExpired):
@@ -508,7 +546,7 @@ def test_fill_never_clicks(monkeypatch, shop):
 
     monkeypatch.setattr(agent, "click_ref", boom)
     out = run_fill(shop, plan=[add("p1", 1), ask_item(), skip_item("not_found")], ask=lambda q, c: "c1")
-    assert out["status"] == "done"
+    assert out["status"] == "partial" and shop.add_calls == 2      # the plan-time not_found skip makes it partial
     src = Path(cart_fill.__file__).read_text(encoding="utf-8")
     assert "click" not in src.replace("never clicks", "").replace("never calls agent.click_ref", "")
 
@@ -534,6 +572,8 @@ def test_verify_rules():
     assert [(i["status"], i["added_qty"]) for i in items] == [("not_added", 0), ("out_of_stock", 0)]
     items, _ = cart_fill.verify({"p": 1}, {"p": 4}, [sent("p", packs=1), sent("p", packs=3)])
     assert [(i["status"], i["added_qty"]) for i in items] == [("added", 1), ("partial", 2)]
+    items, _ = cart_fill.verify({}, {"p": 1}, [sent("p", packs=1, status="out_of_stock"), sent("p", packs=1)])
+    assert [(i["status"], i["added_qty"]) for i in items] == [("out_of_stock", 0), ("added", 1)]
 
 
 def test_classify_add():
@@ -550,6 +590,7 @@ def test_outcome_shape():
 
 
 def test_fixture_is_a_valid_cart_recipe(monkeypatch):
-    monkeypatch.setattr(cart_recipe, "_host_ok", lambda site, host: host == "shop.test")
+    import cart_guard
+    monkeypatch.setattr(cart_guard, "host_ok", lambda site, host: host == "shop.test")
     assert cart_recipe.check_cart_recipe(recipe(), "shop") is None
     assert cart_recipe.check_cart_recipe(recipe(location__select=ADDRESS_SELECT), "shop") is None

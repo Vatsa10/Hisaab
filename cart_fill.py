@@ -5,7 +5,8 @@ A fill replays the approved cart recipe's requests inside the user's logged-in p
   - it never removes, empties or lowers a line, and never checks out, pays or edits an address;
   - it never clicks: every write is a recorded request, never a UI action;
   - it reads the cart before, after every add and at the end, and stops adding as soon as any line went down;
-  - it stops adding as soon as the guard saw a write answered with a redirect (CartGuard.redirected_writes);
+  - it stops adding as soon as the guard saw a write answered with a redirect (CartGuard.redirected_writes),
+    and refuses to start with a guard that doesn't keep that record;
   - an item it is unsure of was planned as a question, and is asked live; it never guesses.
 Logs carry the site and counts only: no product names, ids, coordinates, store ids or answers.
 """
@@ -25,6 +26,7 @@ log = logging.getLogger("cart_fill")
 
 OUT_OF_STOCK_TEXT = re.compile(r"out of stock|sold out|unavailable|not available|no stock", re.I)
 SKIP_REASONS = ("you_skipped", "no_answer", "out_of_stock", "not_found")
+USER_SKIPS = ("you_skipped", "no_answer")
 # Fields of a 2xx add response that carry the app's own message ("Item is out of stock").
 _MESSAGE_KEY = re.compile(r"message|error|reason|status|title|description|toast", re.I)
 
@@ -73,18 +75,22 @@ def _response_text(resp) -> str:
 
 
 def verify(before: dict[str, int], after: dict[str, int], sent: list[dict]) -> tuple[list[dict], bool]:
-    """Each sent item's added_qty from after - before (shared out in plan order when a product repeats), its
-    status from that, and whether any line that was already in the cart went down."""
+    """Each sent item's added_qty from after - before (shared out in plan order when a product repeats; an
+    out_of_stock item keeps its status and takes no share), its status from that, and whether any line that was
+    already in the cart went down."""
     remaining = {pid: max(0, after.get(pid, 0) - before.get(pid, 0)) for pid in {i["product_id"] for i in sent}}
     items = []
     for item in sent:
         item = dict(item)
         pid, packs = item["product_id"], item["packs"]
+        if item.get("status") == "out_of_stock":   # the app refused it: it takes no share of the diff
+            item["added_qty"] = 0
+            items.append(item)
+            continue
         got = min(remaining[pid], packs)
         remaining[pid] -= got
         item["added_qty"] = got
-        if item.get("status") != "out_of_stock":
-            item["status"] = "added" if got >= packs else "partial" if got > 0 else "not_added"
+        item["status"] = "added" if got >= packs else "partial" if got > 0 else "not_added"
         items.append(item)
     changed = any(q > 0 and after.get(pid, 0) < q for pid, q in before.items())
     return items, changed
@@ -131,7 +137,7 @@ def _read_location(page, recipe: dict) -> dict:
 
 
 def _redirected(guard) -> list:
-    return list(getattr(guard, "redirected_writes", None) or [])
+    return list(guard.redirected_writes)
 
 
 # --- location ------------------------------------------------------------------------------------
@@ -228,6 +234,9 @@ def fill_cart(site, plan, priced, recipe, search_recipe, profile_dir, ask: Calla
 
 def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage, confirm_location,
           max_m) -> dict:
+    if not isinstance(getattr(guard, "redirected_writes", None), list):
+        # Fail closed: without the record of redirected writes, a fill can't tell a write went astray.
+        raise CartError("the cart guard can't report redirected writes")
     before = _quantities(_read_cart(page, recipe))
 
     on_stage("checking_location")
@@ -274,7 +283,8 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
         elif action == "ask":
             answer = ask(item.get("question"), item.get("choices") or [])
             choice = None if answer in (None, "skip") else next(
-                (c for c in item.get("choices") or [] if c.get("id") == answer), None)
+                (c for c in item.get("choices") or [] if c.get("id") is not None and str(c["id"]) == str(answer)),
+                None)
             if choice is None:
                 res["status"] = "skipped"
                 res["skip_reason"] = "no_answer" if answer is None else "you_skipped"
@@ -321,8 +331,12 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
     try:
         after_cart = _read_cart(page, recipe)
     except CartDrift:
+        if not requests:
+            raise                   # nothing went out: the recipe's read is broken (drift)
+        # Adds went out: report what each add request answered, unverified, and tell the user to check the app.
         log.warning("cart fill on %s: cart read failed after %d add requests", site, requests)
-        raise
+        return outcome("failed", results, None, app_location=app, location_selected=selected,
+                       error="cart_read_failed", existing_changed=abort == "existing_changed")
     after = _quantities(after_cart)
     checked, existing_changed = verify(before, after, [results[i] for i in attempted])
     for pos, item in zip(attempted, checked):
@@ -341,7 +355,8 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
         status, error = "failed", abort or "existing_changed"
         log.warning("cart fill on %s stopped (%s)", site, error)
     else:
-        tried = [i for i in results if i["status"] != "skipped"]
+        # User skips (you_skipped, no_answer) don't spoil "done"; plan-time skips (out_of_stock, not_found) do.
+        tried = [i for i in results if not (i["status"] == "skipped" and i["skip_reason"] in USER_SKIPS)]
         if not counts["added"] and not counts["partial"]:
             status, error = "failed", "nothing_added"
         elif all(i["status"] == "added" for i in tried):
