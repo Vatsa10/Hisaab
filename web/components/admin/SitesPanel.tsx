@@ -65,6 +65,14 @@ export function SitesPanel({ onForbidden }: PanelProps) {
   );
 }
 
+/** Matches the server's ERROR_BUDGET_WINDOW_H default. */
+const WINDOW_HOURS = 24;
+
+function hhmm(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 function healthBadge(s: SiteHealth) {
   if (s.paused) return <Badge tone="bad">Paused</Badge>;
   if (!s.healthy) return <Badge tone="warn">Unhealthy</Badge>;
@@ -85,6 +93,9 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const now = Date.now();
+  const cooling = Boolean(s.cooldown_until) && new Date(s.cooldown_until!).getTime() > now;
+  const failures = s.failures_window ?? 0;
+  const jobs = s.jobs_window ?? 0;
 
   useEffect(() => {
     if (!jobId) return;
@@ -151,12 +162,26 @@ function SiteCard({ site: s, actions, onChanged, onForbidden }: SiteCardProps) {
         {healthBadge(s)}
       </div>
 
+      {cooling ? (
+        <Badge tone="warn" className="mt-3">
+          Cooling down until {hhmm(s.cooldown_until!)} · level {s.backoff_level ?? 0}
+        </Badge>
+      ) : null}
+
       <p className="mt-3 text-label tabular-nums text-ink-muted" suppressHydrationWarning>
         <span className="text-ink">{s.syncs_ok_7d}</span> ok ·{" "}
         <span className={s.syncs_failed_7d > 0 ? "font-semibold text-up" : "text-ink"}>{s.syncs_failed_7d}</span> failed
         in 7 days
         {s.last_ok_at ? ` · last ok ${relativeTime(s.last_ok_at, now)}` : ""}
       </p>
+      {jobs > 0 ? (
+        <p className="mt-1 text-label tabular-nums text-ink-muted">
+          Failures ({WINDOW_HOURS} h): {failures} of {jobs} ({Math.round((failures / jobs) * 100)}%)
+        </p>
+      ) : null}
+      {s.paused ? (
+        <p className="mt-2 text-label text-danger">Paused automatically after repeated failures. Resume once the site is back.</p>
+      ) : null}
       {s.health_note ? (
         <p className={`mt-2 text-label ${s.paused ? "text-danger" : s.healthy ? "text-ink-muted" : "text-up"}`}>
           {s.health_note}

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ReloginBanner } from "@/components/account/ReloginBanner";
 import { TabBar } from "@/components/ui/TabBar";
 
 /**
@@ -13,6 +14,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         id="main"
         className="px-safe mx-auto w-full max-w-[480px] pb-[calc(theme(spacing.tabbar)+env(safe-area-inset-bottom)+1.5rem)] pt-[calc(env(safe-area-inset-top)+1rem)]"
       >
+        <ReloginBanner />
         {children}
       </main>
       <TabBar />
