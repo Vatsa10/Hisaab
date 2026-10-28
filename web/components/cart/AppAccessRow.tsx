@@ -4,21 +4,23 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { CheckIcon } from "@/components/connect/icons";
 import { cn } from "@/lib/cn";
-import { GROCERY_SITES, SITE_DOTS, SITE_NAMES, type AccessMap, type GrocerySite } from "@/lib/cart";
+import { GROCERY_SITES, SITE_DOTS, SITE_NAMES, type AccessMap, type CartSite } from "@/lib/cart";
 
 export interface AppAccessRowProps {
   /** null while loading. */
   access: AccessMap | null;
   /** The status read failed: show the apps without a status (the server still checks). */
   failed?: boolean;
+  /** The apps to list; the three grocery apps by default (food mode passes Swiggy and Zomato). */
+  sites?: readonly CartSite[];
 }
 
 /** The connection a grocery app is priced through (Instamart comes with Swiggy). */
-function connectLabel(site: GrocerySite): string {
+function connectLabel(site: CartSite): string {
   return site === "instamart" ? "Connect Swiggy to compare Instamart" : `Connect ${SITE_NAMES[site]} to compare`;
 }
 
-function Name({ site }: { site: GrocerySite }) {
+function Name({ site }: { site: CartSite }) {
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", SITE_DOTS[site])} />
@@ -33,10 +35,10 @@ const CELL = "flex min-h-14 flex-col justify-center gap-0.5 rounded-control px-3
  * The three grocery apps with what each needs before it can be priced: "Connected", or a link
  * to Accounts that says "Connect" or "Log in again". Only connected apps are priced.
  */
-export function AppAccessRow({ access, failed = false }: AppAccessRowProps) {
+export function AppAccessRow({ access, failed = false, sites = GROCERY_SITES }: AppAccessRowProps) {
   return (
-    <ul aria-label="Apps we compare" className="grid grid-cols-3 gap-1 p-1">
-      {GROCERY_SITES.map((site) => {
+    <ul aria-label="Apps we compare" className={cn("grid gap-1 p-1", sites.length === 2 ? "grid-cols-2" : "grid-cols-3")}>
+      {sites.map((site) => {
         const status = access?.[site];
         let body: ReactNode;
         if (status === "not_connected" || status === "needs_login" || (access && !status)) {
