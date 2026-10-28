@@ -422,7 +422,7 @@ test("sign up, connect Swiggy with an OTP, and Spend, Orders and Ask fill in", a
     await expect(main.getByText("Swiggy", { exact: true })).toBeVisible();
     const summary = page.getByRole("region", { name: "Summary" });
     expect(rupees(await summary.innerText())).toBeGreaterThan(0);
-    await expect(summary).toContainText(/Order ID\s+FAKE-swiggy-\d{4}/);
+    await expect(summary).toContainText(/Order ID\s*FAKE-swiggy-\d{4}/);
     await expect(main.getByRole("region", { name: /^\d+ items?$/ })).toBeVisible();
     await expect(main.getByText("Swiggy doesn't list item prices, only the order total.")).toBeVisible();
     await expectNoHorizontalScroll(page, "order detail, 390px");

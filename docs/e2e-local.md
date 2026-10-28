@@ -23,7 +23,9 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
 2. **PWA build.** `next build` in `web/` with the three public values: the Supabase URL and anon key from
    `web/.env.local` and `NEXT_PUBLIC_API_URL=http://localhost:8010`. `web/node_modules` is installed if missing.
 3. **Clean database.** `npx supabase db reset` re-applies every migration, which also removes the users earlier
-   runs created. Then `dev_supabase.sh` runs again to give the `ask_reader` login a fresh password.
+   runs created. The CLI's reset sometimes fails while "Initialising schema" (`DbSetupError`: the realtime
+   container races its own `schema_migrations` insert), so the script tries up to three times. Then
+   `dev_supabase.sh` runs again to give the `ask_reader` login a fresh password.
 4. **Services**, each with `.env.server.local` plus its own switches:
 
    | Service | Command | Port | Switches |
@@ -40,12 +42,18 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
 
 Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`.
 
-### One host name: localhost
+### Host names
 
-The browser, the PWA, the API and the Supabase URL the PWA uses are all `localhost` (the script rewrites
-`127.0.0.1` from `supabase status`). Supabase Auth only redirects to its `site_url` host and allow-list
-(`http://localhost:3000` in `supabase/config.toml`), so serving the PWA on `127.0.0.1` would break sign-up
-redirects. The port can differ, the host may not.
+The browser opens the PWA at `localhost`, and the PWA calls the API at `localhost`. Supabase Auth only
+redirects to the host of its `site_url` and allow-list (`http://localhost:3000` in `supabase/config.toml`), so
+serving the PWA on `127.0.0.1` would break sign-up and OAuth redirects. The port can differ; the host cannot.
+
+Supabase itself stays at `127.0.0.1`, as `supabase status` and `dev_supabase.sh` give it. Do not change it to
+`localhost`. On Windows with WSL, `wslrelay.exe` also listens on `[::1]` for every port Docker publishes
+(54321, 54322, …), and sometimes accepts a connection without ever answering it. Browsers and Node try `::1`
+first for `localhost`, so a `localhost` Supabase URL stalls sign-ups, server renders and Realtime at random.
+You can see it with `netstat -ano | grep 54321`: one listener is `com.docker.backend.exe`, the other on `[::1]`
+is `wslrelay.exe`.
 
 ### The fakes
 
@@ -92,7 +100,9 @@ Both fakes refuse to start unless `DATABASE_URL` points at this machine.
 
 No horizontal scroll: every tab (Spend, Orders, Cart, Ask, Accounts) is checked at 390 px and at 375 px, empty
 and with data. So are an order's detail page and Ask with a table on screen. Nothing on the page may be wider
-than the screen, and a sideways scroll must not move it.
+than the screen, and a sideways scroll must not move it. The 375 px checks run in a separate 375 px context
+that shares the signed-in session. They never resize the page: resizing a mobile WebKit page in place leaves its
+layout viewport at the old height, and the fixed tab bar becomes unclickable.
 
 Nothing sleeps: every wait is for text that the API or Realtime puts on screen (Playwright's auto-waiting
 `expect`, 30 s default, 90 s for a sync).
@@ -105,8 +115,11 @@ Nothing sleeps: every wait is for text that the API or Realtime puts on screen (
 | `e2e/test-results/` | Traces and screenshots of failed tests |
 | `e2e/.run/logs/` | `api.log`, `worker.log`, `web.log`, `web-build.log`, `supabase.log`, `playwright.log` |
 
-All are gitignored. The script never prints a secret: `dev_supabase.sh`'s output (which names the anon key) goes
-to `/dev/null`, and the services log no tokens, phone numbers, OTPs or answers.
+All are gitignored. The script never prints a secret:
+- `dev_supabase.sh`'s stdout, which names the anon key, goes to `/dev/null`.
+- Everything the Supabase CLI writes passes through a redaction filter before it reaches `supabase.log` or the
+  terminal. `supabase start` prints the anon and service-role keys, the JWT secret and the S3 keys.
+- The services log no tokens, phone numbers, OTPs or answers.
 
 ## Troubleshooting
 
