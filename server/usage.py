@@ -2,27 +2,35 @@
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-DEFAULT_TZ = "Asia/Kolkata"
+from server import config
 
 
-def _local(now: datetime | None, tz: str) -> datetime:
+def as_utc(now: datetime | None) -> datetime:
+    """`now` (default: the current time) as an aware datetime; a naive one is taken as UTC."""
     now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    return now.astimezone(ZoneInfo(tz))
+    return now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now
 
 
-def today(now: datetime | None = None, tz: str = DEFAULT_TZ) -> date:
+def _zone(tz: str | None) -> ZoneInfo:
+    """tz=None means APP_TZ from config (the single source of the zone)."""
+    return ZoneInfo(tz or config.settings().app_tz)
+
+
+def _local(now: datetime | None, tz: str | None) -> datetime:
+    return as_utc(now).astimezone(_zone(tz))
+
+
+def today(now: datetime | None = None, tz: str | None = None) -> date:
     return _local(now, tz).date()
 
 
-def month_of(now: datetime | None = None, tz: str = DEFAULT_TZ) -> str:
+def month_of(now: datetime | None = None, tz: str | None = None) -> str:
     return _local(now, tz).strftime("%Y-%m")
 
 
-def day_bounds(now: datetime | None = None, tz: str = DEFAULT_TZ) -> tuple[datetime, datetime]:
+def day_bounds(now: datetime | None = None, tz: str | None = None) -> tuple[datetime, datetime]:
     """UTC start (inclusive) and end (exclusive) of the local day that contains `now`."""
-    zone = ZoneInfo(tz)
+    zone = _zone(tz)
     d = today(now, tz)
     start = datetime(d.year, d.month, d.day, tzinfo=zone)
     end = datetime(*(d + timedelta(days=1)).timetuple()[:3], tzinfo=zone)

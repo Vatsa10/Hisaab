@@ -48,24 +48,25 @@ class BudgetState:
 def refresh_state(conn, s: Settings, now: datetime | None = None) -> BudgetState:
     """Recompute this IST month's level and store it. previous_level is what was stored before (ok if none)."""
     month = usage.month_of(now, s.app_tz)
-    spent = round(month_cost(conn, s, month), 2)
-    level = level_for(spent, s)
-    row = conn.execute("select level from budget_state where month = %s", (month,)).fetchone()
-    previous = row[0] if row else "ok"
-    conn.execute(
-        "insert into budget_state (month, level, spent_inr, budget_inr, updated_at) values (%s, %s, %s, %s, now()) "
-        "on conflict (month) do update set level = excluded.level, spent_inr = excluded.spent_inr, "
-        "budget_inr = excluded.budget_inr, updated_at = now()",
-        (month, level, spent, s.monthly_budget_inr))
-    pct = int(spent / s.monthly_budget_inr * 100) if s.monthly_budget_inr > 0 else 0
-    return BudgetState(month, spent, float(s.monthly_budget_inr), pct, level, previous)
+    spent = month_cost(conn, s, month)
+    level = level_for(spent, s)   # unrounded: only the stored figure is rounded
+    # One transaction: make sure the row exists, then lock it, so overlapping ticks take turns and exactly one
+    # of them sees each transition (the second reads the level the first stored).
+    with conn.transaction():
+        conn.execute("insert into budget_state (month, level, spent_inr, budget_inr) values (%s, 'ok', 0, %s) "
+                     "on conflict (month) do nothing", (month, s.monthly_budget_inr))
+        previous = conn.execute("select level from budget_state where month = %s for update", (month,)).fetchone()[0]
+        conn.execute("update budget_state set level = %s, spent_inr = %s, budget_inr = %s, updated_at = now() "
+                     "where month = %s", (level, round(spent, 2), s.monthly_budget_inr, month))
+    pct = int(spent * 100 // s.monthly_budget_inr) if s.monthly_budget_inr > 0 else 0
+    return BudgetState(month, round(spent, 2), float(s.monthly_budget_inr), pct, level, previous)
 
 
-def current_level(conn, now: datetime | None = None, tz: str = usage.DEFAULT_TZ) -> str:
+def current_level(conn, now: datetime | None = None, tz: str | None = None) -> str:
     """The stored level of the current IST month; a month with no row is ok."""
     row = conn.execute("select level from budget_state where month = %s", (usage.month_of(now, tz),)).fetchone()
     return row[0] if row else "ok"
 
 
-def is_paused(conn, now: datetime | None = None, tz: str = usage.DEFAULT_TZ) -> bool:
+def is_paused(conn, now: datetime | None = None, tz: str | None = None) -> bool:
     return current_level(conn, now, tz) == "paused"

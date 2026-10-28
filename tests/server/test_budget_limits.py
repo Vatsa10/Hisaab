@@ -131,9 +131,11 @@ def test_consume_cart_check_is_atomic(pg, _applied, s):
     now = datetime(2026, 10, 27, 6, 0, tzinfo=timezone.utc)
     usage.record(pg, A, usage.today(now), cart_checks=9)
     results = []
+    barrier = threading.Barrier(2)
 
     def go():
         with psycopg.connect(_applied, autocommit=True) as c:
+            barrier.wait(timeout=10)
             try:
                 results.append(limits.consume_cart_check(c, A, now, s))
             except limits.LimitExceeded:
@@ -161,3 +163,35 @@ def test_to_http():
     assert (h.status_code, h.detail, h.headers["Retry-After"]) == (429, "msg", "120")
     h = limits.to_http(limits.BudgetPaused("cart", date(2026, 11, 1), "paused"))
     assert (h.status_code, h.detail) == (503, "paused")
+
+
+def test_refresh_state_concurrent_ticks_report_one_transition(pg, _applied):
+    s = Settings()
+    now = datetime(2026, 10, 27, 5, 0, tzinfo=timezone.utc)
+    usage.record(pg, A, date(2026, 10, 27), proxy_mb=10_000)   # 80 %: alert
+    barrier = threading.Barrier(2)
+    seen = []
+
+    def tick():
+        with psycopg.connect(_applied, autocommit=True) as c:
+            barrier.wait(timeout=10)
+            seen.append(budget.refresh_state(c, s, now).previous_level)
+
+    ts = [threading.Thread(target=tick) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert sorted(seen) == ["alert", "ok"]
+
+
+def test_level_uses_unrounded_spend_and_pct_floors(pg):
+    s = Settings()
+    assert budget.level_for(3999.999, s) == "ok"
+    usage.record(pg, A, date(2026, 10, 27), proxy_mb=9999.999)   # 3999.9996 rupees, stores as 4000.0
+    st = budget.refresh_state(pg, s, datetime(2026, 10, 27, 5, 0, tzinfo=timezone.utc))
+    assert (st.level, st.pct, st.spent_inr) == ("ok", 79, 4000.0)
+
+
+def test_naive_now_is_taken_as_utc():
+    naive = datetime(2026, 10, 27, 18, 0)
+    assert limits.seconds_until_reset(naive, "Asia/Kolkata") == 1800
+    assert usage.today(naive, "Asia/Kolkata") == date(2026, 10, 27)

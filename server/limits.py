@@ -1,5 +1,5 @@
 """Daily per-user limits (manual refresh per app, cart checks) and the budget pause, counted on IST days."""
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from fastapi import HTTPException
 
@@ -22,8 +22,7 @@ class BudgetPaused(Exception):
 def seconds_until_reset(now: datetime | None, tz: str) -> int:
     """Seconds until the next local midnight (at least 1)."""
     _, end = usage.day_bounds(now, tz)
-    now = now or datetime.now(timezone.utc)
-    return max(1, int((end - now).total_seconds()))
+    return max(1, int((end - usage.as_utc(now)).total_seconds()))
 
 
 def refresh_left(conn, user_id: str, site: str, now: datetime | None, s: Settings) -> int:
