@@ -79,10 +79,11 @@ def get_recipe(conn, site: str, kind: str = "orders") -> dict | None:
 
 
 def put_recipe(conn, site: str, recipe: dict, kind: str = "orders") -> int:
-    """Insert or replace a site's recipe; the version increments on every put. Returns the new version."""
+    """Insert or replace a site's recipe; the version increments on every put, and the site is healthy and
+    unpaused again. Returns the new version."""
     return conn.execute(
         "INSERT INTO recipes (site, kind, recipe) VALUES (%s,%s,%s) "
         "ON CONFLICT (site, kind) DO UPDATE SET recipe=excluded.recipe, version=recipes.version+1, "
-        "learned_at=now(), healthy=true RETURNING version",
+        "learned_at=now(), healthy=true, paused=false, health_note=null RETURNING version",
         (site, kind, Jsonb(recipe)),
     ).fetchone()[0]

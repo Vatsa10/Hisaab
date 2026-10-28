@@ -12,6 +12,9 @@ import typer
 import db
 import recipes
 from browser import SITES, SessionExpired, load_settings, location_is_detailed, resolve_location, save_location
+# A published recipe must not carry the account it was learned on; the cloud learn jobs apply the same checks.
+from server.recipe_admin import account_specific as _account_specific
+from server.recipe_admin import strip_identity_headers as _strip_identity_headers
 
 app = typer.Typer(add_completion=False, help="Read-only order-history expense agent.")
 # Instamart is not synced on its own: on the web its "My Account" opens Swiggy's single order feed
@@ -224,48 +227,6 @@ def reset(site: str):
     if p.exists():
         p.unlink()
         print(f"removed {p}")
-
-
-# A published recipe is shared by every user: it must not carry the account it was learned on.
-IDENTITY_HEADERS = {"referer", "origin", "cookie"}
-_ACCOUNT_SEGMENT = re.compile(r"/(?:users|user|profile)/[^/?#]+", re.I)
-_LONG_DIGITS = re.compile(r"\d{8,}")
-
-
-def _strip_identity_headers(obj):
-    """A copy of obj with referer/origin/cookie (any case) removed from every "headers" mapping."""
-    if isinstance(obj, dict):
-        return {k: ({h: v for h, v in val.items() if h.lower() not in IDENTITY_HEADERS}
-                    if k.lower() == "headers" and isinstance(val, dict) else _strip_identity_headers(val))
-                for k, val in obj.items()}
-    if isinstance(obj, list):
-        return [_strip_identity_headers(v) for v in obj]
-    return obj
-
-
-def _url_path(s: str) -> str | None:
-    """The path of an http(s) URL or of a "/..." path, else None."""
-    from urllib.parse import urlsplit
-    if re.match(r"https?://", s, re.I):
-        try:
-            return urlsplit(s).path
-        except ValueError:
-            return s
-    return re.split(r"[?#]", s, maxsplit=1)[0] if s.startswith("/") else None
-
-
-def _account_specific(obj, where: str = "$") -> list[str]:
-    """JSON paths of string values that look tied to one account: a /users/<x>, /user/<x> or /profile/<x>
-    segment, or a run of 8+ digits in a URL path."""
-    if isinstance(obj, dict):
-        return [p for k, v in obj.items() for p in _account_specific(v, f"{where}.{k}")]
-    if isinstance(obj, list):
-        return [p for i, v in enumerate(obj) for p in _account_specific(v, f"{where}[{i}]")]
-    if isinstance(obj, str):
-        path = _url_path(obj)
-        if _ACCOUNT_SEGMENT.search(obj if path is None else path) or (path and _LONG_DIGITS.search(path)):
-            return [where]
-    return []
 
 
 @app.command("publish-recipe")
