@@ -5,6 +5,7 @@ import { SignOutButton } from "@/components/auth/SignOutButton";
 import { AccountsScreen, type ConsentRow } from "@/components/connect/AccountsScreen";
 import type { Profile } from "@/components/connect/AddressRow";
 import { Card } from "@/components/ui/Card";
+import { ADDRESS_COLUMNS, toAddress } from "@/lib/addresses";
 import { CONNECTION_COLUMNS, JOB_COLUMNS, type Connection, type Job } from "@/lib/jobs";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -21,15 +22,16 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
   const email = data.user?.email;
 
   // Each read degrades to "nothing yet" on error; the live subscription fills in the rest.
-  const [connections, consents, profile, jobs] = await Promise.all([
+  const [connections, consents, profile, jobs, addresses] = await Promise.all([
     supabase.from("connections").select(CONNECTION_COLUMNS),
     supabase.from("consents").select("site, text_version"),
-    supabase.from("profiles").select("address, lat, lon").maybeSingle(),
+    supabase.from("profiles").select("address, lat, lon, chosen").maybeSingle(),
     supabase
       .from("jobs")
       .select(JOB_COLUMNS)
       .in("status", ["queued", "running"])
       .order("created_at", { ascending: true }),
+    supabase.from("app_addresses").select(ADDRESS_COLUMNS),
   ]);
 
   return (
@@ -40,6 +42,8 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
         initialProfile={(profile.data as Profile | null) ?? null}
         initialJobs={(jobs.data as Job[] | null) ?? []}
         reconnect={reconnect}
+        initialAddresses={((addresses.data as Record<string, unknown>[] | null) ?? []).map(toAddress)}
+        userId={data.user?.id}
       />
 
       <NotificationsCard />

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DataCard } from "@/components/account/DataCard";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
+import type { AppAddress } from "@/lib/addresses";
 import { ApiError, apiFetch } from "@/lib/api";
 import { APPS, type AppInfo, type SiteId } from "@/lib/apps";
 import { getLimits, getMe, type Limits } from "@/lib/me";
@@ -27,6 +28,10 @@ export interface AccountsScreenProps {
   initialJobs: Job[];
   /** `?reconnect=<site>`: open that app's connect flow on arrival (phone step, or consent if missing). */
   reconnect?: string;
+  /** The user's saved app addresses when the page was rendered (kept live by AddressRow). */
+  initialAddresses?: AppAddress[];
+  /** The signed-in user's id, for the Realtime filters (read from the session when absent). */
+  userId?: string;
 }
 
 function refreshProblem(e: unknown, app: AppInfo): string {
@@ -46,7 +51,15 @@ const byId = (id: string): AppInfo | undefined => APPS.find((a) => a.id === id);
  * "Refresh now" for connected apps, and the delivery address. Connection rows update live over
  * Realtime, so a connect started on another device shows up here without a reload.
  */
-export function AccountsScreen({ initialConnections, initialConsents, initialProfile, initialJobs, reconnect }: AccountsScreenProps) {
+export function AccountsScreen({
+  initialConnections,
+  initialConsents,
+  initialProfile,
+  initialJobs,
+  initialAddresses,
+  userId,
+  reconnect,
+}: AccountsScreenProps) {
   const [connections, setConnections] = useState<Connection[]>(initialConnections);
   const [consented, setConsented] = useState<ReadonlySet<string>>(
     () => new Set(initialConsents.filter((c) => c.text_version === CONSENT_VERSION).map((c) => c.site)),
@@ -64,7 +77,7 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => watchConnections(setConnections), []);
+  useEffect(() => watchConnections(setConnections, undefined, userId), [userId]);
 
   const [limits, setLimits] = useState<Limits | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -223,7 +236,7 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
         </Card>
       ) : null}
 
-      <AddressRow profile={profile} onSaved={setProfile} />
+      <AddressRow profile={profile} onSaved={setProfile} initialAddresses={initialAddresses} userId={userId} />
 
       <DataCard connected={APPS.filter((a) => connectionFor.has(a.id))} />
 

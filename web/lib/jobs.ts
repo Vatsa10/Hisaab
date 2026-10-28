@@ -85,7 +85,7 @@ function toConnection(row: Record<string, unknown>): Connection {
 let channelSeq = 0;
 
 /** Re-run `refetch` when the page returns to the foreground or the network comes back. */
-function onWake(refetch: () => void): () => void {
+export function onWake(refetch: () => void): () => void {
   if (typeof window === "undefined") return () => {};
   const onVisible = () => {
     if (document.visibilityState === "visible") refetch();
@@ -139,19 +139,23 @@ export function watchJob(
     );
   };
 
-  const channel: RealtimeChannel = client
-    .channel(`job-${jobId}-${++channelSeq}`)
-    .on(
+  // Inserts and updates of this one job only. Never DELETE (or "*"): Supabase delivers DELETE events
+  // to every subscriber, unfiltered, and a job row is never deleted while someone follows it.
+  const onRow = (payload: { new: unknown }) => {
+    events += 1;
+    deliver(payload.new as Record<string, unknown>);
+  };
+  let channel: RealtimeChannel = client.channel(`job-${jobId}-${++channelSeq}`);
+  for (const event of OWN_ROW_EVENTS) {
+    channel = channel.on(
       "postgres_changes",
-      { event: "*", schema: "public", table: "jobs", filter: `id=eq.${jobId}` },
-      (payload) => {
-        events += 1;
-        deliver(payload.new as Record<string, unknown>);
-      },
-    )
-    .subscribe((status) => {
-      if (status === "SUBSCRIBED") refetch();
-    });
+      { event, schema: "public", table: "jobs", filter: `id=eq.${jobId}` },
+      onRow,
+    );
+  }
+  channel = channel.subscribe((status) => {
+    if (status === "SUBSCRIBED") refetch();
+  });
 
   const stopWake = onWake(refetch);
   return () => {
@@ -186,14 +190,73 @@ export async function firstOrderMonth(
   }
 }
 
+/** The only Realtime events per-user watchers subscribe to. */
+export const OWN_ROW_EVENTS = ["INSERT", "UPDATE"] as const;
+
 /**
- * Follow the signed-in user's connections (RLS limits rows to their own). `onChange` gets the
- * full list on join, on every change and after every reconnect, so a second device sees a new
- * connection appear live. Returns an unsubscribe function.
+ * Listen for the user's own new and changed rows of a per-user table, filtered to `user_id=eq.<uid>`.
+ * Never DELETE: Supabase applies neither RLS nor the filter to DELETE events, so a DELETE
+ * subscription would deliver other users' deleted keys. Deletes show on the next re-read (channel
+ * rejoin, wake, back online), or with the insert or update that usually comes with them.
+ */
+export function onOwnRowChanges(
+  channel: RealtimeChannel,
+  table: string,
+  userId: string,
+  onEvent: () => void,
+): RealtimeChannel {
+  let ch = channel;
+  for (const event of OWN_ROW_EVENTS) {
+    ch = ch.on("postgres_changes", { event, schema: "public", table, filter: `user_id=eq.${userId}` }, () =>
+      onEvent(),
+    );
+  }
+  return ch;
+}
+
+/**
+ * Run `start(userId)` for the signed-in user and return a stop function. With `userId` given it
+ * starts at once; otherwise it reads the session first (and starts nothing without one).
+ */
+export function forUser(
+  client: SupabaseClient,
+  userId: string | undefined,
+  start: (userId: string) => () => void,
+): () => void {
+  if (userId) return start(userId);
+  let stop: (() => void) | null = null;
+  let active = true;
+  void Promise.resolve(client.auth.getSession()).then(
+    ({ data }) => {
+      const uid = data.session?.user?.id;
+      if (active && uid) stop = start(uid);
+    },
+    () => {},
+  );
+  return () => {
+    active = false;
+    stop?.();
+  };
+}
+
+/**
+ * Follow the signed-in user's connections (RLS limits reads to their own). `onChange` gets the full
+ * list on join, on each of their own inserts and updates (onOwnRowChanges), and after every
+ * reconnect or wake, so a second device sees a new connection appear live. Returns an unsubscribe
+ * function.
  */
 export function watchConnections(
   onChange: (connections: Connection[]) => void,
   client: SupabaseClient = getSupabaseBrowserClient(),
+  userId?: string,
+): () => void {
+  return forUser(client, userId, (uid) => followConnections(onChange, client, uid));
+}
+
+function followConnections(
+  onChange: (connections: Connection[]) => void,
+  client: SupabaseClient,
+  userId: string,
 ): () => void {
   let active = true;
   let seq = 0;
@@ -210,10 +273,12 @@ export function watchConnections(
     );
   };
 
-  const channel: RealtimeChannel = client
-    .channel(`connections-${++channelSeq}`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "connections" }, () => refetch())
-    .subscribe((status) => {
+  const channel: RealtimeChannel = onOwnRowChanges(
+    client.channel(`connections-${++channelSeq}`),
+    "connections",
+    userId,
+    refetch,
+  ).subscribe((status) => {
       if (status === "SUBSCRIBED") refetch();
     });
 

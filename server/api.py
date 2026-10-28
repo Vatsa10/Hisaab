@@ -11,13 +11,14 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, StringConstraints
+from psycopg.types.json import Jsonb
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 import browser
 import llm
 import sync
 from browser import SITES
-from server import ask, jobs
+from server import addresses_store, ask, jobs
 from server.auth import Unauthorized, user_id_from_token
 from server.config import settings
 from server.local_db import is_local_db
@@ -110,9 +111,22 @@ class AnswerBody(BaseModel):
     answer: str = Field(min_length=1, max_length=500)
 
 
+class ChoiceBody(BaseModel):
+    site: str = Field(max_length=32)
+    address_id: str = Field(min_length=1, max_length=300)
+
+
 class ProfileBody(BaseModel):
-    address: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=200)]
+    """Either a typed address (geocoded) or a choice of one of the user's saved app addresses, never both."""
+    address: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=200)] | None = None
+    choice: ChoiceBody | None = None
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None = None
+
+    @model_validator(mode="after")
+    def _one_of(self):
+        if (self.address is None) == (self.choice is None):
+            raise ValueError("send either address or choice")
+        return self
 
 
 class AskBody(BaseModel):
@@ -259,20 +273,51 @@ def short_place(display) -> str | None:
     return text or None
 
 
-@app.put("/profile")
-def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+def _geocode(text: str) -> dict:
     try:
-        loc = browser.resolve_location(body.address)
+        return browser.resolve_location(text)
     except ValueError:
         raise HTTPException(422, "address not found; add the area and city, or paste 'lat,lon'") from None
     except Exception as e:  # network or service trouble; the address itself is never logged
         log.warning("geocoding failed (%s)", type(e).__name__)
         raise HTTPException(503, "geocoding is unavailable, try again") from None
+
+
+def _put_choice(body: ProfileBody, user: str, conn) -> dict:
+    """Use one of the user's saved app addresses: copy its text and pin into profiles and remember the choice.
+    A saved address without a pin is placed by its area and city."""
+    _known_site(body.choice.site)
+    row = addresses_store.get(conn, user, body.choice.site, body.choice.address_id)
+    if row is None:
+        raise HTTPException(404, "not one of your saved addresses")
+    text = ", ".join(p for p in (row["line"], row["area"], row["city"]) if p)[:200] or (row["label"] or "Saved address")
+    display = ", ".join(p for p in (row["area"], row["city"]) if p) or None
+    if row["lat"] is not None and row["lon"] is not None:
+        lat, lon = float(row["lat"]), float(row["lon"])
+    else:
+        loc = _geocode(display or text)
+        lat, lon = float(loc["lat"]), float(loc["lon"])
+        display = display or short_place(loc.get("display"))
+    chosen = {"site": addresses_store.db_site(body.choice.site), "address_id": row["address_id"]}
+    conn.execute(
+        """INSERT INTO profiles (user_id, display_name, address, lat, lon, chosen) VALUES (%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (user_id) DO UPDATE SET display_name=COALESCE(excluded.display_name, profiles.display_name),
+             address=excluded.address, lat=excluded.lat, lon=excluded.lon, chosen=excluded.chosen""",
+        (user, body.display_name or None, text, lat, lon, Jsonb(chosen)),
+    )
+    return {"address": text, "lat": lat, "lon": lon, "display": display, "chosen": chosen}
+
+
+@app.put("/profile")
+def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    if body.choice is not None:
+        return _put_choice(body, user, conn)
+    loc = _geocode(body.address)
     lat, lon = float(loc["lat"]), float(loc["lon"])
     conn.execute(
         """INSERT INTO profiles (user_id, display_name, address, lat, lon) VALUES (%s,%s,%s,%s,%s)
            ON CONFLICT (user_id) DO UPDATE SET display_name=COALESCE(excluded.display_name, profiles.display_name),
-             address=excluded.address, lat=excluded.lat, lon=excluded.lon""",
+             address=excluded.address, lat=excluded.lat, lon=excluded.lon, chosen=NULL""",
         (user, body.display_name or None, body.address, lat, lon),
     )
     # display: where the geocoder put the pin, short ("area, city"); None for a pasted "lat,lon".

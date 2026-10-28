@@ -99,3 +99,28 @@ def _all_orders(site) -> list[dict]:
         else:
             out.append(_order(rng, site, n, placed, site == "swiggy" and n % 3 == 0, site == "swiggy" and n % 3 == 0))
     return out
+
+
+# Saved delivery addresses (synthetic, Bengaluru). Home is the same place on every app (each app has its own id
+# and a pin a few metres off, as real apps do); the second address differs per app.
+_FAKE_HOME = {"label": "Home", "line": "Flat 12, Lakeview Residency, 27th Main Road", "area": "HSR Layout",
+              "city": "Bengaluru", "lat": 12.9116, "lon": 77.6474}
+_FAKE_WORK = {"label": "Work", "line": "Tower B, 4th Floor, Prestige Tech Park", "area": "Koramangala",
+              "city": "Bengaluru", "lat": 12.9352, "lon": 77.6245}
+_FAKE_SECOND = {
+    "zepto": _FAKE_WORK,
+    "blinkit": _FAKE_WORK | {"lat": 12.9353},
+    "swiggy": _FAKE_WORK | {"lat": 12.9351},
+    "zomato": {"label": "Other", "line": "House 4, 2nd Cross, Defence Colony", "area": "Indiranagar",
+               "city": "Bengaluru", "lat": 12.9719, "lon": 77.6412},
+}
+_FAKE_NUDGE = {"zepto": 0.0, "blinkit": 0.0002, "swiggy": -0.0002, "zomato": 0.0003}  # degrees lat, under 40 m
+
+
+def saved_addresses(site) -> list[dict]:
+    """Two saved addresses per app, already in addresses.normalise() form (Instamart: Swiggy's)."""
+    account = "swiggy" if site == "instamart" else site
+    home = _FAKE_HOME | {"address_id": f"fake-{account}-home", "is_default": True,
+                         "lat": round(_FAKE_HOME["lat"] + _FAKE_NUDGE.get(account, 0.0), 6)}
+    second = _FAKE_SECOND.get(account, _FAKE_WORK) | {"address_id": f"fake-{account}-2", "is_default": False}
+    return [home, second]

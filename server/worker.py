@@ -20,11 +20,12 @@ from urllib.parse import urlsplit
 import psycopg
 from psycopg import sql
 
+import addresses
 import browser
 import llm
 import metering
 import sync
-from server import categorize_pg, fake_sites, jobs, notify, recipe_admin, store, usage, vault
+from server import addresses_store, categorize_pg, fake_sites, jobs, notify, recipe_admin, store, usage, vault
 from server.config import SITE_NAMES, Settings, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
@@ -385,6 +386,27 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     return result
 
 
+def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, proxy_server: str | None,
+                       fake: bool) -> None:
+    """Best effort, after a successful login or sync: re-read the user's saved addresses on this app (a GET of
+    the list the app already has; never a change to it) and replace the stored ones. Skipped when no admin has
+    learned the site's `addresses` recipe. Any failure keeps the last good list and never fails the job; only
+    the exception class and a count are logged, never an address."""
+    try:
+        if fake:
+            rows = fake_sites.saved_addresses(db_site)
+        else:
+            recipe = addresses_store.recipe(conn, db_site)
+            if not recipe:
+                return
+            rows = addresses.fetch_for_site(db_site, recipe, profile_dir=profile_dir,
+                                            location=_location(conn, job.user_id), proxy_server=proxy_server)
+        n = addresses_store.replace(conn, job.user_id, db_site, rows)
+        log.info("job %s: %d saved addresses on %s", job.id, n, db_site)
+    except Exception as e:
+        log.warning("job %s: saved addresses not refreshed (%s)", job.id, type(e).__name__)
+
+
 def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
     """Run one claimed job. The user's encrypted profile is restored into a fresh per-job directory, the browser
     goes out through the user's sticky proxy session (if configured), the job heartbeats while it runs, and the
@@ -509,6 +531,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                                 fetch=fake_sites.fetch_orders if fake else sync.fetch_orders,
                                 block_media=job.type == "sync" and s.sync_block_media)  # R12: user syncs only
             save_profile()
+            _refresh_addresses(job, conn, db_site, profile_dir, proxy_server, fake)
             _categorize(conn)
         jobs.finish(conn, job.id, worker_id=job.worker_id)
         if job.type == "connect":

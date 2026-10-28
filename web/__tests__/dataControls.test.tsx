@@ -11,7 +11,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 const auth = vi.hoisted(() => ({ signOut: vi.fn(async () => ({})), count: 43 }));
 vi.mock("@/lib/supabase/client", () => ({
   getSupabaseBrowserClient: () => ({
-    auth: { signOut: auth.signOut },
+    auth: { signOut: auth.signOut, getSession: async () => ({ data: { session: { user: { id: "u1" } } } }) },
     from: () => ({
       select: () => ({ in: async () => ({ count: auth.count, error: null }) }),
     }),

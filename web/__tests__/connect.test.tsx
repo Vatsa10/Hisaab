@@ -716,11 +716,11 @@ describe("lib/jobs watchJob / watchConnections", () => {
     const stop = real.watchJob("j1", onChange, client as never);
 
     expect(channels).toHaveLength(1);
-    expect(channels[0]!.on).toHaveBeenCalledWith(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "jobs", filter: "id=eq.j1" },
-      expect.any(Function),
-    );
+    // This job's inserts and updates only; never DELETE (or "*"), which Supabase sends unfiltered.
+    expect(channels[0]!.on.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ["postgres_changes", { event: "INSERT", schema: "public", table: "jobs", filter: "id=eq.j1" }],
+      ["postgres_changes", { event: "UPDATE", schema: "public", table: "jobs", filter: "id=eq.j1" }],
+    ]);
     // Subscribed (and every later reconnect): the current row is fetched so nothing is missed.
     channels[0]!.status!("SUBSCRIBED");
     await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
@@ -792,17 +792,37 @@ describe("lib/jobs watchJob / watchConnections", () => {
     const rows = [{ site: "zepto", status: "connected", last_synced_at: "2026-10-27T10:00:00Z" }];
     const { client, channels } = fakeClient({ connections: rows });
     const onChange = vi.fn();
-    const stop = real.watchConnections(onChange, client as never);
-    expect(channels[0]!.on).toHaveBeenCalledWith(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "connections" },
-      expect.any(Function),
-    );
+    const stop = real.watchConnections(onChange, client as never, "u1");
+    // Own inserts and updates only, filtered to the user. Never DELETE (or "*"): Supabase delivers
+    // DELETE events to every subscriber, unfiltered.
+    expect(channels[0]!.on.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ["postgres_changes", { event: "INSERT", schema: "public", table: "connections", filter: "user_id=eq.u1" }],
+      ["postgres_changes", { event: "UPDATE", schema: "public", table: "connections", filter: "user_id=eq.u1" }],
+    ]);
     channels[0]!.status!("SUBSCRIBED");
     await waitFor(() => expect(onChange).toHaveBeenCalledWith(rows));
     channels[0]!.handler!({ new: { site: "zepto", status: "syncing" } });
     await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
     stop();
     expect(client.removeChannel).toHaveBeenCalledWith(channels[0]);
+  });
+
+  it("watchConnections without a user id filters by the session's user, and starts nothing signed out", async () => {
+    const real = await vi.importActual<typeof import("@/lib/jobs")>("@/lib/jobs");
+    const { client, channels } = fakeClient({ connections: [] });
+    const withSession = {
+      ...client,
+      auth: { getSession: async () => ({ data: { session: { user: { id: "u2" } } } }) },
+    };
+    const stop = real.watchConnections(vi.fn(), withSession as never);
+    await waitFor(() => expect(channels).toHaveLength(1));
+    expect(channels[0]!.on.mock.calls[0]![1]).toMatchObject({ filter: "user_id=eq.u2" });
+    stop();
+    expect(client.removeChannel).toHaveBeenCalledWith(channels[0]);
+
+    const signedOut = { ...client, auth: { getSession: async () => ({ data: { session: null } }) } };
+    real.watchConnections(vi.fn(), signedOut as never);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(channels).toHaveLength(1);
   });
 });
