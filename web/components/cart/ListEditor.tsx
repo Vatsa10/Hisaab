@@ -14,7 +14,6 @@ import {
   GROCERY_SITES,
   ITEM_TEXT_MAX,
   addItem,
-  areaLabel,
   checksLeftLine,
   getAccess,
   getCartChecksLeft,
@@ -33,15 +32,12 @@ import { ItemRow } from "./ItemRow";
 import { RecentChecks } from "./RecentChecks";
 import { UsualSheet } from "./UsualSheet";
 
-export interface CartProfile {
-  address: string | null;
-  lat: number | null;
-  lon: number | null;
-}
-
 export interface ListEditorProps {
-  /** The saved delivery address (profiles row), or null when there is none. */
-  profile: CartProfile | null;
+  /**
+   * The short area of the saved delivery address ("Gorwa, Vadodara"), computed on the server;
+   * null when there is no address placed on the map. The address itself never reaches here.
+   */
+  area: string | null;
   /** `?from=<request id>`: start from that check's list ("Edit list"). */
   fromId?: string | null;
 }
@@ -55,7 +51,7 @@ function problem(e: unknown): string {
  * The /cart screen in Groceries mode: where to deliver, which apps can be priced, the list, and
  * "Compare prices". A check starts on the server (202) and its result lives at /cart/{id}.
  */
-export function ListEditor({ profile, fromId }: ListEditorProps) {
+export function ListEditor({ area, fromId }: ListEditorProps) {
   const router = useRouter();
   const formId = useId();
   const listHeadingId = useId();
@@ -110,7 +106,7 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
     };
   }, [fromId]);
 
-  const hasAddress = Boolean(profile?.address) && profile?.lat != null && profile?.lon != null;
+  const hasAddress = area != null;
   // The server refuses a check with no app it could price (409); apps that are connected but
   // briefly unavailable are its call (503), so they do not block here.
   const noApp =
@@ -118,6 +114,17 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
   const outOfChecks = checksLeft === 0;
   const full = items.length >= CART_MAX_ITEMS;
   const canCompare = hasAddress && !noApp && !outOfChecks && items.length > 0;
+  // Why Compare is disabled: one line, the first thing to fix (no app wins, so the brief's
+  // "Connect Blinkit, Zepto or Instamart to compare." always shows when none is connected).
+  const blocked = noApp
+    ? "Connect Blinkit, Zepto or Instamart to compare."
+    : !hasAddress
+      ? "Add your delivery address to compare."
+      : outOfChecks
+        ? "You've used today's checks. Try again tomorrow."
+        : items.length === 0
+          ? "Add an item to compare."
+          : null;
 
   function edit(next: CartItem[]) {
     setItems(next);
@@ -167,7 +174,7 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
             </span>
             <span className="min-w-0 flex-1">
               <span className="block text-label text-ink-muted">Delivering to</span>
-              <span className="block truncate font-medium">{areaLabel(profile?.address)}</span>
+              <span className="block truncate font-medium">{area}</span>
             </span>
             <span className="shrink-0 text-label font-semibold text-accent">Change</span>
           </Link>
@@ -189,11 +196,6 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
           </Link>
         )}
         <AppAccessRow access={access} failed={accessFailed} />
-        {noApp ? (
-          <p className="border-t border-line-soft px-4 py-3 text-label text-ink">
-            Connect Blinkit, Zepto or Instamart to compare.
-          </p>
-        ) : null}
       </Card>
 
       <section aria-labelledby={listHeadingId} className="mt-6">
@@ -208,13 +210,13 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
         </div>
 
         <Card padding="none">
-          <form id={formId} onSubmit={add} noValidate className="p-3">
+          <form id={formId} onSubmit={add} noValidate className="px-2 py-3">
             <TextField
               label="New item"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="Add an item, e.g. Amul Taaza 1L ×2"
-              maxLength={ITEM_TEXT_MAX + 6}
+              maxLength={ITEM_TEXT_MAX}
               enterKeyHint="done"
               autoComplete="off"
               autoCapitalize="sentences"
@@ -225,7 +227,7 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
                   type="submit"
                   aria-label="Add item"
                   disabled={full || !draft.trim()}
-                  className="mr-0.5 grid size-11 shrink-0 place-items-center rounded-tile text-accent transition-[background-color,opacity] duration-150 active:bg-accent/10 disabled:opacity-40"
+                  className="grid size-11 shrink-0 place-items-center rounded-tile text-accent transition-[background-color,opacity] duration-150 active:bg-accent/10 disabled:opacity-40"
                 >
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
                     <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.75" />
@@ -256,6 +258,8 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
 
       {/* Pinned just above the tab bar, so Compare stays in reach however long the list gets. */}
       <div className="sticky bottom-[calc(theme(spacing.tabbar)+env(safe-area-inset-bottom))] z-10 -mx-4 mt-3 bg-canvas px-4 pb-3 pt-3">
+        {/* A soft fade above the block, so rows scrolling under it are not cut by a hard edge. */}
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-gradient-to-t from-canvas to-canvas/0" />
         <Button size="lg" fullWidth disabled={!canCompare} loading={busy} onClick={compare}>
           Compare prices
         </Button>
@@ -264,8 +268,11 @@ export function ListEditor({ profile, fromId }: ListEditorProps) {
             {error}
           </p>
         ) : null}
+        {!error && blocked && !busy ? (
+          <p className="mt-2 text-center text-label text-ink">{blocked}</p>
+        ) : null}
         {checksLeft != null ? (
-          <p className="mt-2 text-center text-label text-ink-muted">{checksLeftLine(checksLeft)}</p>
+          <p className="mt-1 text-center text-label text-ink-muted">{checksLeftLine(checksLeft)}</p>
         ) : null}
       </div>
 

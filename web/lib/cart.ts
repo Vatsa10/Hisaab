@@ -152,6 +152,18 @@ export function areaLabel(address: string | null | undefined): string {
   return parts[0]!;
 }
 
+/**
+ * The area to show for a profile row, or null when there is no address the server can price
+ * (no text, or not placed on the map). Runs on the server so the address and coordinates never
+ * reach the browser.
+ */
+export function cartArea(
+  profile: { address: string | null; lat: number | null; lon: number | null } | null | undefined,
+): string | null {
+  if (!profile?.address || profile.lat == null || profile.lon == null) return null;
+  return areaLabel(profile.address);
+}
+
 export function checksLeftLine(n: number): string {
   return `${n} ${n === 1 ? "check" : "checks"} left today`;
 }

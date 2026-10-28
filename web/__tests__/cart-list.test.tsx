@@ -75,7 +75,8 @@ function route(path: string, init?: RequestInit): Promise<unknown> {
   return Promise.reject(new ApiError(404, `unexpected ${path}`));
 }
 
-const HOME = { address: "12 MG Road, Gorwa, Vadodara, Gujarat 390016, India", lat: 22.33, lon: 73.15 };
+// The page passes only the area label (computed on the server), never the address or coordinates.
+const HOME = "Gorwa, Vadodara";
 
 beforeEach(() => {
   backend = {
@@ -106,7 +107,7 @@ async function ready() {
 
 describe("the grocery list", () => {
   it("shows the title, subtitle and delivery area", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     expect(screen.getByRole("heading", { level: 1, name: "Cart" })).toBeInTheDocument();
     expect(screen.getByText("Compare your prices on Zepto, Blinkit and Instamart.")).toBeInTheDocument();
     expect(screen.getByText("Gorwa, Vadodara")).toBeInTheDocument();
@@ -115,9 +116,10 @@ describe("the grocery list", () => {
   });
 
   it("adds, steps and removes items", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     expect(compareButton()).toBeDisabled(); // nothing to compare yet
+    expect(screen.getByText("Add an item to compare.")).toBeInTheDocument();
 
     addLine("Amul Taaza 1L ×2");
     addLine("Bread");
@@ -143,7 +145,7 @@ describe("the grocery list", () => {
   });
 
   it("caps the quantity at 20", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     addLine("Eggs ×20");
     const eggs = screen.getByRole("listitem", { name: "Eggs" });
@@ -156,7 +158,7 @@ describe("the grocery list", () => {
       { text: "Bread 400g", qty: 1, times: 5 },
       { text: "Curd 400g", qty: 1, times: 3 },
     ];
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "Start from my usual" }));
 
@@ -178,7 +180,7 @@ describe("the grocery list", () => {
   });
 
   it("empty usual shows the hint", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "Start from my usual" }));
     const sheet = await screen.findByRole("dialog");
@@ -189,7 +191,7 @@ describe("the grocery list", () => {
   });
 
   it("compare posts the list and navigates", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     addLine("Amul Taaza 1L ×2");
     addLine("2 x Bread");
@@ -211,7 +213,7 @@ describe("the grocery list", () => {
     backend.check = () => {
       throw new ApiError(429, "You can check 10 carts a day. Try again tomorrow.");
     };
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     addLine("Bread");
     fireEvent.click(compareButton());
@@ -222,17 +224,18 @@ describe("the grocery list", () => {
   });
 
   it("no address disables compare with the link", async () => {
-    render(<ListEditor profile={{ address: null, lat: null, lon: null }} />);
+    render(<ListEditor area={null} />);
     await ready();
     addLine("Bread");
     const link = screen.getByRole("link", { name: /Add your delivery address/ });
     expect(link).toHaveAttribute("href", "/accounts");
     expect(compareButton()).toBeDisabled();
+    expect(screen.getByText("Add your delivery address to compare.")).toBeInTheDocument();
   });
 
   it("no connected grocery app disables compare and links to accounts", async () => {
     backend.access = { zepto: "not_connected", blinkit: "not_connected", instamart: "not_connected" };
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     addLine("Bread");
     await screen.findByText("Connect Blinkit, Zepto or Instamart to compare.");
@@ -246,7 +249,7 @@ describe("the grocery list", () => {
 
   it("needs_login app shows log in again", async () => {
     backend.access = { zepto: "ok", blinkit: "needs_login", instamart: "not_connected" };
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     const apps = screen.getByRole("list", { name: "Apps we compare" });
     const blinkit = await within(apps).findByRole("link", { name: /Blinkit/ });
@@ -272,15 +275,30 @@ describe("the grocery list", () => {
         created_at: "2026-10-28T09:00:00Z",
       },
     ];
-    render(<ListEditor profile={HOME} fromId="old-1" />);
+    render(<ListEditor area={HOME} fromId="old-1" />);
     const milk = await screen.findByRole("listitem", { name: "Amul Taaza 1L" });
     expect(within(milk).getByText("2")).toBeInTheDocument();
     expect(screen.getByRole("listitem", { name: "Eggs 6" })).toBeInTheDocument();
   });
 
+  it("no checks left disables compare and says why", async () => {
+    backend.checksLeft = 0;
+    render(<ListEditor area={HOME} />);
+    await screen.findByText("0 checks left today");
+    addLine("Bread");
+    expect(compareButton()).toBeDisabled();
+    expect(screen.getByText("You've used today's checks. Try again tomorrow.")).toBeInTheDocument();
+  });
+
+  it("the input stops at the 80-character item limit", async () => {
+    render(<ListEditor area={HOME} />);
+    await ready();
+    expect(screen.getByPlaceholderText("Add an item, e.g. Amul Taaza 1L ×2")).toHaveAttribute("maxLength", "80");
+  });
+
   it("checks left line comes from limits", async () => {
     backend.checksLeft = 3;
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     expect(await screen.findByText("3 checks left today")).toBeInTheDocument();
   });
 
@@ -299,7 +317,7 @@ describe("the grocery list", () => {
       summary,
       created_at: at,
     }));
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     const recent = await screen.findByRole("region", { name: "Recent checks" });
     const links = within(recent).getAllByRole("link");
     expect(links).toHaveLength(3);
@@ -308,7 +326,7 @@ describe("the grocery list", () => {
   });
 
   it("stops at 30 items", async () => {
-    render(<ListEditor profile={HOME} />);
+    render(<ListEditor area={HOME} />);
     await ready();
     for (let i = 1; i <= 30; i++) addLine(`Item ${i}`);
     expect(screen.getAllByRole("listitem", { name: /^Item / })).toHaveLength(30);

@@ -10,6 +10,7 @@ import {
   CART_MAX_ITEMS,
   addItem,
   areaLabel,
+  cartArea,
   checksLeftLine,
   getAccess,
   getCartChecksLeft,
@@ -72,6 +73,13 @@ describe("list helpers", () => {
     expect(areaLabel("India")).toBe("your address");
     expect(areaLabel("")).toBe("your address");
     expect(areaLabel(null)).toBe("your address");
+  });
+
+  it("cart area is null unless the address is placed on the map", () => {
+    expect(cartArea({ address: "12 MG Road, Gorwa, Vadodara, Gujarat 390016, India", lat: 22.33, lon: 73.15 })).toBe("Gorwa, Vadodara");
+    expect(cartArea({ address: "Gorwa, Vadodara", lat: null, lon: null })).toBeNull();
+    expect(cartArea({ address: null, lat: 22.3, lon: 73.1 })).toBeNull();
+    expect(cartArea(null)).toBeNull();
   });
 
   it("checks left line", () => {
