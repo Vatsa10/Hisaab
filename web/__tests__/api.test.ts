@@ -86,6 +86,14 @@ describe("apiFetch", () => {
     expect(err.detail).toBe("field required; too long");
   });
 
+  it("flattens a list of plain strings and mixed items into a readable detail", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(422, { detail: ["handling must be from 0 to 500", { msg: "too long" }, 7] }),
+    );
+    const err = await failure(apiFetch("/admin/fees/zepto", { method: "PUT" }));
+    expect(err.detail).toBe("handling must be from 0 to 500; too long");
+  });
+
   it("uses the status text when the error body is not JSON", async () => {
     fetchMock.mockResolvedValue(new Response("boom", { status: 502, statusText: "Bad Gateway" }));
     const err = await failure(apiFetch("/me"));

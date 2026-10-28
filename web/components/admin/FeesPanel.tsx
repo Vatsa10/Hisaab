@@ -80,8 +80,8 @@ const text = (v: unknown) => (v == null ? "" : String(v));
 const obj = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
-function fromRules(rules: FeeRules, verified: boolean): Form {
-  const food = rules.kind === "food";
+function fromRules(rules: FeeRules, verified: boolean, kind?: string): Form {
+  const food = kind === "food" || rules.kind === "food";
   const raw = rules[food ? "delivery_by_km" : "delivery"];
   const tiers = (Array.isArray(raw) ? raw : []).map((t) => {
     const o = obj(t);
@@ -147,8 +147,8 @@ function toRules(f: Form, base: FeeRules): FeeRules {
 
 const rupees = (s: string) => `₹${s.trim() || "0"}`;
 
-function summary(rules: FeeRules): string {
-  const f = fromRules(rules, false);
+function summary(rules: FeeRules, kind?: string): string {
+  const f = fromRules(rules, false, kind);
   const first = f.tiers[0]?.fee ?? "0";
   return f.food
     ? `Delivery from ${rupees(first)} · platform ${rupees(f.platform)} · GST ${f.gstFood || 0}% / ${f.gstFees || 0}%`
@@ -200,7 +200,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function FeeCard({ row, onSaved, onForbidden }: { row: FeeRow; onSaved: () => void; onForbidden: () => void }) {
   const name = appName(row.site);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState(() => fromRules(row.rules, row.verified));
+  const rules = row.rules ?? {};
+  const [form, setForm] = useState(() => fromRules(rules, row.verified, row.kind));
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [saved, setSaved] = useState<number | null>(null);
@@ -223,7 +224,7 @@ function FeeCard({ row, onSaved, onForbidden }: { row: FeeRow; onSaved: () => vo
     setErrors([]);
     setSaved(null);
     try {
-      const res = await putFees(row.site, toRules(form, row.rules), form.verified);
+      const res = await putFees(row.site, toRules(form, rules), form.verified);
       setSaved(res.version);
       onSaved();
     } catch (e) {
@@ -250,7 +251,7 @@ function FeeCard({ row, onSaved, onForbidden }: { row: FeeRow; onSaved: () => vo
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {row.verified ? <Badge tone="ok">Verified</Badge> : <Badge tone="warn">{`Unverified — check ${name}'s fee page`}</Badge>}
       </div>
-      <p className="mt-2 text-label tabular-nums text-ink-muted">{summary(row.rules)}</p>
+      <p className="mt-2 text-label tabular-nums text-ink-muted">{summary(rules, row.kind)}</p>
 
       <Button
         variant="secondary"
@@ -287,9 +288,9 @@ function FeeCard({ row, onSaved, onForbidden }: { row: FeeRow; onSaved: () => vo
                         ? beyond
                           ? `Beyond → ${rupees(t.fee)}`
                           : `Up to ${t.at.trim() || "?"} km → ${rupees(t.fee)}`
-                        : `From ${rupees(i === 0 ? "0" : t.at)} → ${rupees(t.fee)}`}
+                        : `Tier ${n}`}
                     </p>
-                    {form.tiers.length > 1 && i > 0 && !beyond ? (
+                    {!beyond && (form.food ? form.tiers.length > 2 : i > 0) ? (
                       <Button variant="ghost" className="-mr-3" onClick={() => removeTier(i)} aria-label={`Remove tier ${n}`}>
                         Remove
                       </Button>

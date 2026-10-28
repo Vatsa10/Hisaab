@@ -56,7 +56,7 @@ export function SitesPanel({ onForbidden }: PanelProps) {
     const rows = sites.data.filter((s) => {
       if (groupOf(s.kind) !== g.id) return false;
       // Restaurants and menus are learned together (kind food), so they share one row per site.
-      if (seenInGroup.has(s.site)) return false;
+      if (g.id === "food" && seenInGroup.has(s.site)) return false;
       seenInGroup.add(s.site);
       return true;
     });
@@ -158,7 +158,7 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
     act(
       "learn",
       async () => {
-        const res = await startLearn(s.site, group);
+        const res = await startLearn(s.site, group === "other" ? "orders" : group);
         setJob(null);
         setJobId(res.job_id);
       },
@@ -177,6 +177,7 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
 
   const label = learnLabel ? `${name} ${learnLabel}` : name;
   const hintId = `learn-hint-${s.site}-${group}`;
+  const canLearn = group !== "other";
 
   return (
     <Card as="li" aria-label={label}>
@@ -228,17 +229,19 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
         </p>
       ) : null}
 
-      <div className={`mt-3 grid gap-2 ${pause ? "grid-cols-2" : "grid-cols-1"}`}>
-        <Button
-          variant="secondary"
-          onClick={learn}
-          loading={busy === "learn"}
-          disabled={!s.admin_connected || learning}
-          aria-label={`Learn ${label}`}
-          aria-describedby={!s.admin_connected ? hintId : undefined}
-        >
-          Learn
-        </Button>
+      <div className={`mt-3 grid gap-2 ${pause && canLearn ? "grid-cols-2" : "grid-cols-1"}`}>
+        {canLearn ? (
+          <Button
+            variant="secondary"
+            onClick={learn}
+            loading={busy === "learn"}
+            disabled={!s.admin_connected || learning}
+            aria-label={`Learn ${label}`}
+            aria-describedby={!s.admin_connected ? hintId : undefined}
+          >
+            Learn
+          </Button>
+        ) : null}
         {pause ? (
           <Button
             variant="secondary"
@@ -250,7 +253,7 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
           </Button>
         ) : null}
       </div>
-      {!s.admin_connected ? (
+      {canLearn && !s.admin_connected ? (
         <p id={hintId} className="mt-2 text-label text-ink-muted">
           Connect {name} on your own account first
         </p>

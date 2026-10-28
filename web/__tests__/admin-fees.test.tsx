@@ -123,6 +123,17 @@ describe("sites tab, search and food learning", () => {
   });
 });
 
+describe("sites tab, other kinds", () => {
+  it("unknown kinds show under Other with pause but no Learn", async () => {
+    routes({ "GET /admin/sites": () => [site({ site: "zepto", kind: "cart" }), site({ site: "swiggy", kind: "addresses" })] });
+    render(<SitesPanel onForbidden={vi.fn()} />);
+    expect(await screen.findByRole("heading", { name: "Other" })).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Pause Zepto" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Learn/ })).not.toBeInTheDocument();
+  });
+});
+
 describe("fees panel", () => {
   async function open(rows: FeeRow[], name: string) {
     routes({ "GET /admin/fees": () => rows });
@@ -135,6 +146,27 @@ describe("fees panel", () => {
     render(<FeesPanel onForbidden={vi.fn()} />);
     expect(await screen.findByText("Unverified — check Zepto's fee page")).toBeInTheDocument();
     expect(screen.getByText("Verified")).toBeInTheDocument();
+  });
+
+  it("a row with null rules still renders, and row.kind decides food", async () => {
+    routes({
+      "GET /admin/fees": () => [
+        { site: "zepto", version: 1, verified: false, rules: null },
+        { site: "zomato", kind: "food", version: 1, verified: false, rules: null },
+      ],
+    });
+    render(<FeesPanel onForbidden={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Zomato fees" }));
+    expect(screen.getByLabelText("GST on food (%)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit Zepto fees" }));
+    expect(screen.getByLabelText("Handling fee (₹)")).toBeInTheDocument();
+  });
+
+  it("food tier 1 can be removed while another non-Beyond tier remains", async () => {
+    await open([SWIGGY], "Edit Swiggy fees");
+    fireEvent.click(screen.getByRole("button", { name: "Remove tier 1" }));
+    expect(screen.getByLabelText("Tier 1 up to (km)")).toHaveValue("7");
+    expect(screen.queryByRole("button", { name: /^Remove tier/ })).not.toBeInTheDocument();
   });
 
   it("first tier minimum is fixed at zero", async () => {

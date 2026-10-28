@@ -220,7 +220,9 @@ export type FeeRules = Record<string, unknown>;
 /** One site's row of GET /admin/fees. */
 export interface FeeRow {
   site: string;
-  rules: FeeRules;
+  /** "grocery" or "food"; falls back to rules.kind when the API leaves it out. */
+  kind?: string;
+  rules: FeeRules | null;
   version: number;
   verified: boolean;
   source?: string;
@@ -235,16 +237,18 @@ export const putFees = (site: string, rules: FeeRules, verified: boolean) =>
   });
 
 /** The groups the Sites tab lists recipes under, and the learn kind each one runs. */
-export type SiteGroup = "orders" | "search" | "food";
+export type SiteGroup = "orders" | "search" | "food" | "other";
 export const SITE_GROUPS: { id: SiteGroup; title: string; learnLabel: string }[] = [
   { id: "orders", title: "Order history", learnLabel: "" },
   { id: "search", title: "Grocery prices", learnLabel: "grocery prices" },
   { id: "food", title: "Restaurants & menus", learnLabel: "restaurants and menus" },
+  // Anything else (cart, addresses, future kinds): health and pause, never Learn.
+  { id: "other", title: "Other", learnLabel: "" },
 ];
 
-export function groupOf(kind: string): SiteGroup | null {
+export function groupOf(kind: string): SiteGroup {
   if (!kind || kind === "orders") return "orders";
   if (kind === "search") return "search";
   if (kind === "restaurants" || kind === "menu" || kind === "food") return "food";
-  return null;
+  return "other";
 }
