@@ -47,6 +47,12 @@ create table recipe_approvals (
   status text not null default 'pending'
     check (status in ('pending','approved','rejected','expired','auto_applied')),
   job_id uuid,
+  -- true only for a POST-allowlist question a running learn job is waiting on (filed by its Approver);
+  -- every other row is a whole recipe held for the admin.
+  live_request boolean not null default false,
+  -- recipes.version when a held recipe was filed (null: the site had none); approving it is refused once the
+  -- shared recipe has moved on, so an older proposal never overwrites a newer recipe.
+  base_version int,
   created_at timestamptz not null default now(),
   decided_at timestamptz,
   decided_by uuid

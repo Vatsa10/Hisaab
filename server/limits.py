@@ -1,9 +1,10 @@
 """Daily per-user limits (manual refresh per app, cart checks) and the budget pause, counted on IST days."""
+import hashlib
 from datetime import date, datetime
 
 from fastapi import HTTPException
 
-from server import budget, usage
+from server import budget, jobs, usage
 from server.config import SITE_NAMES, Settings
 
 
@@ -41,6 +42,23 @@ def check_refresh(conn, user_id: str, site: str, now: datetime | None, s: Settin
     name = SITE_NAMES.get(site, site.title())
     raise LimitExceeded("refresh", s.refresh_per_app_per_day, seconds_until_reset(now, s.app_tz),
                         f"You can refresh {name} {s.refresh_per_app_per_day} times a day. Try again tomorrow.")
+
+
+def refresh_lock_key(user_id: str, site: str) -> int:
+    """The transaction-level advisory lock key that serialises manual refreshes of one user's site."""
+    digest = hashlib.blake2b(f"refresh:{user_id}:{site}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+def enqueue_refresh(conn, user_id: str, site: str, now: datetime | None, s: Settings) -> tuple[str, int]:
+    """Check the daily limit and enqueue a manual sync as one step (R4), under a per-user-and-site lock held
+    until commit, so two requests cannot both pass the check before either job exists. Raises LimitExceeded
+    (nothing enqueued) or jobs.Conflict (a sync is active; nothing consumed). Returns (job id, refreshes left)."""
+    with conn.transaction():
+        conn.execute("select pg_advisory_xact_lock(%s)", (refresh_lock_key(user_id, site),))
+        check_refresh(conn, user_id, site, now, s)
+        job_id = jobs.enqueue(conn, user_id, "sync", site, {"trigger": "manual"})
+        return job_id, refresh_left(conn, user_id, site, now, s)
 
 
 def cart_checks_left(conn, user_id: str, now: datetime | None, s: Settings) -> int:

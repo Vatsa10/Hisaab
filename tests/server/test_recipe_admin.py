@@ -217,8 +217,8 @@ def test_decide_ended_job_expires(pg):
     jid = _running_job(pg)
     jobs.finish(pg, jid, error="boom")
     aid = pg.execute(  # as an Approver files it
-        "insert into recipe_approvals (site, kind, reason, proposed, job_id) "
-        "values ('zepto', 'orders', 'post_allowlist', %s, %s) returning id::text",
+        "insert into recipe_approvals (site, kind, reason, proposed, job_id, live_request) "
+        "values ('zepto', 'orders', 'post_allowlist', %s, %s, true) returning id::text",
         (Jsonb({"read_post_allowlist": [NEW_POST]}), jid)).fetchone()[0]
     with pytest.raises(recipe_admin.JobEnded):
         recipe_admin.decide(pg, aid, "approve", A)
@@ -250,6 +250,45 @@ def test_decide_pending_recipe_publishes_and_unpauses(pg):
     assert store.get_recipe(pg, "zepto", kind="cart") is None
     with pytest.raises(ValueError):
         recipe_admin.decide(pg, other, "maybe", B)
+
+
+def test_live_request_is_marked_explicitly(pg, pg_listen):
+    jid = _running_job(pg)
+    approve = recipe_admin.make_approver(pg_listen, pg, jid, "zepto", "orders", timeout_s=0.2)
+    approve([NEW_POST])
+    held = recipe_admin.apply_learned(pg, "blinkit", "orders", {"read_post_allowlist": [POST]}, set(), jid,
+                                      "learned")
+    rows = dict(pg.execute("select site, live_request from recipe_approvals").fetchall())
+    assert rows == {"zepto": True, "blinkit": False}
+    # A held-back first recipe can have exactly the live-request shape (only read_post_allowlist, no current,
+    # a running job): it is still a recipe, so approving publishes it instead of notifying the job.
+    assert recipe_admin.decide(pg, held["approval_id"], "approve", A) == "approved"
+    assert store.get_recipe(pg, "blinkit") == {"read_post_allowlist": [POST]}
+
+
+def test_decide_refuses_when_recipe_version_changed(pg):
+    store.put_recipe(pg, "zepto", BASE)
+    learned = BASE | {"read_post_allowlist": [POST, NEW_POST]}
+    held = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")["approval_id"]
+    assert pg.execute("select base_version from recipe_approvals where id=%s", (held,)).fetchone() == (1,)
+    newer = BASE | {"orders_page_url": "https://www.zepto.com/account/orders"}
+    store.put_recipe(pg, "zepto", newer)  # published by another learn after this one was held back
+    with pytest.raises(recipe_admin.RecipeChanged) as e:
+        recipe_admin.decide(pg, held, "approve", A)
+    assert (e.value.base_version, e.value.current_version) == (1, 2)
+    assert store.get_recipe(pg, "zepto") == newer and _recipe_row(pg)[0] == 2
+    assert _approval(pg, held)[0] == "expired"  # out of the pending queue; a re-learn proposes it again
+
+    # a first recipe held back while another one got published: also stale
+    first = recipe_admin.apply_learned(pg, "blinkit", "orders", BASE, set(), None, "learned")["approval_id"]
+    store.put_recipe(pg, "blinkit", {"x": 1})
+    with pytest.raises(recipe_admin.RecipeChanged):
+        recipe_admin.decide(pg, first, "approve", A)
+
+    # rejecting a stale proposal is always allowed
+    other = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")["approval_id"]
+    store.put_recipe(pg, "zepto", BASE)
+    assert recipe_admin.decide(pg, other, "reject", A) == "rejected"
 
 
 # ---------------------------------------------------------------- site health

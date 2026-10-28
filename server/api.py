@@ -1,10 +1,12 @@
-"""HTTP API: consent, connect, OTP and answer relay, refresh, delivery profile, Ask.
+"""HTTP API: consent, connect, OTP and answer relay, limited refresh, delivery profile, Ask (metered), /me,
+push subscriptions, and the /admin routes (server/admin_api.py).
 Never logs or stores request bodies that carry OTPs or answers; the delivery address is stored, never logged."""
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException
@@ -16,11 +18,12 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 import browser
 import llm
+import metering
 import sync
 from browser import SITES
-from server import addresses_store, ask, jobs
+from server import addresses_store, admin, admin_api, ask, budget, jobs, limits, notify, recipe_admin, usage
 from server.auth import Unauthorized, user_id_from_token
-from server.config import settings
+from server.config import SITE_NAMES, settings
 from server.local_db import is_local_db
 
 log = logging.getLogger("server.api")
@@ -85,7 +88,7 @@ class CorsFromEnv:
         mw = self._by_origins.get(origins)
         if mw is None:
             mw = self._by_origins[origins] = CORSMiddleware(
-                self.app, allow_origins=list(origins), allow_methods=["GET", "POST", "PUT"],
+                self.app, allow_origins=list(origins), allow_methods=["GET", "POST", "PUT", "DELETE"],
                 allow_headers=["Authorization", "Content-Type"])
         await mw(scope, receive, send)
 
@@ -131,6 +134,20 @@ class ProfileBody(BaseModel):
 
 class AskBody(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=200)
+    auth: str = Field(min_length=1, max_length=100)
+
+
+class PushSubscribeBody(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2000)
+    keys: PushKeys
+
+
+class PushEndpointBody(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2000)
 
 
 def get_conn():
@@ -234,21 +251,70 @@ def post_answer(job_id: str, body: AnswerBody, user: str = Depends(current_user)
 
 @app.post("/connections/{site}/refresh", status_code=202)
 def refresh(site: str, user: str = Depends(current_user), conn=Depends(get_conn)):
+    """A manual sync, limited per app per IST day (R4). A budget pause does not block it."""
     _known_site(site)
-    row = conn.execute("SELECT 1 FROM connections WHERE user_id=%s AND site=%s", (user, site)).fetchone()
+    row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user, site)).fetchone()
     if row is None:
         raise HTTPException(404, "no connection")
+    app_name = SITE_NAMES.get(site, site.title())
+    if row[0] == "needs_login":
+        raise HTTPException(409, f"Reconnect {app_name} first.")
     connecting = conn.execute(
         "SELECT 1 FROM jobs WHERE user_id=%s AND site=%s AND type='connect' AND status IN ('queued','running')",
         (user, site),
     ).fetchone()
     if connecting is not None:  # the connect job syncs when it finishes; never two browsers on one profile
         raise HTTPException(409, "a connect job is active")
+    if recipe_admin.is_paused(conn, site):
+        raise HTTPException(503, f"{app_name} sync is paused while we fix it.")
+    s = settings()
     try:
-        job_id = jobs.enqueue(conn, user, "sync", site)
-    except jobs.Conflict:
+        job_id, left = limits.enqueue_refresh(conn, user, site, None, s)
+    except limits.LimitExceeded as e:
+        raise limits.to_http(e) from None
+    except jobs.Conflict:  # rolled back with the limit check: nothing is used up
         raise HTTPException(409, "a sync job is already active") from None
-    return {"job_id": job_id}
+    return {"job_id": job_id, "refresh_left": left}
+
+
+@app.get("/me")
+def me(user: str = Depends(current_user), conn=Depends(get_conn)):
+    return {"user_id": user, "email": admin.user_email(conn, user), "is_admin": recipe_admin.is_admin(conn, user)}
+
+
+@app.get("/me/limits")
+def my_limits(user: str = Depends(current_user), conn=Depends(get_conn)):
+    s = settings()
+    _, reset = usage.day_bounds(None, s.app_tz)
+    return {"refresh_left": {site: limits.refresh_left(conn, user, site, None, s) for site in SITE_NAMES},
+            "refresh_limit": s.refresh_per_app_per_day,
+            "cart_checks_left": limits.cart_checks_left(conn, user, None, s),
+            "cart_checks_limit": s.cart_checks_per_day,
+            "budget_paused": budget.is_paused(conn, None, s.app_tz),
+            "resets_at": reset.astimezone(ZoneInfo(s.app_tz)).isoformat()}
+
+
+@app.get("/push/vapid-key")
+def vapid_key(_user: str = Depends(current_user)):
+    key = settings().vapid_public_key
+    if not key:
+        raise HTTPException(404, "push is not configured")
+    return {"key": key}
+
+
+@app.post("/push/subscribe", status_code=204)
+def push_subscribe(body: PushSubscribeBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    try:
+        notify.save_subscription(conn, user, body.endpoint, body.keys.p256dh, body.keys.auth)
+    except ValueError:
+        raise HTTPException(422, "push endpoint must be https") from None
+    return Response(status_code=204)
+
+
+@app.post("/push/unsubscribe", status_code=204)
+def push_unsubscribe(body: PushEndpointBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    notify.delete_subscription(conn, user, body.endpoint)
+    return Response(status_code=204)
 
 
 PLACE_MAX_LEN = 60
@@ -324,13 +390,31 @@ def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depen
     return {"address": body.address, "lat": lat, "lon": lon, "display": short_place(loc.get("display"))}
 
 
+def _record_ask_tokens(db, user: str, m: metering.Meter) -> None:
+    """Claude tokens plus Jev token-equivalents; metering never fails the answer (errors logged by type)."""
+    s = settings()
+    tokens = m.ai_tokens(s.jev_tokens_per_call)
+    if tokens <= 0:
+        return
+    try:
+        usage.record(db, user, usage.today(tz=s.app_tz), ai_tokens=tokens)
+    except Exception as e:
+        log.warning("ask usage not recorded (%s)", type(e).__name__)
+
+
 @app.post("/ask")
-def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_ask_conn)):
+def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_ask_conn), db=Depends(get_conn)):
     if ask_fake_enabled():
         return {"answer": ask.fake_answer(conn, user)}
-    try:
-        text = ask.answer(conn, user, body.question)
-    except Exception as e:  # LLM or database trouble; the question is not logged
-        log.warning("ask failed (%s)", type(e).__name__)
-        raise HTTPException(502, "the analyst is unavailable, try again") from None
+    with metering.meter() as m:  # a sync endpoint runs in one worker thread: only this request's calls count
+        try:
+            text = ask.answer(conn, user, body.question)
+        except Exception as e:  # LLM or database trouble; the question is not logged
+            log.warning("ask failed (%s)", type(e).__name__)
+            raise HTTPException(502, "the analyst is unavailable, try again") from None
+        finally:
+            _record_ask_tokens(db, user, m)  # tokens spent count even when the answer failed
     return {"answer": text}
+
+
+app.include_router(admin_api.build_router(current_user, get_conn))

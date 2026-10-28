@@ -557,11 +557,11 @@ def test_cors_allows_pwa_origin(client, monkeypatch):
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] == "http://localhost:3000"
     methods = {m.strip() for m in r.headers["access-control-allow-methods"].split(",")}
-    assert {"GET", "POST", "PUT"} <= methods and "DELETE" not in methods
+    assert methods == {"GET", "POST", "PUT", "DELETE"}  # DELETE: the admin view revokes invites
     allowed = r.headers["access-control-allow-headers"].lower()
     assert "authorization" in allowed and "content-type" in allowed
     assert "access-control-allow-origin" not in _preflight(client, "https://evil.example").headers
-    assert _preflight(client, "http://localhost:3000", "DELETE").status_code == 400
+    assert _preflight(client, "http://localhost:3000", "PATCH").status_code == 400
 
 
 def test_cors_origins_from_env(client, monkeypatch):

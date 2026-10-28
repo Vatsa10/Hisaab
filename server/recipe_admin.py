@@ -26,6 +26,17 @@ class JobEnded(Exception):
     """A POST-allowlist approval whose learn job is no longer running: nobody is waiting for the answer."""
 
 
+class RecipeChanged(Exception):
+    """A held recipe was proposed against one version of the shared recipe, and another version has been
+    published since: approving it would overwrite the newer recipe. The row is expired; a new learn proposes
+    again against the current recipe."""
+
+    def __init__(self, approval_id: str, base_version: int | None, current_version: int | None):
+        super().__init__(f"recipe changed since approval {approval_id} was filed "
+                         f"(version {base_version} -> {current_version})")
+        self.approval_id, self.base_version, self.current_version = approval_id, base_version, current_version
+
+
 # ---------------------------------------------------------------- admins
 
 def is_admin(conn, user_id: str) -> bool:
@@ -157,8 +168,8 @@ class Approver:
             return True
         proposed = {"read_post_allowlist": entries}
         approval_id = str(self.job_conn.execute(
-            "INSERT INTO recipe_approvals (site, kind, reason, proposed, diff, job_id) "
-            "VALUES (%s, %s, 'post_allowlist', %s, %s, %s) RETURNING id",
+            "INSERT INTO recipe_approvals (site, kind, reason, proposed, diff, job_id, live_request) "
+            "VALUES (%s, %s, 'post_allowlist', %s, %s, %s, true) RETURNING id",
             (self.site, self.kind, Jsonb(proposed), Jsonb(diff(None, proposed)), self.job_id),
         ).fetchone()[0])
         channel = _channel(approval_id)
@@ -224,7 +235,10 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
     "version"} (version None while pending)."""
     clean, flagged = sanitize_for_sharing(recipe)
     with conn.transaction():
-        current = store.get_recipe(conn, site, kind)
+        # Locked so a publish cannot slip in between reading the base and writing over it.
+        base = conn.execute("SELECT recipe, version FROM recipes WHERE site=%s AND kind=%s FOR UPDATE",
+                            (site, kind)).fetchone()
+        current, base_version = (base[0], base[1]) if base else (None, None)
         if kind == "cart":
             hold = "cart"
         elif flagged:
@@ -235,58 +249,61 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
             hold = None
         version = None if hold else store.put_recipe(conn, site, clean, kind=kind)
         approval_id = conn.execute(
-            "INSERT INTO recipe_approvals (site, kind, reason, proposed, current, diff, status, job_id, decided_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s THEN NULL ELSE now() END) RETURNING id",
+            "INSERT INTO recipe_approvals (site, kind, reason, proposed, current, diff, status, job_id, "
+            "base_version, decided_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s THEN NULL ELSE now() END) RETURNING id",
             (site, kind, hold or reason, Jsonb(clean), Jsonb(current) if current is not None else None,
-             Jsonb(diff(current, clean)), "pending" if hold else "auto_applied", job_id, bool(hold)),
+             Jsonb(diff(current, clean)), "pending" if hold else "auto_applied", job_id, base_version,
+             bool(hold)),
         ).fetchone()[0]
     return {"approval_id": str(approval_id), "status": "pending" if hold else "auto_applied", "version": version}
 
 
-def _is_live_request(row: dict) -> bool:
-    """A post_allowlist row filed by an Approver mid-learn (proposed is exactly {"read_post_allowlist": [...]},
-    no current, a job), as opposed to a whole learned recipe that apply_learned held back for new POSTs."""
-    return (row["reason"] == "post_allowlist" and row["job_id"] is not None and row["current"] is None
-            and isinstance(row["proposed"], dict) and set(row["proposed"]) == {"read_post_allowlist"})
-
-
 def decide(conn, approval_id: str, decision: str, admin_user_id: str) -> str:
     """Record the admin's decision on a pending approval and return its new status ("approved"/"rejected").
-    A live POST-allowlist request (see _is_live_request): the waiting learn job is told via NOTIFY
-    approval_<id hex>; if that job is no longer running the row becomes expired and JobEnded is raised.
+    A live POST-allowlist request (live_request, set only by an Approver): the waiting learn job is told via
+    NOTIFY approval_<id hex>; if that job is no longer running the row becomes expired and JobEnded is raised.
     Any other row is a held-back recipe (including one held for new POSTs): approve publishes the proposed
-    recipe, which also makes the site healthy and unpaused. Raises NotPending when the row is missing or
-    already decided."""
+    recipe, which also makes the site healthy and unpaused, but only while the shared recipe is still the
+    version it was proposed against; otherwise the row becomes expired and RecipeChanged is raised (reject is
+    always recorded). Raises NotPending when the row is missing or already decided."""
     if decision not in ("approve", "reject"):
         raise ValueError(f"decision must be approve or reject, not {decision!r}")
     status = "approved" if decision == "approve" else "rejected"
     with conn.transaction():
         with conn.cursor(row_factory=dict_row) as cur:
             row = cur.execute(
-                "SELECT a.id, a.site, a.kind, a.reason, a.proposed, a.current, a.job_id, a.status, "
-                "j.status AS job_status "
+                "SELECT a.id, a.site, a.kind, a.reason, a.proposed, a.job_id, a.status, a.live_request, "
+                "a.base_version, j.status AS job_status "
                 "FROM recipe_approvals a LEFT JOIN jobs j ON j.id = a.job_id WHERE a.id = %s FOR UPDATE OF a",
                 (str(approval_id),),
             ).fetchone()
         if row is None or row["status"] != "pending":
             raise NotPending(str(approval_id))
-        if _is_live_request(row):
+        failure: Exception | None = None
+        if row["live_request"]:
             if row["job_status"] != "running":
-                conn.execute("UPDATE recipe_approvals SET status='expired', decided_at=now() WHERE id=%s",
-                             (row["id"],))
-                ended = True
+                failure = JobEnded(str(approval_id))
             else:
-                ended = False
                 conn.execute("SELECT pg_notify(%s, %s)", (_channel(row["id"]), status))
-        else:
-            ended = False
-            if status == "approved":
+        elif status == "approved":
+            locked = conn.execute("SELECT version FROM recipes WHERE site=%s AND kind=%s FOR UPDATE",
+                                  (row["site"], row["kind"])).fetchone()
+            current_version = locked[0] if locked else None
+            if current_version != row["base_version"]:
+                log.warning("approval %s refused: %s/%s recipe moved from version %s to %s", row["id"],
+                            row["site"], row["kind"], row["base_version"], current_version)
+                failure = RecipeChanged(str(approval_id), row["base_version"], current_version)
+            else:
                 store.put_recipe(conn, row["site"], row["proposed"], kind=row["kind"])
-        if not ended:
+        if failure is not None:
+            conn.execute("UPDATE recipe_approvals SET status='expired', decided_at=now() WHERE id=%s",
+                         (row["id"],))
+        else:
             conn.execute("UPDATE recipe_approvals SET status=%s, decided_at=now(), decided_by=%s WHERE id=%s",
                          (status, str(admin_user_id), row["id"]))
-    if ended:  # raised after the commit, so the expiry is kept
-        raise JobEnded(str(approval_id))
+    if failure is not None:  # raised after the commit, so the expiry is kept
+        raise failure
     return status
 
 

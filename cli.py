@@ -261,6 +261,44 @@ def publish_recipe(site: str,
     typer.echo(f"published {site} recipe as version {version}")
 
 
+def _admin_db(email: str):
+    """(normalised email, open autocommit connection to DATABASE_URL), or exit 1 with the reason."""
+    import psycopg
+
+    from server import admin
+    try:
+        email = admin.normalize_email(email)
+    except ValueError:
+        typer.secho("that does not look like an email address", fg="red")
+        raise typer.Exit(1) from None
+    url = os.environ.get("DATABASE_URL", "")
+    if not url:
+        typer.secho("DATABASE_URL is not set", fg="red")
+        raise typer.Exit(1)
+    return email, psycopg.connect(url, autocommit=True)
+
+
+@app.command("add-admin")
+def add_admin(email: str):
+    """Admin: make EMAIL an admin of the service (DATABASE_URL); it is invited too, so it can sign up."""
+    from server import admin
+    email, conn = _admin_db(email)
+    with conn:
+        admin.add_admin(conn, email)
+    typer.echo("admin added")
+
+
+@app.command("invite")
+def invite(email: str):
+    """Admin: invite EMAIL to sign up (DATABASE_URL) and queue the invite email."""
+    from server import admin
+    from server.config import settings
+    email, conn = _admin_db(email)
+    with conn:
+        new = admin.send_invite(conn, email, None, settings())
+    typer.echo("invited" if new else "already invited")
+
+
 if __name__ == "__main__":
     _setup_logging()
     app()
