@@ -38,7 +38,9 @@ def categorize_new_items(conn, classify: Callable[[list[str]], dict[str, str]] |
         chunk = names[i:i + batch]
         wanted = {db.norm_name(n) for n in chunk}
         result = classify(chunk)
-        rows = {}
+        # Names the classifier omitted or put in an unknown category are stored as "other", so
+        # they are never re-sent and cannot pile up and block new names.
+        rows = {n: "other" for n in wanted if n}
         for name, cat in result.items():
             n = db.norm_name(name)
             if n in wanted and cat in CATEGORIES:

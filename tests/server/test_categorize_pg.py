@@ -38,14 +38,37 @@ def test_writes_normalized_names_once(pg):
     assert categorize_pg.categorize_new_items(pg, _classify) == 0
 
 
-def test_unknown_category_is_ignored(pg):
+def test_unknown_category_is_stored_as_other(pg):
     _seed(pg)
 
     def classify(names):
         return {n: ("bogus" if "soap" in n.lower() else "snacks") for n in names}
 
-    assert categorize_pg.categorize_new_items(pg, classify) == 2
+    assert categorize_pg.categorize_new_items(pg, classify) == 3
     assert pg.execute("select count(*) from item_categories where category='bogus'").fetchone()[0] == 0
+    assert pg.execute("select category from item_categories where name_norm='soap'").fetchone()[0] == "other"
+
+
+def test_unknown_category_is_ignored(pg):
+    """Kept under its old name: an invalid category never reaches the table as-is."""
+    _seed(pg)
+    categorize_pg.categorize_new_items(pg, lambda names: {n: "bogus" for n in names})
+    assert pg.execute("select count(*) from item_categories where category='bogus'").fetchone()[0] == 0
+
+
+def test_omitted_names_are_not_resent(pg):
+    _seed(pg)
+    calls = []
+
+    def classify(names):
+        calls.append(list(names))
+        return {n: "dairy" for n in names if "soap" not in n.lower()}
+
+    assert categorize_pg.categorize_new_items(pg, classify) == 3
+    assert pg.execute("select category from item_categories where name_norm='soap'").fetchone()[0] == "other"
+    assert categorize_pg.uncategorized_names(pg) == []
+    assert categorize_pg.categorize_new_items(pg, classify) == 0
+    assert len(calls) == 1
 
 
 def test_batches_by_size(pg):
