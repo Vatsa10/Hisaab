@@ -4,12 +4,14 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 HERE = Path(__file__).parent
 MIGRATIONS = HERE.parent.parent / "supabase" / "migrations"
 TABLES = ("profiles", "connections", "orders", "order_items", "item_categories",
           "recipes", "jobs", "consents", "usage", "admins", "invites", "waitlist", "recipe_approvals",
-          "notifications", "push_subscriptions", "budget_state")
+          "notifications", "push_subscriptions", "budget_state",
+          "cart_requests", "cart_results", "restaurant_cache", "menu_cache")
 
 
 def _url():
@@ -48,6 +50,17 @@ def pg(_applied):
     with psycopg.connect(_applied, autocommit=True) as c:
         c.execute("truncate " + ", ".join(TABLES + ("auth.users",)) + " cascade")
         yield c
+
+
+@pytest.fixture
+def fee_rules_snapshot(pg):
+    """Save every fee_rules row and restore the table after the test (fee_rules is not truncated per test)."""
+    rows = pg.execute("select site, rules, version, verified, source, updated_at, updated_by from fee_rules").fetchall()
+    yield rows
+    pg.execute("delete from fee_rules")
+    for r in rows:
+        pg.execute("insert into fee_rules(site, rules, version, verified, source, updated_at, updated_by) "
+                   "values (%s,%s,%s,%s,%s,%s,%s)", (r[0], Jsonb(r[1]), *r[2:]))
 
 
 @pytest.fixture

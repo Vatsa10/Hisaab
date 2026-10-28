@@ -42,7 +42,7 @@ MAX_CLAIM_TRIES = 10
 
 
 def claim(conn, worker_id: str, types: tuple[str, ...]) -> Job | None:
-    """Claim the oldest queued job of the given types whose user and Chrome profile have no running job (one
+    """Claim the oldest queued job (interactive connect/search jobs first, then the rest) of the given types whose user and Chrome profile have no running job (one
     browser per profile). The row lock lasts only for this transaction. If another worker starts a job for the
     same user and profile concurrently, the unique index one_running_job_per_profile rejects our UPDATE: that candidate
     is skipped (inside a savepoint, so the transaction stays usable) and the next one is tried."""
@@ -53,7 +53,8 @@ def claim(conn, worker_id: str, types: tuple[str, ...]) -> Job | None:
                 "SELECT j.id FROM jobs j WHERE j.status='queued' AND j.type = ANY(%s) AND NOT (j.id = ANY(%s::uuid[])) "
                 "AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.status='running' AND r.user_id=j.user_id "
                 "AND r.profile=j.profile) "
-                "ORDER BY j.created_at LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
+                "ORDER BY CASE j.type WHEN 'connect' THEN 0 WHEN 'search' THEN 0 ELSE 1 END, j.created_at "
+                "LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
                 (list(types), skipped),
             ).fetchone()
             if row is None:

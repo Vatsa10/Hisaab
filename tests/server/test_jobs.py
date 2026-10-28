@@ -161,6 +161,28 @@ def test_requeue_only_touches_our_running_job(pg):
     assert jobs.requeue(pg, jid, "w1") is False
 
 
+def test_search_waits_behind_running_sync(pg):
+    jobs.enqueue(pg, A, "sync", "swiggy")
+    jobs.claim(pg, "w1", ("sync",))
+    jobs.enqueue(pg, A, "search", "instamart", {"request_id": "r"})
+    assert jobs.claim(pg, "w2", ("search",)) is None  # same profile 'swiggy' is busy: stays queued
+    assert pg.execute("select status from jobs where type='search'").fetchone() == ("queued",)
+
+
+def test_queued_search_claimed_before_queued_sync(pg):
+    from helpers import B
+    jobs.enqueue(pg, A, "sync", "zepto")
+    jobs.enqueue(pg, B, "search", "zepto", {"request_id": "r"})
+    assert jobs.claim(pg, "w", ("sync", "search")).type == "search"
+
+
+def test_connect_claimed_before_older_sync(pg):
+    from helpers import B
+    jobs.enqueue(pg, A, "sync", "zepto")
+    jobs.enqueue(pg, B, "connect", "zepto", {"phone": "9876543210"})
+    assert jobs.claim(pg, "w", ("sync", "connect")).type == "connect"
+
+
 def test_finish_reports_whether_it_touched_the_job(pg):
     jid = jobs.enqueue(pg, A, "sync", "zepto"); jobs.claim(pg, "w1", ("sync",))
     assert jobs.finish(pg, jid, worker_id="w2") is False
