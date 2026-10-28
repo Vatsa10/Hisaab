@@ -199,12 +199,23 @@ def test_learn_job_requires_admin(pg, monkeypatch):
 
 
 def test_learn_job_missing_profile_is_needs_login(pg, monkeypatch):
-    _admin(pg)
+    _admin(pg, connected_site=None)
     calls = []
     monkeypatch.setattr(worker.sync, "learn", _learner(calls))
     jid = _run(pg, B, "learn")
     assert _job(pg, jid)[:2] == ("failed", "needs_login")
     assert calls == []
+    # ruling: the learn job fails, but no connection row is written and nobody is told "logged out"
+    assert pg.execute("select count(*) from connections").fetchone() == (0,)
+    assert pg.execute("select count(*) from notifications").fetchone() == (0,)
+
+
+def test_learn_job_missing_profile_keeps_admin_connection(pg, monkeypatch):
+    _admin(pg)
+    monkeypatch.setattr(worker.sync, "learn", _learner([]))
+    _run(pg, B, "learn")
+    assert pg.execute("select status from connections").fetchone() == ("connected",)
+    assert pg.execute("select count(*) from notifications").fetchone() == (0,)
 
 
 def test_learn_job_auto_applies_recipe_without_new_posts(pg, monkeypatch):
@@ -380,3 +391,90 @@ def test_profile_restamped_mid_job_fails_without_upload(pg, monkeypatch):
     jid = _run(pg, A, "sync")
     assert _job(pg, jid)[:2] == ("failed", "profile_owner_mismatch")
     assert _store().get(vault.blob_key(A, "zepto")) == before
+
+
+# ---------------------------------------------------------------- review fixes (round 1)
+
+def _stale_all(pg):
+    pg.execute("update jobs set started_at = now() - interval '20 minutes', "
+               "heartbeat_at = now() - interval '20 minutes' where status='running'")
+
+
+def _running_learn(pg, payload):
+    store.put_recipe(pg, "zepto", BASE)
+    _admin(pg)
+    jobs.enqueue(pg, B, "learn", "zepto", payload)
+    return jobs.claim(pg, "w1", ("learn",))
+
+
+def test_lost_auto_learn_pauses_site_and_alerts(pg):
+    job = _running_learn(pg, {"reason": "drift", "auto": True})
+    _stale_all(pg)
+    assert worker._requeue_stale(pg, dataclasses.replace(settings_for_tests(), stale_job_s=600)) == 1
+    assert _job(pg, job.id)[:2] == ("failed", "worker_lost")
+    assert pg.execute("select paused from recipes").fetchone() == (True,)
+    assert [(n[0], n[5]) for n in _notes(pg)] == [("site_paused", "admin@example.com")]
+
+
+def test_lost_supervised_learn_does_not_pause(pg):
+    _running_learn(pg, {})
+    _stale_all(pg)
+    assert worker._requeue_stale(pg, dataclasses.replace(settings_for_tests(), stale_job_s=600)) == 1
+    assert pg.execute("select paused from recipes").fetchone() == (False,)
+    assert _notes(pg) == []
+
+
+def test_main_loop_pauses_a_lost_auto_learn(pg, monkeypatch):
+    job = _running_learn(pg, {"reason": "drift", "auto": True})
+    _stale_all(pg)
+    monkeypatch.setattr(worker, "settings", lambda **k: dataclasses.replace(settings_for_tests(), stale_job_s=600))
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w2", poll_s=0.01, max_loops=1)
+    assert _job(pg, job.id)[:2] == ("failed", "worker_lost")
+    assert pg.execute("select paused from recipes").fetchone() == (True,)
+
+
+def test_shutdown_of_auto_learn_pauses_site_and_alerts(pg):
+    job = _running_learn(pg, {"reason": "drift", "auto": True})
+    assert worker._abort_on_shutdown(job, pg, "w1", settings_for_tests()) is True
+    assert _job(pg, job.id)[:2] == ("failed", "worker_shutdown")
+    assert pg.execute("select paused from recipes").fetchone() == (True,)
+    assert [(n[0], n[5]) for n in _notes(pg)] == [("site_paused", "admin@example.com")]
+
+
+def test_shutdown_of_supervised_learn_does_not_pause(pg):
+    job = _running_learn(pg, {})
+    assert worker._abort_on_shutdown(job, pg, "w1", settings_for_tests()) is True
+    assert pg.execute("select paused from recipes").fetchone() == (False,)
+    assert _notes(pg) == []
+
+
+def test_learn_profile_save_failure_never_publishes(pg, monkeypatch):
+    store.put_recipe(pg, "zepto", BASE)
+    _admin(pg)
+    _seed_profile(B)
+    monkeypatch.setattr(worker.sync, "learn", _learner([], {**BASE, "fast_path_ok": True}))
+
+    def broken_save(*a, **k):
+        raise OSError("vault unreachable")
+    monkeypatch.setattr(worker.vault, "save_profile", broken_save)
+    jid = _run(pg, B, "learn", payload={"reason": "drift", "auto": True})
+    assert _job(pg, jid)[0] == "failed"
+    # the profile is saved before apply_learned, so a failed save never pauses a live recipe
+    assert pg.execute("select version, recipe from recipes").fetchone() == (1, BASE)
+    assert pg.execute("select count(*) from recipe_approvals").fetchone() == (0,)
+    assert pg.execute("select paused from recipes").fetchone() == (True,)
+
+
+def test_meter_close_failure_never_escapes_run_job(pg, monkeypatch, caplog):
+    import contextlib
+
+    @contextlib.contextmanager
+    def bad_meter():
+        yield metering.Meter()
+        raise RuntimeError("meter exit 9876543210")
+    monkeypatch.setattr(worker.metering, "meter", bad_meter)
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda site, since, **k: [order("1")])
+    jid = _run(pg, A, "sync")
+    assert _job(pg, jid)[:2] == ("done", None)
+    assert "RuntimeError" in caplog.text and "9876543210" not in caplog.text

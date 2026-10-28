@@ -1,6 +1,6 @@
 """Postgres job queue: workers claim rows with FOR UPDATE SKIP LOCKED."""
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -167,25 +167,29 @@ def requeue(conn, job_id: str, worker_id: str, run_after: datetime | None = None
         return "queued"
 
 
-def requeue_stale(conn, older_than_s: int = 600, max_attempts: int = 3) -> int:
+def requeue_stale(conn, older_than_s: int = 600, max_attempts: int = 3,
+                  on_lost: Callable[[list[Job]], None] | None = None) -> int:
     """Handle running jobs silent (no heartbeat, or none and no start) for more than older_than_s seconds (their
     worker is presumed dead). A job in NO_RETRY_TYPES cannot be resumed: it fails with "worker_lost", its phone
     is dropped and, for a connect, a connection left "syncing" becomes "error". Any other job goes back to queued,
-    unless it has used max_attempts claims: then it fails with "too_many_attempts". Returns how many were handled."""
+    unless it has used max_attempts claims: then it fails with "too_many_attempts". on_lost(jobs) is called after
+    the commit with the jobs just failed as "worker_lost" (e.g. so an unattended learn can pause its site).
+    Returns how many were handled."""
     silent = "status='running' AND coalesce(heartbeat_at, started_at) < now() - make_interval(secs => %s)"
     with conn.transaction():
-        lost = conn.execute(
+        lost_rows = conn.execute(
             f"""WITH lost AS (
                  UPDATE jobs SET status='failed', error='worker_lost', finished_at=now(), payload = payload - 'phone'
                  WHERE {silent} AND type = ANY(%s)
-                 RETURNING user_id, site, type),
+                 RETURNING id, user_id, site, type, payload),
                conns AS (
                  UPDATE connections c SET status='error' FROM lost
                  WHERE lost.type='connect' AND c.user_id=lost.user_id AND c.site=lost.site AND c.status='syncing'
                  RETURNING 1)
-               SELECT count(*) FROM lost""",
+               SELECT id, user_id, type, site, payload FROM lost""",
             (older_than_s, list(NO_RETRY_TYPES)),
-        ).fetchone()[0]
+        ).fetchall()
+        lost = len(lost_rows)
         capped = conn.execute(
             "UPDATE jobs SET status='failed', error='too_many_attempts', finished_at=now(), payload = payload - 'phone' "
             f"WHERE {silent} AND NOT (type = ANY(%s)) AND attempts >= %s",
@@ -196,6 +200,8 @@ def requeue_stale(conn, older_than_s: int = 600, max_attempts: int = 3) -> int:
             f"WHERE {silent} AND NOT (type = ANY(%s))",
             (older_than_s, list(NO_RETRY_TYPES)),
         ).rowcount
+    if on_lost is not None and lost_rows:
+        on_lost([Job(id=str(r[0]), user_id=str(r[1]), type=r[2], site=r[3], payload=r[4]) for r in lost_rows])
     return lost + capped + requeued
 
 

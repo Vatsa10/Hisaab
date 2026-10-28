@@ -309,6 +309,25 @@ def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str) -> None
     _dispatch(conn, s)
 
 
+def _is_auto_learn(job: jobs.Job) -> bool:
+    return job.type == "learn" and bool((job.payload or {}).get("auto"))
+
+
+def _pause_after_failed_relearn(conn, s: Settings, job: jobs.Job, error: str) -> None:
+    """Ruling R8: an unattended (drift) learn that did not publish a recipe, however it ended, pauses the site
+    and alerts the admins. A supervised learn never pauses."""
+    if _is_auto_learn(job):
+        _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN], RELEARN_FAILED_BODY)
+
+
+def _requeue_stale(conn, s: Settings) -> int:
+    """jobs.requeue_stale, with an unattended learn lost with its worker pausing its site like any failed one."""
+    def on_lost(lost: list[jobs.Job]) -> None:
+        for job in lost:
+            _pause_after_failed_relearn(conn, s, job, "worker_lost")
+    return jobs.requeue_stale(conn, s.stale_job_s, on_lost=on_lost)
+
+
 def _on_drift(conn, s: Settings, job: jobs.Job, db_site: str, note: str) -> None:
     """Ruling R8: on the healthy -> unhealthy transition, enqueue an unattended learn on a connected admin
     account, or, with none, pause the site and alert the admins. Later drifted syncs do nothing more."""
@@ -342,9 +361,10 @@ def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay
 
 
 def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server: str | None,
-              listen: Callable[[], object], fake: bool) -> dict:
+              listen: Callable[[], object], fake: bool, save_profile: Callable[[], None]) -> dict:
     """Learn the site's orders recipe on the admin's account and publish or file it (recipe_admin.apply_learned).
-    An auto (drift) learn never lets a new POST through; a supervised one asks the admin for each."""
+    An auto (drift) learn never lets a new POST through; a supervised one asks the admin for each. The admin's
+    profile is saved before anything is published, so a failed save never pauses a site whose recipe is live."""
     auto = bool((job.payload or {}).get("auto"))
     jobs.set_progress(conn, job.id, stage="learning")
     if auto:
@@ -357,6 +377,7 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     recipe = (fake_sites.learn if fake else sync.learn)(
         job.site, profile_dir=profile_dir, location=_location(conn, job.user_id), proxy_server=proxy_server,
         approve=approve, preapproved=preapproved, save=False)
+    save_profile()
     result = recipe_admin.apply_learned(conn, job.site, "orders", recipe, set(getattr(approve, "approved", ())),
                                         job.id, reason="drift_relearn" if auto else "learned")
     jobs.set_progress(conn, job.id, stage="learned", approval_id=result["approval_id"], status=result["status"],
@@ -393,20 +414,21 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     metered = contextlib.ExitStack()
     meter = metered.enter_context(metering.meter())
 
-    def fail(error: str, status: str | None = None) -> None:
-        before = _status(conn, job.user_id, db_site)
-        if status is None and before == "syncing":
-            status = "error"
-        if status:
-            store.set_connection(conn, job.user_id, db_site, status=status)
+    def fail(error: str, status: str | None = None, touch_connection: bool = True) -> None:
+        """Finish the job as failed. touch_connection=False leaves the connection row (and its "logged you out"
+        notification) alone: a learn that never started on the admin's account is not about their session."""
+        if touch_connection:
+            before = _status(conn, job.user_id, db_site)
+            if status is None and before == "syncing":
+                status = "error"
+            if status:
+                store.set_connection(conn, job.user_id, db_site, status=status)
         jobs.finish(conn, job.id, error=error, worker_id=job.worker_id)
-        if status == "needs_login" and before != "needs_login":
+        if touch_connection and status == "needs_login" and before != "needs_login":
             _notify_user(conn, s, kind="needs_login", title=f"{_app(job.site)} logged you out",
                          body="Reconnect to keep your spending up to date.", url="/accounts",
                          user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
-        if auto_learn:
-            _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN],
-                             RELEARN_FAILED_BODY)
+        _pause_after_failed_relearn(conn, s, job, error)
 
     def save_profile() -> None:
         if fake:
@@ -437,10 +459,12 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         except vault.VaultError as e:
             log.warning("job %s: stored profile unusable (%s); starting empty", job.id, type(e).__name__)
             shutil.rmtree(profile_dir, ignore_errors=True)
-            if job.type in ("sync", "learn"):
+            if job.type == "sync":
                 return fail("needs_login", "needs_login")
         if job.type == "learn" and not restored and not fake:
-            return fail("needs_login", "needs_login")  # a learn runs on the admin's logged-in account
+            # A learn runs on the admin's logged-in account; with none stored the job fails, but the admin's
+            # connection row is neither written nor reported as logged out.
+            return fail("needs_login", touch_connection=False)
         profile_dir.mkdir(parents=True, exist_ok=True)
         session_id = _ensure_proxy_session(conn, job.user_id, db_site)
 
@@ -462,8 +486,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 proxy_server = relay.url
 
             if job.type == "learn":
-                result = _do_learn(job, conn, s, profile_dir, proxy_server, listen, fake)
-                save_profile()
+                result = _do_learn(job, conn, s, profile_dir, proxy_server, listen, fake, save_profile)
                 jobs.finish(conn, job.id, worker_id=job.worker_id)
                 if auto_learn and result["status"] == "pending":
                     _pause_and_alert(conn, s, job.site, "drift re-learn needs admin approval", RELEARN_FAILED_BODY)
@@ -521,7 +544,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         _close(listen_conn)
         shutil.rmtree(profile_dir, ignore_errors=True)
         shutil.rmtree(runs_dir, ignore_errors=True)
-        metered.close()
+        try:
+            metered.close()
+        except Exception as e:  # metering must never fail or escape a job
+            log.warning("job %s: meter close failed (%s)", job.id, type(e).__name__)
         _record_usage(conn, job, s, meter, relay, time.monotonic() - started)
 
 
@@ -538,13 +564,14 @@ def _close(*conns) -> None:
             pass
 
 
-def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str) -> bool:
+def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str, s: Settings | None = None) -> bool:
     """Abort a job this worker is still running because the worker is going away. A connect job cannot be
     resumed (its OTP exchange dies with us): it fails with "worker_shutdown" and a connection left "syncing"
     becomes "error"; so does a learn job (its approval exchange dies with us). A sync job goes straight back to
     the queue for another worker. Both updates only touch a job still running under worker_id. Returns whether
     the job was aborted (False: already finished, or the database could not be reached; then the stale-job
-    requeue deals with it)."""
+    requeue deals with it). An unattended learn aborted this way pauses its site and alerts the admins (s, the
+    worker's settings, default read from the environment)."""
     try:
         if job.type in ("connect", "learn"):
             if not jobs.finish(conn, job.id, error="worker_shutdown", worker_id=worker_id):
@@ -552,6 +579,8 @@ def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str) -> bool:
             db_site = browser.SITES[job.site].get("db_site", job.site)
             if _status(conn, job.user_id, db_site) == "syncing":
                 store.set_connection(conn, job.user_id, db_site, status="error")
+            if _is_auto_learn(job):
+                _pause_after_failed_relearn(conn, s or settings(), job, "worker_shutdown")
             return True
         return jobs.requeue(conn, job.id, worker_id)
     except Exception as e:
@@ -606,7 +635,7 @@ class _Drain:
         conn = None
         try:
             conn = psycopg.connect(self.s.database_url, autocommit=True, connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_S)
-            done = _abort_on_shutdown(job, conn, self.worker_id)
+            done = _abort_on_shutdown(job, conn, self.worker_id, self.s)
         except Exception as e:
             log.error("could not reach the database to abort job %s (%s)", job.id, type(e).__name__)
             done = False
@@ -652,7 +681,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
             try:
                 if conn is None:
                     conn = _connect(s.database_url)
-                jobs.requeue_stale(conn, s.stale_job_s)
+                _requeue_stale(conn, s)
                 job = jobs.claim(conn, worker_id, JOB_TYPES)
                 if job is None:
                     failures = 0
@@ -666,7 +695,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                     run_job(job, conn, s, exit_process=exit_process)
                 except KeyboardInterrupt:
                     if not drain.aborted:  # Ctrl-C (the drain watchdog has already aborted its job)
-                        _abort_on_shutdown(job, conn, worker_id)
+                        _abort_on_shutdown(job, conn, worker_id, s)
                     raise
                 except Exception as e:
                     phone = (job.payload or {}).get("phone")

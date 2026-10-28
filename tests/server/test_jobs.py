@@ -364,6 +364,7 @@ def test_scaler_query_refuses_odd_type_names():
         with pytest.raises(ValueError):
             jobs.scaler_query(bad)
 
+
 def test_stale_learn_is_failed_not_requeued(pg):
     learn = jobs.enqueue(pg, A, "learn", "zepto", {"auto": True})
     jobs.claim(pg, "w1", ("learn",))
