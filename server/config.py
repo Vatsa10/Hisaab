@@ -73,6 +73,15 @@ class Settings:
     cors_origins: tuple[str, ...] = (DEFAULT_CORS_ORIGINS,)
     anthropic_api_key: str = field(default="", repr=False)
     anthropic_model: str = "claude-haiku-5-5"
+    # Cheapest cart (Plan 5)
+    split_min_saving_inr: float = 20
+    cart_max_items: int = 30
+    food_max_items: int = 20
+    cart_stale_s: int = 1500  # a check still searching after this long is finalized with the missing apps failed
+    match_judge: bool = True
+    match_model: str = ""  # empty: llm.model()
+    menu_cache_ttl_s: int = 1800
+    food_lookups_per_day: int = 30
 
 
 SITE_NAMES = {"zepto": "Zepto", "blinkit": "Blinkit", "swiggy": "Swiggy", "instamart": "Instamart",
@@ -178,6 +187,14 @@ def settings(for_worker: bool = False) -> Settings:
                            if o.strip()),
         anthropic_api_key=(env("ANTHROPIC_API_KEY", "") or "").strip(),
         anthropic_model=(env("ANTHROPIC_MODEL", "") or "").strip() or DEFAULT_ANTHROPIC_MODEL,
+        split_min_saving_inr=float(env("SPLIT_MIN_SAVING_INR", "20")),
+        cart_max_items=int(env("CART_MAX_ITEMS", "30")),
+        food_max_items=int(env("FOOD_MAX_ITEMS", "20")),
+        cart_stale_s=int(env("CART_STALE_S", "1500")),
+        match_judge=env("MATCH_JUDGE", "1") != "0",
+        match_model=env("MATCH_MODEL", ""),
+        menu_cache_ttl_s=int(env("MENU_CACHE_TTL_S", "1800")),
+        food_lookups_per_day=int(env("FOOD_LOOKUPS_PER_DAY", "30")),
     )
 
 

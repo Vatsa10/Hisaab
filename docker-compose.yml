@@ -24,6 +24,15 @@ x-app-env: &app-env
   CART_FILL_MAX_AGE_S: "${CART_FILL_MAX_AGE_S:-1800}"
   CART_LOCATION_MAX_M: "${CART_LOCATION_MAX_M:-500}"
   FILL_CONFIRM_WINDOW_S: "${FILL_CONFIRM_WINDOW_S:-600}"
+  # Cheapest cart (Plan 5)
+  SPLIT_MIN_SAVING_INR: "20"
+  CART_MAX_ITEMS: "30"
+  FOOD_MAX_ITEMS: "20"
+  CART_STALE_S: "1500"
+  MATCH_JUDGE: "1"
+  MATCH_MODEL: ""  # empty: the LLM default model
+  MENU_CACHE_TTL_S: "1800"
+  FOOD_LOOKUPS_PER_DAY: "30"
 
 services:
   db:

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from psycopg.rows import dict_row
 
-from server import budget, notify, sites
+from server import budget, cart, notify, sites
 from server.config import Settings
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
@@ -120,4 +120,30 @@ def site_health(conn, now: datetime, admin_user_id: str) -> list[dict]:
             "  FROM jobs WHERE site = s.site AND type = ANY(%s) AND finished_at >= %s AND finished_at <= %s) j "
             "ON true ORDER BY s.n",
             (list(CONNECTABLE_SITES), str(admin_user_id), list(SYNC_TYPES), since, now)).fetchall()
-    return rows
+    return [{**r, "op": None, "db_site": r["site"]} for r in rows] + _search_health(conn, since, now, admin_user_id)
+
+
+def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> list[dict]:
+    """One row per grocery search site and per food site and kind (restaurants, menu): the recipe's state, the
+    7 days' search-job outcomes for that op, and whether the admin's own connection for the site's account
+    (Instamart: swiggy) is connected."""
+    rows = [(s, "search", "products") for s in cart.SEARCH_SITES]
+    rows += [(s, k, k) for s in cart.FOOD_SITES for k in cart.FOOD_KINDS]
+    recipes = {(r[0], r[1]): r[2:] for r in conn.execute(
+        "SELECT site, kind, version, learned_at, healthy, paused, health_note FROM recipes")}
+    outcomes = {(r[0], r[1]): r[2:] for r in conn.execute(
+        "SELECT site, coalesce(payload->>'op', ''), "
+        "count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), "
+        "max(finished_at) FILTER (WHERE status='done') "
+        "FROM jobs WHERE type='search' AND finished_at >= %s AND finished_at <= %s GROUP BY 1, 2", (since, now))}
+    connected = {r[0] for r in conn.execute(
+        "SELECT site FROM connections WHERE user_id=%s AND status='connected'", (str(admin_user_id),))}
+    out = []
+    for site, kind, op in rows:
+        version, learned_at, healthy, paused, note = recipes.get((site, kind), (None, None, True, False, None))
+        ok, failed, last_ok = outcomes.get((site, op), (0, 0, None))
+        out.append({"site": site, "kind": kind, "op": op, "db_site": cart.db_site(site), "version": version, "learned_at": learned_at,
+                    "healthy": bool(healthy), "paused": bool(paused), "health_note": note,
+                    "syncs_ok_7d": int(ok), "syncs_failed_7d": int(failed), "last_ok_at": last_ok,
+                    "admin_connected": cart.db_site(site) in connected})
+    return out

@@ -11,7 +11,7 @@ MIGRATIONS = HERE.parent.parent / "supabase" / "migrations"
 TABLES = ("profiles", "connections", "orders", "order_items", "item_categories",
           "recipes", "jobs", "consents", "usage", "admins", "invites", "waitlist", "recipe_approvals",
           "notifications", "push_subscriptions", "budget_state",
-          "cart_requests", "cart_results", "cart_fills", "restaurant_cache", "menu_cache", "site_backoff")
+          "cart_requests", "cart_results", "cart_fills", "restaurant_cache", "menu_cache", "site_backoff", "app_addresses")
 
 
 def _url():

@@ -278,7 +278,7 @@ def test_admin_learn_requires_connected_admin_account(client, pg):
     r = client.post("/admin/learn/zepto", headers=h)
     assert r.status_code == 202
     assert pg.execute("select user_id::text, type, site, payload from jobs where id=%s",
-                      (r.json()["job_id"],)).fetchone() == (A, "learn", "zepto", {"reason": "manual"})
+                      (r.json()["job_id"],)).fetchone() == (A, "learn", "zepto", {"reason": "manual", "kind": "orders"})
     assert client.post("/admin/learn/zepto", headers=h).status_code == 409  # a learn is active
     sites = {s["site"]: s for s in client.get("/admin/sites", headers=h).json()}
     assert sites["zepto"]["admin_connected"] is True and sites["blinkit"]["admin_connected"] is False

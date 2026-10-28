@@ -228,3 +228,22 @@ def test_compose_sets_fill_tunables():
                  'CART_LOCATION_MAX_M: "${CART_LOCATION_MAX_M:-500}"',
                  'FILL_CONFIRM_WINDOW_S: "${FILL_CONFIRM_WINDOW_S:-600}"'):
         assert line in text
+
+
+CART_ENV = ("SPLIT_MIN_SAVING_INR", "CART_MAX_ITEMS", "FOOD_MAX_ITEMS", "CART_STALE_S", "MATCH_JUDGE", "MATCH_MODEL",
+            "MENU_CACHE_TTL_S", "FOOD_LOOKUPS_PER_DAY")
+
+
+def _cart_tunables(s):
+    return (s.split_min_saving_inr, s.cart_max_items, s.food_max_items, s.cart_stale_s, s.match_judge,
+            s.match_model, s.menu_cache_ttl_s, s.food_lookups_per_day)
+
+
+def test_settings_cart_tunables_from_env(monkeypatch):
+    from server import config
+    for k, v in zip(CART_ENV, ("35.5", "25", "12", "900", "0", "claude-haiku-5-5", "600", "9")):
+        monkeypatch.setenv(k, v)
+    assert _cart_tunables(config.settings()) == (35.5, 25, 12, 900, False, "claude-haiku-5-5", 600, 9)
+    for k in CART_ENV:
+        monkeypatch.delenv(k)
+    assert _cart_tunables(config.settings()) == (20, 30, 20, 1500, True, "", 1800, 30)

@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 from browser import SITES
-from server import admin, budget, jobs, recipe_admin, usage
+from server import admin, budget, cart, cart_rank, jobs, recipe_admin, store, usage
 from server.config import SITE_NAMES, settings
 
 ADMIN_PAUSE_NOTE = "Paused by the admin"
@@ -26,6 +26,15 @@ APPROVAL_COLUMNS = ("id, site, kind, reason, status, proposed, current, diff, jo
 
 class InviteBody(BaseModel):
     email: str = Field(max_length=320)
+
+
+class FeeRulesBody(BaseModel):
+    rules: dict
+    verified: bool
+
+
+# Which sites each learn kind covers: order history on connectable sites, grocery search, restaurants+menus.
+LEARN_SITES = {"orders": admin.CONNECTABLE_SITES, "search": cart.SEARCH_SITES, "food": cart.FOOD_SITES}
 
 
 class DecideBody(BaseModel):
@@ -94,22 +103,52 @@ def build_router(current_user, get_conn) -> APIRouter:
         return Response(status_code=204)
 
     @router.post("/learn/{site}", status_code=202)
-    def learn(site: str, user: str = Depends(require_admin), conn=Depends(get_conn)):
+    def learn(site: str, kind: Literal["orders", "search", "food"] = "orders", user: str = Depends(require_admin),
+              conn=Depends(get_conn)):
         _known(site)
-        if site not in admin.CONNECTABLE_SITES:
-            raise HTTPException(400, "Instamart is learned through the swiggy connection")
-        row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user, site)).fetchone()
+        if site not in LEARN_SITES[kind]:
+            if kind == "orders":
+                raise HTTPException(400, "Instamart is learned through the swiggy connection")
+            raise HTTPException(400, f"{_app(site)} has no {kind} recipe to learn")
+        account = cart.db_site(site)
+        row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user, account)).fetchone()
         if row is None or row[0] != "connected":
-            raise HTTPException(409, f"Connect {_app(site)} on your own account first.")
+            raise HTTPException(409, f"Connect {_app(account)} on your own account first.")
+        if kind != "orders":
+            prof = store.get_profile(conn, user) or {}
+            if prof.get("lat") is None or prof.get("lon") is None:
+                raise HTTPException(409, "Add your delivery address first.")
         busy = f"A learn for {_app(site)} is already running."
         if conn.execute("SELECT 1 FROM jobs WHERE site=%s AND type='learn' AND status IN ('queued','running')",
                         (site,)).fetchone() is not None:
             raise HTTPException(409, busy)
+        payload = {"reason": "manual", "kind": kind}
         try:
-            job_id = jobs.enqueue(conn, user, "learn", site, {"reason": "manual"})
+            job_id = jobs.enqueue(conn, user, "learn", site, payload)
         except jobs.Conflict:
             raise HTTPException(409, busy) from None
         return {"job_id": job_id}
+
+    @router.get("/fees")
+    def get_fees(_admin: str = Depends(require_admin), conn=Depends(get_conn)):
+        rows = {r[0]: r[1:] for r in conn.execute(
+            "SELECT site, rules, version, verified, source, updated_at FROM fee_rules")}
+        out = []
+        for site in cart_rank.SITE_ORDER:
+            rules, version, verified, source, updated_at = rows.get(site, (None, 0, False, None, None))
+            out.append({"site": site, "kind": "food" if site in cart.FOOD_SITES else "grocery", "rules": rules,
+                        "version": version, "verified": bool(verified), "source": source, "updated_at": updated_at})
+        return out
+
+    @router.put("/fees/{site}")
+    def put_fees(site: str, body: FeeRulesBody, user: str = Depends(require_admin), conn=Depends(get_conn)):
+        if site not in cart_rank.SITE_ORDER:
+            raise HTTPException(404, "unknown site")
+        try:
+            version = cart.put_fee_rules(conn, site, body.rules, body.verified, user)
+        except cart.InvalidRules as e:
+            raise HTTPException(422, e.errors) from None
+        return {"version": version}
 
     @router.get("/invites")
     def get_invites(_admin: str = Depends(require_admin), conn=Depends(get_conn)):

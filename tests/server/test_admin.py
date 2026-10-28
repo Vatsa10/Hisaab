@@ -80,7 +80,7 @@ def test_site_health_counts_last_7_days(pg):
     _sync_job(pg, B, "zepto", "done", NOW - timedelta(hours=1), type="connect")  # a connect counts as a sync run
     _sync_job(pg, B, "zepto", "failed", NOW - timedelta(hours=2), type="learn")  # a learn does not
     _sync_job(pg, B, "blinkit", "queued", NOW - timedelta(hours=1))  # not finished: not counted
-    rows = {r["site"]: r for r in admin.site_health(pg, NOW, A)}
+    rows = {r["site"]: r for r in admin.site_health(pg, NOW, A) if r["kind"] == "orders"}
     assert "instamart" not in rows and set(rows) == {"zepto", "blinkit", "swiggy", "zomato"}
     z = rows["zepto"]
     assert (z["kind"], z["version"], z["healthy"], z["paused"], z["health_note"]) == \

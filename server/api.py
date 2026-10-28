@@ -418,3 +418,7 @@ def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_
 
 
 app.include_router(admin_api.build_router(current_user, get_conn))
+# Router last: it uses current_user / get_conn above through call-time lookups.
+from server import cart_api  # noqa: E402
+
+app.include_router(cart_api.router)
