@@ -27,7 +27,7 @@ on each app at your address, with fees, so you know which one is cheapest.
 | Hardening, then deploy (Vercel + Azure + Supabase) | Planned |
 
 Stack: Next.js PWA (Vercel), FastAPI and a Chrome worker on Azure Container Apps, Supabase (Auth, Postgres,
-Realtime), Playwright, OpenAI and TypeSafe Jev. Local development: [docs/dev-supabase.md](docs/dev-supabase.md)
+Realtime), Playwright, Claude Haiku 5.5 and TypeSafe Jev. Local development: [docs/dev-supabase.md](docs/dev-supabase.md)
 and [web/README.md](web/README.md).
 
 ---
@@ -72,8 +72,13 @@ runtime and saves what it learns as a JSON "recipe" in `recipes/<site>.json`.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env        # set OPENAI_API_KEY (model defaults to gpt-6-luna), optionally TYPESAFE_API_KEY
+cp .env.example .env        # set ANTHROPIC_API_KEY, optionally TYPESAFE_API_KEY
 ```
+
+Every LLM call goes through `llm.py` on Claude Haiku 5.5 (`ANTHROPIC_MODEL=claude-haiku-5-5`, the default).
+Cost policy: no model at or above $1 per million tokens, input or output, and no prompt over 90K tokens, so
+Haiku's price never crosses its 100K-token step. Any other model, or a larger prompt, is refused at start-up
+or before the call; there is no override.
 
 Google Chrome has to be installed. It's found in the usual install folders; otherwise set `CHROME_PATH`
 in `.env`. Close any Chrome window left open on a site's profile from an earlier run before starting a new
@@ -120,7 +125,7 @@ terminal. It handles both a single OTP input and split one-digit boxes.
 2. **Code checks.** It checks for an OTP field, or a logged-out page with a Login button.
 3. **Jev decides.** One TypeSafe call (`kind` and `item`, about 0.5 s) picks the next action. If
    `TYPESAFE_API_KEY` isn't set, Jev is unsure (confidence below 0.4), or the last action failed or
-   repeated, a single GPT call decides that step instead.
+   repeated, a single Claude tool call decides that step instead.
 4. **Act.** It clicks normally, falls back to a real mouse click at the element's centre, then waits
    until the page stops changing instead of using fixed sleeps.
 5. **No early finish.** It won't accept "done" while a Login button is visible, or while the OTP is still

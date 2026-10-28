@@ -2,27 +2,33 @@
 import json
 import logging
 
-import agent
 import db
+import llm
 
 log = logging.getLogger("categorize")
 
 CATEGORIES = ["groceries", "dairy", "snacks", "household", "personal care", "food delivery", "other"]
 BATCH = 50
 
+# Structured output (output_config.format): the reply is guaranteed to match this JSON schema.
 SCHEMA = {
-    "name": "categories",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["items"],
-        "properties": {"items": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["name", "category"],
-            "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": CATEGORIES}},
-        }}},
-    },
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["name", "category"],
+        "properties": {"name": {"type": "string"}, "category": {"type": "string", "enum": CATEGORIES}},
+    }}},
 }
+PROMPT = ("Categorize Indian quick-commerce grocery order items. Echo each name exactly. "
+          "Milk, curd, paneer, butter, cheese -> dairy. Ready-to-eat restaurant meals -> food delivery.")
+
+
+def classify(names: list[str], client=None) -> list[dict]:
+    """[{"name", "category"}] for a batch of item names (low effort: a classification)."""
+    resp = llm.create("categorize", effort="low", max_tokens=8000, system=PROMPT, output_schema=SCHEMA,
+                      messages=[{"role": "user", "content": json.dumps(names, ensure_ascii=False)}], client=client)
+    return llm.json_reply(resp)["items"]
 
 
 def uncategorized(con) -> list[str]:
@@ -44,18 +50,11 @@ def categorize(con) -> int:
     if not names:
         print("Nothing to categorize.")
         return 0
-    client, mdl = agent.llm(), agent.model()
+    client = llm.client()
     done = 0
     for i in range(0, len(names), BATCH):
         batch = names[i:i + BATCH]
-        resp = client.chat.completions.create(
-            model=mdl,
-            response_format={"type": "json_schema", "json_schema": SCHEMA},
-            messages=[{"role": "system", "content":
-                       "Categorize Indian quick-commerce grocery order items. Echo each name exactly. "
-                       "Milk, curd, paneer, butter, cheese -> dairy. Ready-to-eat restaurant meals -> food delivery."},
-                      {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}])
-        result = json.loads(resp.choices[0].message.content)["items"]
+        result = classify(batch, client)
         with con:
             con.executemany("INSERT OR REPLACE INTO item_categories (name_norm, category) VALUES (?, ?)",
                             [(db.norm_name(r["name"]), r["category"]) for r in result])

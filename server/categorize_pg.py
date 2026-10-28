@@ -1,16 +1,12 @@
 """Categorise grocery item names into the shared Postgres item_categories cache."""
-import json
 import logging
 from typing import Callable
 
-import agent
+import categorize
 import db
-from categorize import CATEGORIES, SCHEMA
+from categorize import CATEGORIES, PROMPT  # noqa: F401  (PROMPT: the shared classifier prompt)
 
 log = logging.getLogger("categorize_pg")
-
-PROMPT = ("Categorize Indian quick-commerce grocery order items. Echo each name exactly. "
-          "Milk, curd, paneer, butter, cheese -> dairy. Ready-to-eat restaurant meals -> food delivery.")
 
 
 def uncategorized_names(conn, limit: int = 200) -> list[str]:
@@ -28,18 +24,14 @@ def uncategorized_names(conn, limit: int = 200) -> list[str]:
     return list(out.values())[:limit]
 
 
-def openai_classify(names: list[str]) -> dict[str, str]:
-    resp = agent.llm().chat.completions.create(
-        model=agent.model(),
-        response_format={"type": "json_schema", "json_schema": SCHEMA},
-        messages=[{"role": "system", "content": PROMPT},
-                  {"role": "user", "content": json.dumps(names, ensure_ascii=False)}])
-    return {r["name"]: r["category"] for r in json.loads(resp.choices[0].message.content)["items"]}
+def llm_classify(names: list[str]) -> dict[str, str]:
+    """The default classifier: Claude Haiku 5.5 through llm.py (structured output)."""
+    return {r["name"]: r["category"] for r in categorize.classify(names)}
 
 
 def categorize_new_items(conn, classify: Callable[[list[str]], dict[str, str]] | None = None,
                          batch: int = 50) -> int:
-    classify = classify or openai_classify
+    classify = classify or llm_classify
     names = uncategorized_names(conn)
     written = 0
     for i in range(0, len(names), batch):

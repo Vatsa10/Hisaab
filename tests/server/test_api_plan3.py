@@ -408,33 +408,23 @@ def test_ask_schema_describes_tables_and_views():
 
 # --- POST /ask ----------------------------------------------------------------------------------------------
 
-class _Msg(SimpleNamespace):
-    def model_dump(self, exclude_none=True):
-        d = {"role": "assistant", "content": self.content}
-        if self.tool_calls:
-            d["tool_calls"] = [{"id": tc.id, "type": "function",
-                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                               for tc in self.tool_calls]
-        return {k: v for k, v in d.items() if v is not None}
-
-
 class StubLLM:
-    """OpenAI-shaped client: first asks for one run_sql call, then answers from the tool result."""
+    """Anthropic-shaped client: first asks for one run_sql call, then answers from the tool result."""
 
     def __init__(self):
         self.requests = []
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+        self.messages = SimpleNamespace(create=self._create)
 
-    def _create(self, model, messages, tools=None, **_):
-        self.requests.append([dict(m) if isinstance(m, dict) else m for m in messages])
+    def _create(self, **kw):
+        self.requests.append({**kw, "messages": list(kw["messages"])})
+        usage = SimpleNamespace(input_tokens=100, output_tokens=10)
         if len(self.requests) == 1:
-            call = SimpleNamespace(id="call_1", function=SimpleNamespace(
-                name="run_sql", arguments=json.dumps({"query": "select sum(total_amount) as total from orders"})))
-            msg = _Msg(content=None, tool_calls=[call])
-        else:
-            result = json.loads(messages[-1]["content"])
-            msg = _Msg(content=f"You spent {result['rows'][0][0]:.0f}", tool_calls=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+            call = SimpleNamespace(type="tool_use", id="toolu_1", name="run_sql",
+                                   input={"query": "select sum(total_amount) as total from orders"})
+            return SimpleNamespace(content=[call], stop_reason="tool_use", model=kw["model"], usage=usage)
+        result = json.loads(kw["messages"][-1]["content"][0]["content"])
+        answer = SimpleNamespace(type="text", text=f"You spent {result['rows'][0][0]:.0f}")
+        return SimpleNamespace(content=[answer], stop_reason="end_turn", model=kw["model"], usage=usage)
 
 
 @pytest.fixture
@@ -453,9 +443,10 @@ def test_ask_endpoint_uses_stub_llm(client, token_a, pg, ask_env, monkeypatch, c
     r = client.post("/ask", json={"question": "How much did I spend?"}, headers=token_a)
     assert r.status_code == 200 and r.json() == {"answer": "You spent 100"}
     assert len(stub.requests) == 2
-    tool_msgs = [m for m in stub.requests[1] if isinstance(m, dict) and m.get("role") == "tool"]
-    assert len(tool_msgs) == 1  # scoped_sql ran exactly once
-    system = stub.requests[0][0]["content"]
+    tool_results = [b for m in stub.requests[1]["messages"] if isinstance(m["content"], list)
+                    for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_result"]
+    assert len(tool_results) == 1  # scoped_sql ran exactly once
+    system = stub.requests[0]["system"]
     assert "monthly_spend" in system and "PostgreSQL" in system
     sql_logs = [rec for rec in caplog.records if rec.getMessage().startswith("sql:")]
     assert sql_logs and all(rec.levelno == logging.DEBUG for rec in sql_logs)  # the model's SQL: DEBUG only

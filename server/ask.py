@@ -20,8 +20,8 @@ import pglast
 import psycopg
 from pglast import ast, enums
 
-import agent
 import insights
+import llm
 
 log = logging.getLogger("server.ask")
 
@@ -112,7 +112,7 @@ SCOPE_CHANGED = "the query was refused"  # generic on purpose: nothing from the 
 
 
 def default_llm():
-    return agent.llm()
+    return llm.client()
 
 
 def answer(conn, user_id: str, question: str, llm=None) -> str:

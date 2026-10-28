@@ -19,13 +19,13 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 # Load KEY=value lines without echoing them or running them as shell.
-for key in DATABASE_URL SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE LOCATION PREFIX; do
+for key in DATABASE_URL SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE LOCATION PREFIX; do
   line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n1 || true)"
   value="${line#*=}"
   value="${value%$'\r'}"
   printf -v "$key" '%s' "$value"
 done
-for key in DATABASE_URL SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE; do
+for key in DATABASE_URL SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE; do
   if [ -z "${!key}" ]; then
     echo "$key is empty in $ENV_FILE" >&2
     exit 1
@@ -65,13 +65,13 @@ PARAMS_NATIVE="$PARAMS"
 if command -v cygpath >/dev/null 2>&1; then
   PARAMS_NATIVE="$(cygpath -w "$PARAMS")"
 fi
-export DATABASE_URL SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE
+export DATABASE_URL SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROFILE_MASTER_KEY PROXY_URL_TEMPLATE
 "$PY" - "$PARAMS_NATIVE" <<'PY'
 import json, os, sys
 names = {
     "databaseUrl": "DATABASE_URL",
     "supabaseJwtSecret": "SUPABASE_JWT_SECRET",
-    "openaiApiKey": "OPENAI_API_KEY",
+    "anthropicApiKey": "ANTHROPIC_API_KEY",
     "typesafeApiKey": "TYPESAFE_API_KEY",
     "profileMasterKey": "PROFILE_MASTER_KEY",
     "proxyUrlTemplate": "PROXY_URL_TEMPLATE",

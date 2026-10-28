@@ -929,9 +929,9 @@ def test_connect_job_reports_syncing_before_fetch(pg, monkeypatch):
 
 
 def _enable_classifier(monkeypatch, stub):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.delenv("CATEGORIZE", raising=False)
-    monkeypatch.setattr(worker.categorize_pg, "openai_classify", stub)
+    monkeypatch.setattr(worker.categorize_pg, "llm_classify", stub)
 
 
 def test_sync_job_categorizes_new_items(pg, monkeypatch):
@@ -962,7 +962,7 @@ def test_categorize_failure_does_not_fail_job(pg, monkeypatch, caplog):
     assert "RuntimeError" in caplog.text and "sk-secret" not in caplog.text
 
 
-@pytest.mark.parametrize("env", [{"CATEGORIZE": "0"}, {"OPENAI_API_KEY": None}])
+@pytest.mark.parametrize("env", [{"CATEGORIZE": "0"}, {"ANTHROPIC_API_KEY": None}])
 def test_categorize_disabled_skips_and_logs_once(pg, monkeypatch, caplog, env):
     _enable_classifier(monkeypatch, lambda names: pytest.fail("must not classify"))
     for k, v in env.items():

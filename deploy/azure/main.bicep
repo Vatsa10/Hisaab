@@ -17,7 +17,9 @@ param databaseUrl string
 @secure()
 param supabaseJwtSecret string
 @secure()
-param openaiApiKey string
+param anthropicApiKey string
+// Cost policy: llm.py refuses any model at or above $1 / MTok, so only Claude Haiku 5.5 starts.
+param anthropicModel string = 'claude-haiku-5-5'
 @secure()
 param typesafeApiKey string
 @secure()
@@ -136,7 +138,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
       secrets: [
         { name: 'database-url', value: databaseUrl }
         { name: 'supabase-jwt-secret', value: supabaseJwtSecret }
-        { name: 'openai-api-key', value: openaiApiKey }
+        { name: 'anthropic-api-key', value: anthropicApiKey }
         { name: 'typesafe-api-key', value: typesafeApiKey }
         { name: 'profile-master-key', value: profileMasterKey }
       ]
@@ -150,7 +152,8 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           env: [
             { name: 'DATABASE_URL', secretRef: 'database-url' }
             { name: 'SUPABASE_JWT_SECRET', secretRef: 'supabase-jwt-secret' }
-            { name: 'OPENAI_API_KEY', secretRef: 'openai-api-key' }
+            { name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }
+            { name: 'ANTHROPIC_MODEL', value: anthropicModel }
             { name: 'TYPESAFE_API_KEY', secretRef: 'typesafe-api-key' }
             { name: 'PROFILE_MASTER_KEY', secretRef: 'profile-master-key' }
           ]
@@ -198,7 +201,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
       registries: registries
       secrets: [
         { name: 'database-url', value: databaseUrl }
-        { name: 'openai-api-key', value: openaiApiKey }
+        { name: 'anthropic-api-key', value: anthropicApiKey }
         { name: 'typesafe-api-key', value: typesafeApiKey }
         { name: 'profile-master-key', value: profileMasterKey }
         { name: 'proxy-url-template', value: proxyUrlTemplate }
@@ -216,7 +219,8 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           resources: { cpu: 2, memory: '4Gi' }
           env: [
             { name: 'DATABASE_URL', secretRef: 'database-url' }
-            { name: 'OPENAI_API_KEY', secretRef: 'openai-api-key' }
+            { name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }
+            { name: 'ANTHROPIC_MODEL', value: anthropicModel }
             { name: 'TYPESAFE_API_KEY', secretRef: 'typesafe-api-key' }
             { name: 'PROFILE_MASTER_KEY', secretRef: 'profile-master-key' }
             { name: 'PROXY_URL_TEMPLATE', secretRef: 'proxy-url-template' }

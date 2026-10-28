@@ -10,7 +10,7 @@ never paste your real phone number or address into a file or commit.
 ## 0. Prerequisites
 
 - Python deps installed on the host (`pip install -r requirements.txt`): the token snippet and `publish-recipe` run on the host.
-- `.env` next to `docker-compose.yml` (or exported in your shell) with `OPENAI_API_KEY` set. The worker may need it
+- `.env` next to `docker-compose.yml` (or exported in your shell) with `ANTHROPIC_API_KEY` set. The worker may need it
   for the login agent. Leave `PROFILE_MASTER_KEY` empty locally: compose sets `ALLOW_DEV_PROFILE_KEY=1` and the
   worker uses the fixed development key with the `file:///data/vault` vault.
 - Proxy template: the worker substitutes the per-user sticky session with Python `str.format(session=...)`, so

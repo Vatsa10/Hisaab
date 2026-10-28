@@ -8,7 +8,7 @@ Two Container Apps (API and Chrome worker) plus ACR, Storage and Log Analytics, 
 - Azure CLI, logged in (`az login`) with a subscription selected (`az account set`).
 - `az bicep install` (once).
 - A Supabase project, its Postgres connection string, and its JWT secret.
-- OpenAI and TypeSafe API keys, a profile master key, and a proxy URL template.
+- Anthropic (Claude Haiku 5.5) and TypeSafe API keys, a profile master key, and a proxy URL template.
 - Python on PATH (the script uses it to write the parameters file).
 
 ## One-time: Supabase migrations

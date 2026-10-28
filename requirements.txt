@@ -1,5 +1,5 @@
 playwright>=1.49
-openai>=1.40
+anthropic==0.94.0
 typer>=0.12
 python-dotenv>=1.0
 pytest>=8

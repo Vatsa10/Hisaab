@@ -2,7 +2,8 @@
 x-app-env: &app-env
   DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql://postgres:postgres@db:5432/postgres}
   SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-local-dev-jwt-secret-change-me-0123456789}
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
   TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
 
 services:

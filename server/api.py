@@ -14,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StringConstraints
 
 import browser
+import llm
 import sync
 from browser import SITES
 from server import ask, jobs
@@ -38,6 +39,7 @@ def ask_fake_enabled() -> bool:
 
 @asynccontextmanager
 async def lifespan(_app):
+    llm.model()  # the LLM cost policy: a model at or above $1 / MTok stops the API from starting
     if ask_fake_enabled():  # raises on a non-local database, so the API refuses to start
         log.warning("ASK_FAKE=1: /ask answers from a fixed query without the LLM (local end-to-end runs only)")
     conn, problem = open_ask_conn()

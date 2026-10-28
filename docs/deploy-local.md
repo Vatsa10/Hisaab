@@ -31,7 +31,8 @@ Both images run as the non-root user `app`. The worker sets `PROFILE_ROOT=/tmp/p
 Compose reads these from your shell or a `.env` file next to `docker-compose.yml`:
 
 - `SUPABASE_JWT_SECRET` - defaults to a dev-only value; must match the secret that signs your tokens.
-- `OPENAI_API_KEY`, `TYPESAFE_API_KEY` (optional), `PROFILE_MASTER_KEY`, `PROXY_URL_TEMPLATE` - default to empty.
+- `ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY` (optional), `PROFILE_MASTER_KEY`, `PROXY_URL_TEMPLATE` - default to empty.
+- `ANTHROPIC_MODEL` - defaults to `claude-haiku-5-5`, the only model the cost policy allows (under $1 / MTok).
 
 `PROFILE_STORE_URL` is `file:///data/vault` in compose; the vault and proxy settings are consumed by worker code
 that lands in a later task.

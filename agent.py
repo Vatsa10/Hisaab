@@ -2,7 +2,7 @@
 
 Each step: observe only what a user could actually hit -> code-level checks (OTP field, logged out)
 -> one fast Jev decision (kind + item, ~0.5 s) -> act -> wait for the DOM to settle.
-GPT is the fallback when Jev is unavailable, unsure, or repeating something that just failed.
+Claude (one tool call through llm.py) is the fallback when Jev is unavailable, unsure, or repeating something that just failed.
 """
 import functools
 import json
@@ -16,8 +16,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
+import llm
 import recipes
 from browser import SITES, SessionExpired, fetch_in_page, goto, home_url, scrub_headers
 from guard import BLOCKED_URL, redact_url
@@ -27,7 +27,7 @@ log = logging.getLogger("agent")
 MAX_STEPS = 40
 TIME_BUDGET_S = 300
 # Pointer's asymmetric floors: an action that lands somewhere (click/type) needs more confidence than one that
-# can't do harm (scroll/wait/Escape). Below the floor one GPT call decides the step.
+# can't do harm (scroll/wait/Escape). Below the floor one Claude call decides the step.
 JEV_MIN_CONFIDENCE = 0.4
 JEV_SAFE_MIN_CONFIDENCE = 0.3
 SAFE_KINDS = {"scroll", "wait", "close_popup"}
@@ -44,33 +44,18 @@ MORE_BUTTON = re.compile(r"^\s*((load|show|view|see)\s+more(\s+orders)?|next( pa
 PAGE_NUMBER = re.compile(r"^\s*([2-9]|[1-9]\d)\s*$")  # numbered pagers (Zomato: 1 2 3 ... 18)
 
 
-def llm() -> OpenAI:
-    load_dotenv()
-    return OpenAI()
-
-
-def model() -> str:
-    load_dotenv()
-    return os.getenv("OPENAI_MODEL", "gpt-6-luna")
-
-
-def tool_opts() -> dict:
-    # ponytail: gpt-6 Chat Completions only allows tool calls with reasoning_effort="none"; other models get nothing.
-    return {"reasoning_effort": "none"} if model().startswith("gpt-6") else {}
-
-
 @functools.cache
 def jev():
-    """TypeSafe Jev client, or None (no key / SDK) -> every step uses GPT."""
+    """TypeSafe Jev client, or None (no key / SDK) -> every step uses Claude."""
     load_dotenv()
     if not os.getenv("TYPESAFE_API_KEY"):
-        log.info("TYPESAFE_API_KEY not set: using GPT for every step")
+        log.info("TYPESAFE_API_KEY not set: using Claude for every step")
         return None
     try:
         from typesafe_sdk import TypeSafeClient
         return TypeSafeClient()
     except Exception as e:
-        log.warning("Jev unavailable (%s): using GPT for every step", e)
+        log.warning("Jev unavailable (%s): using Claude for every step", e)
         return None
 
 
@@ -303,10 +288,7 @@ def describe(el: dict) -> str:
 
 # --- the step loop -----------------------------------------------------------
 
-def _fn(name, description, props=None, required=()):
-    return {"type": "function", "function": {"name": name, "description": description, "parameters": {
-        "type": "object", "properties": props or {}, "required": list(required)}}}
-
+_fn = llm.tool  # strict Claude tools: the input always matches the schema
 
 _REF = {"element_ref": {"type": "string"}}
 TOOLS = [
@@ -373,7 +355,7 @@ class Discovery:
         self.refusals = 0
         self.waits = 0
         self.loads = 0
-        self.force_gpt = False
+        self.force_llm = False
         self.last_key = None
         self.asks = 0
         self.verify_refusals = 0
@@ -382,7 +364,7 @@ class Discovery:
             self.GOAL = f"{self.GOAL} Target: {goal}"
         self.done = None
 
-    # --- actions (also exposed to GPT as tools) ---
+    # --- actions (also exposed to Claude as tools) ---
 
     def prompt(self, text: str, kind: str = "question") -> str:
         """Every human-input point goes through here. kind is "otp" or "question"; an injected prompt gets it,
@@ -613,7 +595,7 @@ class Discovery:
         try:
             answers = client.system_one(state=self.state(), questions=questions, timeout=6).answers
         except Exception as e:
-            log.warning("Jev call failed (%s); asking GPT", type(e).__name__)
+            log.warning("Jev call failed (%s); asking Claude", type(e).__name__)
             return None
         kind, item = answers["kind"], answers.get("item")
         self.last_probs = {"kind": dict(kind.probabilities)} | ({"item_top": item.choice, "item_p": item.confidence}
@@ -622,7 +604,7 @@ class Discovery:
         conf = min(kind.confidence, item.confidence) if targeted and item else kind.confidence
         floor = JEV_SAFE_MIN_CONFIDENCE if kind.choice in SAFE_KINDS else JEV_MIN_CONFIDENCE
         if conf < floor or (targeted and not item):
-            log.info("Jev unsure (%s %.2f); asking GPT", kind.choice, conf)
+            log.info("Jev unsure (%s %.2f); asking Claude", kind.choice, conf)
             return None
         ref = item.choice if item else None
         call = {
@@ -640,18 +622,19 @@ class Discovery:
         }[kind.choice]
         return (*call, f"jev {conf:.2f}")
 
-    def decide_gpt(self):
+    def decide_llm(self):
+        """One Claude tool call picks the step. Forced tool_choice may 400 on current models, so it is auto plus
+        an instruction; strict tools keep the input schema-valid, and it arrives already parsed from JSON."""
         lines = "\n".join(f"{e['ref']}: {mask(describe(e), self.secrets)}" for e in self.snap["elements"])
         user = (f"STATE:\n{json.dumps(self.state(), ensure_ascii=False)}\n\nCLICKABLE ELEMENTS:\n{lines or '(none)'}"
                 "\n\nCall exactly one tool for the next action.")
-        msg = llm().chat.completions.create(
-            model=model(), tool_choice="required", tools=self.TOOLS, **tool_opts(),
-            messages=[{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": user}],
-        ).choices[0].message
-        if not msg.tool_calls:
-            return "wait", {}, "gpt"
-        tc = msg.tool_calls[0]
-        return tc.function.name, json.loads(tc.function.arguments or "{}"), "gpt"
+        resp = llm.create("browser_step", effort="low", max_tokens=4096, system=self.system_prompt(),
+                          tools=self.TOOLS, tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+                          messages=[{"role": "user", "content": user}])
+        call = next((b for b in resp.content if b.type == "tool_use"), None)
+        if call is None:
+            return "wait", {}, "claude"
+        return call.name, dict(call.input), "claude"
 
     def system_prompt(self) -> str:
         return self.SYSTEM.format(site=self.site, popups=POPUPS)
@@ -687,23 +670,23 @@ class Discovery:
                 break
             t0 = time.time()
             self.last_probs = {}
-            decision = None if self.force_gpt else self.decide_jev()
-            name, args, source = decision or self.decide_gpt()
+            decision = None if self.force_llm else self.decide_jev()
+            name, args, source = decision or self.decide_llm()
             t_decide = time.time() - t0
             target = mask(self._target(args), self.secrets)
             if name != "wait":
                 self.waits = 0
             try:
-                if name not in {tool["function"]["name"] for tool in self.TOOLS}:
+                if name not in {tool["name"] for tool in self.TOOLS}:
                     raise ValueError(f"unknown action {name}")
                 result = getattr(self, name)(**args)
             except SessionExpired:
                 raise
             except Exception as e:
                 result = {"error": f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"}
-            # A failure, or the same action on the same page again, means the fast path is looping: let GPT think.
+            # A failure, or the same action on the same page again, means the fast path is looping: let Claude think.
             key = (name, target, self.page.url)
-            self.force_gpt = "error" in result or (key == self.last_key and name not in ("scroll", "wait"))
+            self.force_llm = "error" in result or (key == self.last_key and name not in ("scroll", "wait"))
             self.last_key = key
             outcome = mask(result["error"] if "error" in result else "ok", self.secrets)
             self.history.append(f"{name} {target} -> {outcome}")
@@ -741,7 +724,7 @@ TYPE_VALUE = _fn("type_value", "Type one of the user's preset values (phone numb
 class LoginAgent(Discovery):
     """Drives the login form. It can only type the phone number, an OTP the user enters, or the saved location."""
     SYSTEM, login = LOGIN_SYSTEM, True
-    TOOLS = [t for t in TOOLS if t["function"]["name"] != "list_captured_json"] + [TYPE_VALUE]
+    TOOLS = [t for t in TOOLS if t["name"] != "list_captured_json"] + [TYPE_VALUE]
     KINDS = COMMON_KINDS | {
         "type_phone": "Type the user's mobile number into the EMPTY phone/mobile number input (chosen in the item question).",
         "type_location": ("Type the user's delivery address into an EMPTY location/address search box (chosen in the "
@@ -1050,7 +1033,7 @@ def validate(recipe: dict, page, guard, capture, approved: set[str]) -> tuple[li
 
 
 def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: str) -> dict:
-    client, mdl = llm(), model()
+    client = llm.client()
     ranked = sorted(capture.items, key=score, reverse=True)
     samples = "\n\n".join(f"#{c['id']} {c['method']} {c['url']}\nrequest_body: {(c['request_body'] or '')[:1500]}\n"
                           f"headers: {json.dumps(c['request_headers'])[:800]}\n"
@@ -1065,11 +1048,10 @@ def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: s
         samples=samples, blocked=blocked or "(none)", field_rules=FIELD_RULES)}]
     approved: set[str] = set()
     for attempt in range(3):
-        content = client.chat.completions.create(
-            model=mdl, messages=messages, response_format={"type": "json_object"}).choices[0].message.content
-        messages.append({"role": "assistant", "content": content})
+        resp = llm.create("recipe", effort="medium", max_tokens=16_000, messages=messages, client=client)
+        messages.append({"role": "assistant", "content": llm.text(resp)})
         try:
-            recipe = json.loads(content)
+            recipe = llm.json_reply(resp)
             if other := sibling_endpoint(site, recipe):
                 raise ValueError(f"that endpoint is {other}'s order feed; find {site}'s own order list "
                                  f"({SITES[site].get('goal', '')})")
@@ -1120,17 +1102,16 @@ def learn_from_seed(site: str, page, guard, capture, seed: dict) -> dict:
         raise SessionExpired("not logged in")
     recipe = dict(seed)
     data = fetch_in_page(page, recipes.first_request(recipe))
-    client, mdl = llm(), model()
+    client = llm.client()
     messages = [{"role": "user", "content": FIELD_MAP_PROMPT.format(
         site=site, endpoint=redact_url(recipe["endpoint"]),
         sample=f"{shape_hint(data)}\n\nresponse start: {json.dumps(data, ensure_ascii=False)[:12000]}",
         field_rules=FIELD_RULES)}]
     for attempt in range(3):
-        content = client.chat.completions.create(
-            model=mdl, messages=messages, response_format={"type": "json_object"}).choices[0].message.content
-        messages.append({"role": "assistant", "content": content})
+        resp = llm.create("field_map", effort="medium", max_tokens=16_000, messages=messages, client=client)
+        messages.append({"role": "assistant", "content": llm.text(resp)})
         try:
-            fm = json.loads(content)["field_map"]
+            fm = llm.json_reply(resp)["field_map"]
             orders = recipes.valid_orders(recipes.extract_orders(data, fm))
             err = None if orders else ("field_map extracted no order with order_id, placed_at and total_amount: "
                                        f"{recipes.diagnose(data, fm)}")

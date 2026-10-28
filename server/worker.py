@@ -21,6 +21,7 @@ import psycopg
 from psycopg import sql
 
 import browser
+import llm
 import sync
 from server import categorize_pg, fake_sites, jobs, store, vault
 from server.config import Settings, settings
@@ -229,16 +230,16 @@ def throttled(write: Callable[[int, float], None], min_interval_s: float = PROGR
 
 
 def _categorize(conn) -> None:
-    """Categorise items the sync just stored. Off with CATEGORIZE=0 or without OPENAI_API_KEY (logged once per
+    """Categorise items the sync just stored. Off with CATEGORIZE=0 or without ANTHROPIC_API_KEY (logged once per
     process). A failure is logged by exception class only (the text can quote a key) and never fails the job."""
     global _categorize_skip_logged
-    if os.getenv("CATEGORIZE") == "0" or not (os.getenv("OPENAI_API_KEY") or "").strip():
+    if os.getenv("CATEGORIZE") == "0" or not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
         if not _categorize_skip_logged:
             _categorize_skip_logged = True
-            log.info("categorisation disabled (CATEGORIZE=0 or OPENAI_API_KEY not set)")
+            log.info("categorisation disabled (CATEGORIZE=0 or ANTHROPIC_API_KEY not set)")
         return
     try:
-        categorize_pg.categorize_new_items(conn)  # default classifier: OpenAI
+        categorize_pg.categorize_new_items(conn)  # default classifier: Claude via llm.py
     except Exception as e:
         log.warning("categorisation failed (%s)", type(e).__name__)
 
@@ -474,6 +475,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     SIGTERM drains: no new job is claimed and the current one may finish within s.drain_s; past that it is
     aborted (see _Drain). Ctrl-C aborts the current job at once. exit_process (default os._exit) ends the
     process when a job hangs (MAX_JOB_S) or will not unwind after a drain abort; max_loops is for tests."""
+    llm.model()  # the LLM cost policy: a model at or above $1 / MTok stops the worker before anything else
     worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
     exit_process = exit_process or os._exit
     _check_fake_mode(os.getenv("DATABASE_URL", ""))  # before settings(): no other config error may mask it

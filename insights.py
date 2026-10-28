@@ -5,8 +5,8 @@ import logging
 import re
 import sqlite3
 
-import agent
 import db
+import llm
 from report import REPORTS, SPENT
 
 log = logging.getLogger("insights")
@@ -90,10 +90,8 @@ observations or suggestions. Use ₹ and round to whole rupees. Never invent num
 
 
 def sql_tool(description: str) -> dict:
-    """The run_sql tool definition handed to the model."""
-    return {"type": "function", "function": {
-        "name": "run_sql", "description": description,
-        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+    """The run_sql tool definition handed to the model (strict: its input always matches the schema)."""
+    return llm.tool("run_sql", description, {"query": {"type": "string"}}, ["query"])
 
 
 ANALYST = analyst_prompt(SCHEMA)
@@ -119,27 +117,62 @@ def run_sql(query: str) -> dict:
         con.close()
 
 
+# Tokens kept free under llm.INPUT_CAP for the closing "answer now" turn.
+ANSWER_RESERVE = 2_000
+MIN_RESULT_BYTES = 1_000  # below this much room a tool result is not worth sending: answer instead
+RESULT_MAX_BYTES = 30_000
+BUDGET_SPENT = "result omitted: the token budget for this question is spent. Answer with what you have."
+ANSWER_NOW = "Answer now with what you have."
+
+
+def _fit(content: str, room: int) -> str:
+    """content cut to at most room UTF-8 bytes (an upper bound on its tokens), marked when trimmed."""
+    data = content.encode("utf-8")
+    if len(data) <= room:
+        return content
+    note = "\n[result trimmed to stay under the token cap]"
+    return data[:max(room - len(note), 0)].decode("utf-8", errors="ignore") + note
+
+
 def ask(question: str, max_calls: int = 12, *, sql_runner=None, system: str = ANALYST, tool: dict = RUN_SQL,
         client=None, sql_log_level: int = logging.INFO) -> str:
     """The analyst loop. By default it reads the local SQLite database (CLI); server.ask passes its own
-    sql_runner (query -> result dict), system prompt, tool definition, LLM client and a quieter SQL log level."""
+    sql_runner (query -> result dict), system prompt, tool definition, LLM client and a quieter SQL log level.
+
+    The history is append-only (thinking blocks go back untouched), so the prompt is kept under llm.INPUT_CAP by
+    trimming each new tool result to the room left; once the room is spent the model is asked to answer."""
     sql_runner = sql_runner or run_sql
-    client, mdl = client or agent.llm(), agent.model()
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": question}]
+    client = client or llm.client()
+    messages: list[dict] = [{"role": "user", "content": question}]
+    spent = False
     for _ in range(max_calls):
-        msg = client.chat.completions.create(model=mdl, messages=messages, tools=[tool],
-                                             **agent.tool_opts()).choices[0].message
-        messages.append(msg.model_dump(exclude_none=True))
-        if not msg.tool_calls:
-            return msg.content or ""
-        for tc in msg.tool_calls:
-            query = json.loads(tc.function.arguments or "{}").get("query", "")
-            result = sql_runner(query)
-            log.log(sql_log_level, "sql: %s -> %s", query[:120].replace("\n", " "), "error" if "error" in result else len(result["rows"]))
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": json.dumps(result, ensure_ascii=False, default=str)[:30000]})
-    messages.append({"role": "user", "content": "Answer now with what you have."})
-    return client.chat.completions.create(model=mdl, messages=messages).choices[0].message.content or ""
+        resp = llm.create("ask", effort="medium", max_tokens=16_000, system=system, messages=messages, tools=[tool],
+                          client=client)
+        messages.append({"role": "assistant", "content": resp.content})
+        calls = [b for b in resp.content if b.type == "tool_use"]
+        if not calls:
+            return llm.text(resp)
+        room = llm.INPUT_CAP - llm.prompt_size(resp) - ANSWER_RESERVE
+        per_call = room // len(calls)
+        spent = per_call < MIN_RESULT_BYTES
+        results = []
+        for b in calls:
+            if spent:
+                content = BUDGET_SPENT
+            else:
+                query = b.input.get("query", "") if isinstance(b.input, dict) else ""
+                result = sql_runner(query)
+                log.log(sql_log_level, "sql: %s -> %s", query[:120].replace("\n", " "),
+                        "error" if "error" in result else len(result["rows"]))
+                content = _fit(json.dumps(result, ensure_ascii=False, default=str)[:RESULT_MAX_BYTES], per_call)
+            results.append({"type": "tool_result", "tool_use_id": b.id, "content": content})
+        messages.append({"role": "user", "content": results})
+        if spent:
+            break
+    messages.append({"role": "user", "content": ANSWER_NOW})
+    resp = llm.create("ask", effort="medium", max_tokens=16_000, system=system, messages=messages, tools=[tool],
+                      tool_choice={"type": "none"}, client=client)
+    return llm.text(resp)
 
 
 INSIGHTS_QUESTION = ("Give me a month-wise split of my spending: per month the total, per-platform amounts and "
