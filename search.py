@@ -9,7 +9,6 @@ import random
 import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-import agent
 import browser
 import recipes
 import sync
@@ -30,11 +29,16 @@ class SearchError(Exception):
 
 
 class SearchDrift(SearchError):
-    """The recipe no longer works: neither the API replay nor the search page yields a product list."""
+    """The recipe no longer works: the app answered 2xx, but the body is unparseable or has no products_path."""
 
 
 class Unserviceable(SearchError):
     """The app has no store for the user's location."""
+
+
+class SearchTransient(SearchError):
+    """A passing failure (timeout, 429, 5xx, a failed navigation or store lookup). It fails only this result and
+    never marks the recipe unhealthy."""
 
 
 # --- extraction --------------------------------------------------------------
@@ -193,7 +197,7 @@ def _lookup_store(page, recipe: dict, location: dict) -> tuple[str | None, objec
     except browser.SessionExpired:
         raise
     except Exception as e:
-        raise SearchDrift(f"store lookup failed ({type(e).__name__})") from e
+        raise SearchTransient(f"store lookup failed ({type(e).__name__})") from e
     sid = _text(recipes.get_path(data, store.get("store_id_path")))
     return sid, data
 
@@ -213,48 +217,79 @@ def search_page_url(recipe: dict, text: str) -> str:
     return recipe["search_page_url"].replace("{q}", quote(text))
 
 
+def endpoint_responses(recipe: dict, items: list[dict]) -> list[dict]:
+    """Captured responses (any status) of the recipe's endpoint: same host, path and method."""
+    want = urlsplit(recipe["endpoint"])
+    method = (recipe.get("method") or "GET").upper()
+    return [c for c in items if (urlsplit(c["url"]).netloc, urlsplit(c["url"]).path) == (want.netloc, want.path)
+            and c["method"].upper() == method]
+
+
 def search_once(page, capture, recipe: dict, text: str, location: dict, store_id: str | None = None):
     """One query: the in-page API replay, else the search page and the last captured response of the endpoint.
-    Returns the response body whose products_path leads to a list, or None when both fail."""
-    path = recipe["field_map"].get("products_path")
+
+    Returns the response body whose products_path leads to a list. Raises SearchDrift only when the app answered
+    2xx with a body that is unparseable or has no products_path (the recipe is wrong for everyone); anything else
+    (timeouts, 429, 5xx, a failed navigation, no response in time) raises SearchTransient. 401/403 and login
+    redirects raise browser.SessionExpired."""
+    site, path = recipe.get("site"), recipe["field_map"].get("products_path")
+    drift = False
+    req = build_request(recipe, text, location, store_id)
     try:
-        data = browser.fetch_in_page(page, build_request(recipe, text, location, store_id))
+        data = browser.fetch_in_page(page, req)
         if rows_at(data, path) is not None:
             return data
+        drift = True  # 2xx, parsed, but no product list where the recipe says
     except browser.SessionExpired:
         raise
-    except SearchError:
-        raise
+    except ValueError as e:  # json.JSONDecodeError: a 2xx body that is not JSON
+        drift = True
+        log.info("%s search replay unparseable (%s); trying the search page", site, type(e).__name__)
     except Exception as e:
-        log.info("%s search replay failed (%s); trying the search page", recipe.get("site"), type(e).__name__)
+        log.info("%s search replay failed (%s); trying the search page", site, type(e).__name__)
     capture.clear()
     try:
         browser.goto(page, search_page_url(recipe, text))
     except Exception as e:
-        log.info("%s search page failed (%s)", recipe.get("site"), type(e).__name__)
-        return None
+        log.info("%s search page failed (%s)", site, type(e).__name__)
+        if drift:
+            raise SearchDrift(f"{site} search response has no product list") from e
+        raise SearchTransient(f"{site} search page did not load ({type(e).__name__})") from e
     sync.ensure_logged_in(page)
     for _ in range(CAPTURE_POLLS):
-        if any(c["status"] in (401, 403) for c in capture.items if agent._same_endpoint(c, recipe)):
+        hits = endpoint_responses(recipe, capture.items)
+        if any(c["status"] in (401, 403) for c in hits):
             raise browser.SessionExpired("search API returned 401/403")
-        for c in reversed(agent.captured_for(recipe, capture.items)):
-            if rows_at(c["json"], path) is not None:
+        for c in reversed(hits):
+            if 200 <= c["status"] < 300 and rows_at(c.get("json"), path) is not None:
                 return c["json"]
         page.wait_for_timeout(CAPTURE_WAIT_MS)
-    return None
+    if drift or any(200 <= c["status"] < 300 for c in endpoint_responses(recipe, capture.items)):
+        raise SearchDrift(f"{site} search response has no product list")
+    raise SearchTransient(f"{site} search gave no usable response in time")
 
 
 def search_products(site: str, queries, location: dict, recipe: dict, profile_dir, proxy_server: str | None = None,
                     block_media: bool = True, max_results: int = 20) -> dict:
-    """Search each query on the user's own profile. Returns {"products": {query: [...]}, "fee_info": {...}}."""
+    """Search each query on the user's own profile.
+
+    Returns {"products": {query: [...]}, "errors": {query: "drift"|"transient"}, "fee_info": {...}}; every query is
+    in exactly one of products / errors. A failure on the first query raises SearchDrift / SearchTransient (the
+    whole site fails); a later one is only that item's error. browser.SessionExpired always propagates."""
     queries = list(queries)
     fee_map = recipe.get("fee_map") or None
     products: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
     fee_info: dict = {}
     with browser.open_site(site, allowlist=list(recipe.get("read_post_allowlist") or []), profile_dir=profile_dir,
                            location=location, proxy_server=proxy_server, block_media=block_media) as (
             _, page, _guard, capture):
-        browser.goto(page, recipe["home_url"])
+        try:
+            browser.goto(page, recipe["home_url"])
+        except browser.SessionExpired:
+            raise
+        except Exception as e:
+            raise SearchTransient(f"{site} home page did not load ({type(e).__name__})") from e
         sync.ensure_logged_in(page)
         store_id, store_data = _lookup_store(page, recipe, location)
         if recipe.get("store") and not store_id:
@@ -264,14 +299,16 @@ def search_products(site: str, queries, location: dict, recipe: dict, profile_di
         for i, q in enumerate(queries):
             if i:
                 _pause()
-            data = search_once(page, capture, recipe, q, location, store_id)
-            if data is None:
+            try:
+                data = search_once(page, capture, recipe, q, location, store_id)
+            except (SearchDrift, SearchTransient) as e:
                 if i == 0:
-                    raise SearchDrift(f"{site} search recipe returned no product list")
-                products[q] = []
+                    raise
+                errors[q] = "drift" if isinstance(e, SearchDrift) else "transient"
                 continue
             products[q] = extract_products(data, recipe["field_map"])[:max_results]
             if fee_map and fee_map.get("source", "search") == "search":
                 fee_info = extract_fee_info(data, fee_map) | fee_info  # first observation wins per key
-    log.info("%s search: %d queries, %d products", site, len(queries), sum(len(v) for v in products.values()))
-    return {"products": products, "fee_info": fee_info}
+    log.info("%s search: %d queries, %d products, %d failed", site, len(queries),
+             sum(len(v) for v in products.values()), len(errors))
+    return {"products": products, "errors": errors, "fee_info": fee_info}

@@ -250,9 +250,10 @@ def _diagnose(data, fm: dict) -> str:
 def _field_map(site: str, c: dict, probe: str, llm: LLM) -> dict:
     data = c["json"]
     base = FIELD_MAP_PROMPT.format(site=site, probe=probe, endpoint=redact_url(c["url"]), sample=_sample(c))
-    prompt, err = base, ""
+    prompt, n = base, 0
     for attempt in range(FIELD_TRIES):
-        fm = None
+        fm, n = None, 0
+        # err (with sample values from the response) goes back to the model only; it is never raised or logged.
         try:
             raw = ask_json(llm, prompt)
             fm = raw.get("field_map", raw)
@@ -267,10 +268,11 @@ def _field_map(site: str, c: dict, probe: str, llm: LLM) -> dict:
             err = f"invalid field_map: {type(e).__name__}: {e}"
         if not err:
             return fm
-        log.warning("%s search field_map attempt %d failed", site, attempt + 1)
+        log.warning("%s search field_map attempt %d failed (%d products)", site, attempt + 1, n)
         prompt = (f"{base}\n\nYour previous answer: {json.dumps(fm, ensure_ascii=False)[:2000]}\n"
                   f"Validation failed: {err}\nReturn a corrected JSON object.")
-    raise RecipeError(f"could not map the {site} search response: {err}")
+    raise RecipeError(f"could not map the {site} search response after {FIELD_TRIES} tries "
+                      f"({n} products extracted, need {MIN_PRODUCTS})")
 
 
 def find_fee_map(captured: list[dict], lat: float, lon: float, llm: LLM | None = None) -> dict | None:

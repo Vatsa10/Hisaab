@@ -292,10 +292,23 @@ def test_learn_retries_field_map_with_error_feedback(monkeypatch):
     assert "Validation failed" in llm.prompts["field"][1] and "data.products" in llm.prompts["field"][1]
 
     FakeSite("get").install(monkeypatch)
-    always_bad = fake_llm([bad])
-    with pytest.raises(sync.RecipeError):
+    always_bad = fake_llm([dict(FIELD_MAP, product_id="product.sku")])  # rows have names and prices, no ids
+    with pytest.raises(sync.RecipeError) as err:
         search_learn.learn_search("zepto", LOC, Path("/admin/profile"), llm=always_bad)
     assert len(always_bad.prompts["field"]) == 3
+    assert "Amul Taaza" in always_bad.prompts["field"][2]  # the model sees sample values...
+    assert "amul" not in str(err.value).lower() and "dairy" not in str(err.value).lower()  # ...the error never does
+
+
+def test_learn_logs_carry_no_personal_data(monkeypatch, caplog):
+    FakeSite("get").install(monkeypatch)
+    caplog.set_level("DEBUG")
+    search_learn.learn_search("zepto", LOC, Path("/admin/secret-profile"),
+                              llm=fake_llm([dict(FIELD_MAP, products_path="data.products"), FIELD_MAP], FEES))
+    text = caplog.text.lower()
+    assert "zepto" in text
+    for pii in ("amul", "mother dairy", "22.33", "73.15", "gorwa", "store-77", "secret-profile", "zepto pass"):
+        assert pii not in text, pii
 
 
 def test_learn_needs_location_and_llm(monkeypatch):

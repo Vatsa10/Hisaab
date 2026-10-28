@@ -168,6 +168,7 @@ def test_search_products_fast_path(monkeypatch):
     assert query_of(s2["url"])["query"] == "amul gold"
     assert seen["goto"] == ["https://www.zepto.com/"]  # home only: no search page navigation needed
     assert seen["pauses"] == 1  # between the two queries
+    assert out["errors"] == {}
 
 
 def test_search_respects_max_results_and_store_fees(monkeypatch):
@@ -239,6 +240,112 @@ def test_search_drift_when_both_paths_fail(monkeypatch):
     fake_env(monkeypatch, fetch=api_down, capture_on_goto=lambda url: [])
     with pytest.raises(search.SearchDrift):
         search.search_products("zepto", ["milk", "bread"], LOC, get_recipe(), Path("/u/profile"))
+
+
+# --- drift (the recipe is wrong for everyone) vs transient (this run only) --------
+
+def failing_api(exc):
+    def fetch(req):
+        if req["url"].startswith(LOOKUP):
+            return STORE
+        raise exc
+    return fetch
+
+
+def captured(status, data):
+    return lambda url: ([{"id": 0, "url": f"{ENDPOINT}?query=x", "method": "GET", "status": status,
+                          "request_headers": {}, "request_body": None, "sample": "", "size": 10, "json": data}]
+                        if "/search?query=" in url else [])
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("HTTP 503: busy"), RuntimeError("HTTP 429: slow down"),
+                                 TimeoutError("proxy timeout")])
+def test_transient_when_api_fails_and_page_gives_nothing(monkeypatch, exc):
+    fake_env(monkeypatch, fetch=failing_api(exc), capture_on_goto=lambda url: [])
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_transient_when_page_capture_is_429(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 500: x")), capture_on_goto=captured(429, {"e": 1}))
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_drift_when_captured_2xx_lacks_products_path(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 500: x")), capture_on_goto=captured(200, {"x": 1}))
+    with pytest.raises(search.SearchDrift):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_drift_when_2xx_body_is_unparseable(monkeypatch):
+    fake_env(monkeypatch, fetch=failing_api(json.JSONDecodeError("Expecting value", "<html>", 0)),
+             capture_on_goto=lambda url: [])
+    with pytest.raises(search.SearchDrift):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_transient_when_search_page_navigation_fails(monkeypatch):
+    seen = fake_env(monkeypatch, fetch=failing_api(RuntimeError("HTTP 502: x")))
+
+    def goto(p, url, *a, **k):
+        seen["goto"].append(url)
+        if "/search?query=" in url:
+            raise RuntimeError("net::ERR_TIMED_OUT")
+        p.url = url
+    monkeypatch.setattr(browser, "goto", goto)
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_transient_when_home_page_fails(monkeypatch):
+    fake_env(monkeypatch, fetch=api)
+
+    def goto(p, url, *a, **k):
+        raise RuntimeError("net::ERR_PROXY_CONNECTION_FAILED")
+    monkeypatch.setattr(browser, "goto", goto)
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_transient_when_store_lookup_fails(monkeypatch):
+    def fetch(req):
+        raise RuntimeError("HTTP 504: gateway")
+    fake_env(monkeypatch, fetch=fetch)
+    with pytest.raises(search.SearchTransient):
+        search.search_products("zepto", ["milk"], LOC, get_recipe(), Path("/u/profile"))
+
+
+def test_later_query_failure_is_a_per_item_error(monkeypatch):
+    def fetch(req):
+        if req["url"].startswith(LOOKUP):
+            return STORE
+        q = query_of(req["url"])["query"]
+        if q == "bread":
+            raise RuntimeError("HTTP 503: busy")
+        if q == "eggs":
+            return {"x": 1}
+        return GET
+    fake_env(monkeypatch, fetch=fetch, capture_on_goto=lambda url: [])
+    out = search.search_products("zepto", ["milk", "bread", "eggs"], LOC, get_recipe(), Path("/u/profile"))
+    assert list(out["products"]) == ["milk"]
+    assert out["errors"] == {"bread": "transient", "eggs": "drift"}
+
+
+def test_search_logs_carry_no_personal_data(monkeypatch, caplog):
+    def fetch(req):
+        if req["url"].startswith(LOOKUP):
+            return STORE
+        if query_of(req["url"])["query"] == "paneer tikka":
+            raise RuntimeError("HTTP 503: busy")
+        return GET
+    fake_env(monkeypatch, fetch=fetch, capture_on_goto=lambda url: [])
+    caplog.set_level("DEBUG")
+    search.search_products("zepto", ["amul taaza", "paneer tikka"], LOC, get_recipe(), Path("/u/secret-profile"))
+    text = caplog.text.lower()
+    assert "zepto" in text  # the site and counts are logged
+    for pii in ("amul", "paneer", "mother dairy", "22.33", "73.15", "gorwa", "store-77", "secret-profile"):
+        assert pii not in text, pii
 
 
 def test_unserviceable_when_store_lookup_empty(monkeypatch):
