@@ -5,6 +5,8 @@
 alter table jobs add column if not exists attempts int not null default 0,
                  add column if not exists run_after timestamptz;
 
+create index if not exists jobs_type_finished on jobs (type, site, finished_at);
+
 alter table connections add column if not exists needs_login_at timestamptz;
 
 create table if not exists site_backoff (
@@ -29,3 +31,16 @@ end $$;
 drop trigger if exists recipes_paused_changed on recipes;
 create trigger recipes_paused_changed before update on recipes
   for each row execute function recipes_paused_changed();
+
+-- Deleted users' spend, folded per IST day with no user id, so it still counts toward the monthly budget.
+create table if not exists usage_erased (
+  day date primary key,
+  proxy_mb double precision not null default 0,
+  ai_tokens bigint not null default 0,
+  worker_seconds double precision not null default 0,
+  syncs int not null default 0,
+  cart_checks int not null default 0
+);
+alter table usage_erased enable row level security;
+revoke all on usage_erased from anon, authenticated;
+grant all on usage_erased to service_role;
