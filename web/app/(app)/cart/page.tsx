@@ -1,26 +1,23 @@
 import type { Metadata } from "next";
-import { EmptyState } from "@/components/ui/EmptyState";
-import { PageHeader } from "@/components/ui/PageHeader";
+import { ListEditor, type CartProfile } from "@/components/cart/ListEditor";
+import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = { title: "Cart" };
 
-export default function CartPage() {
-  return (
-    <>
-      <PageHeader title="Cheapest cart" />
-      <EmptyState
-        title="Coming soon"
-        icon={
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 4h2.2l2.3 11.1a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.78L20 8H6.1" />
-            <circle cx="9.5" cy="19.5" r="1.25" />
-            <circle cx="17" cy="19.5" r="1.25" />
-          </svg>
-        }
-      >
-        Price your usual grocery list on Zepto, Blinkit and Instamart at once, and see which app is
-        cheapest with fees included.
-      </EmptyState>
-    </>
-  );
+interface CartPageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+/**
+ * Cart (Groceries): the saved delivery address comes from the server (the user's own profile
+ * row, through RLS); the list, app status and checks left load in the browser.
+ */
+export default async function CartPage({ searchParams }: CartPageProps) {
+  const params = await searchParams;
+  const from = typeof params.from === "string" && params.from ? params.from : null;
+
+  const supabase = await getSupabaseServerClient();
+  const { data } = await supabase.from("profiles").select("address, lat, lon").maybeSingle();
+
+  return <ListEditor profile={(data as CartProfile | null) ?? null} fromId={from} />;
 }
