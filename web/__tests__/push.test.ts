@@ -80,6 +80,21 @@ describe("push", () => {
     expect(await enablePush()).toBe("unsupported");
   });
 
+  it("unsupported when the service worker never becomes ready", async () => {
+    vi.useFakeTimers();
+    try {
+      setup();
+      vi.stubGlobal("navigator", { userAgent: "x", serviceWorker: { ready: new Promise(() => {}) } });
+      api.apiFetch.mockResolvedValueOnce({ key: "AQAB" });
+      const p = enablePush();
+      await vi.advanceTimersByTimeAsync(4100);
+      expect(await p).toBe("unsupported");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("disablePush unsubscribes and tells the server", async () => {
     const { unsubscribe } = setup({ existing: true });
     api.apiFetch.mockResolvedValueOnce(undefined);

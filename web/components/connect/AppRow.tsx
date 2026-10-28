@@ -127,8 +127,8 @@ export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh,
         <span className="min-w-0 flex-1">
           <span className="block truncate font-medium">{app.name}</span>
           {known ? (
-            <span className="block truncate text-label text-ink-muted">
-              {exhausted ? "None left today" :`${refreshLeft} refresh${refreshLeft === 1 ? "" : "es"} left today`}
+            <span className="block text-label text-ink-muted">
+              {exhausted ? "No refreshes left today" : `${refreshLeft} refresh${refreshLeft === 1 ? "" : "es"} left today`}
             </span>
           ) : null}
         </span>

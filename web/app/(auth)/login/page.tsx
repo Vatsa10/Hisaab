@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { LoginForm } from "@/components/auth/LoginForm";
 import { BrandMark } from "@/components/ui/BrandMark";
-import { authErrorMessage } from "@/lib/authErrors";
+import { authErrorCode, authErrorMessage } from "@/lib/authErrors";
 import { hasSupabaseEnv } from "@/lib/env";
 import { safeNextPath } from "@/lib/routes";
 
@@ -25,7 +25,9 @@ export default async function LoginPage({
       </p>
 
       {configured ? (
-        <LoginForm next={safeNextPath(next)} initialError={error ? authErrorMessage(error, email) : undefined} />
+        <LoginForm next={safeNextPath(next)} initialError={error && !authErrorCode(error) ? authErrorMessage(error, email) : undefined}
+          initialNotice={error && authErrorCode(error) ? authErrorMessage(error, email) : undefined}
+        />
       ) : (
         <p role="alert" className="mt-8 rounded-card bg-up-soft p-4 text-label text-up">
           Sign-in isn&rsquo;t configured on this server. Set NEXT_PUBLIC_SUPABASE_URL and

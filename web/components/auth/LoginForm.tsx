@@ -50,9 +50,11 @@ export interface LoginFormProps {
   next: string;
   /** Message from a failed OAuth / email-link callback. */
   initialError?: string;
+  /** A neutral note (the waitlist and paused-sign-up messages are not errors). */
+  initialNotice?: string;
 }
 
-export function LoginForm({ next, initialError }: LoginFormProps) {
+export function LoginForm({ next, initialError, initialNotice }: LoginFormProps) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
@@ -60,7 +62,7 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | undefined>(initialError);
-  const [notice, setNotice] = useState<string | undefined>();
+  const [notice, setNotice] = useState<string | undefined>(initialNotice);
   const [busy, setBusy] = useState<"email" | "google" | null>(null);
 
   function callbackUrl(): string {
@@ -101,7 +103,9 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
           ? await auth.signInWithPassword(creds)
           : await auth.signUp({ ...creds, options: { emailRedirectTo: callbackUrl() } });
       if (error) {
-        setFormError(friendlyError(error.message, mode, creds.email));
+        const refused = authErrorCode(error.message);
+        if (refused) setNotice(authErrorMessage(refused, creds.email));
+        else setFormError(friendlyError(error.message, mode, creds.email));
         return;
       }
       if (!data.session) {
@@ -225,7 +229,9 @@ export function LoginForm({ next, initialError }: LoginFormProps) {
               {formError}
             </p>
           ) : notice ? (
-            <p className="rounded-field bg-accent-soft px-3.5 py-2.5 text-label text-accent-strong">{notice}</p>
+            <p role="status" className="rounded-field bg-accent-soft px-3.5 py-2.5 text-label text-accent-strong">
+              {notice}
+            </p>
           ) : null}
         </div>
 

@@ -30,12 +30,23 @@ export function urlB64ToUint8Array(s: string): Uint8Array {
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 
+/** `ready` never settles when no worker is registered (dev builds): give up after 4 s, timer cleared. */
+async function readyRegistration(): Promise<ServiceWorkerRegistration> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("no service worker")), 4000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function currentSubscription(): Promise<PushSubscription | null> {
-  // `ready` never settles when no worker is registered (dev builds): don't hang the card.
-  const reg = await Promise.race([
-    navigator.serviceWorker.ready,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("no service worker")), 4000)),
-  ]);
+  const reg = await readyRegistration();
   return reg.pushManager.getSubscription();
 }
 
@@ -54,11 +65,13 @@ export async function pushState(): Promise<PushState> {
 export async function enablePush(): Promise<"on" | "denied" | "unsupported" | "needs_install"> {
   if (needsInstall()) return "needs_install";
   if (!pushSupported()) return "unsupported";
+  // Ask first: Safari only allows the permission prompt inside the user-gesture window of the
+  // click, and the awaited key fetch below would outlive it.
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return "denied";
   try {
     const { key } = await apiFetch<{ key: string }>("/push/vapid-key");
-    const reg = await navigator.serviceWorker.ready;
+    const reg = await readyRegistration();
     const sub =
       (await reg.pushManager.getSubscription()) ??
       (await reg.pushManager.subscribe({
@@ -73,6 +86,7 @@ export async function enablePush(): Promise<"on" | "denied" | "unsupported" | "n
     return "on";
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) return "unsupported";
+    if (e instanceof Error && e.message === "no service worker") return "unsupported";
     throw e;
   }
 }

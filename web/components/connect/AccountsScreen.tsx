@@ -204,7 +204,7 @@ export function AccountsScreen({ initialConnections, initialConsents, initialPro
       ) : null}
 
       {isAdmin ? (
-        <Card as="section" aria-label="Admin" padding="none" className="mt-4">
+        <Card as="section" aria-label="Admin" padding="none" className="mt-6">
           <Link
             href="/admin"
             className="flex min-h-14 items-center justify-between px-4 font-medium transition-colors duration-150 active:bg-canvas"
