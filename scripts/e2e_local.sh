@@ -207,7 +207,7 @@ server_env() {
   # shellcheck disable=SC1091
   . "$ROOT/.env.server.local"
   set +a
-  unset SUPABASE_JWT_SECRET OPENAI_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
+  unset SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
 }
 
 PHASE="starting the API"
