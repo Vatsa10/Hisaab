@@ -1,0 +1,62 @@
+{
+  "kind": "cart",
+  "site": "shop",
+  "home_url": "https://shop.test/",
+  "add": {
+    "method": "POST",
+    "url": "https://shop.test/api/cart/add",
+    "headers": {"x-app": "web"},
+    "body": {"item": {"product_id": "seed", "quantity": 1}, "store": {"id": "S0"}},
+    "product_id_path": "item.product_id",
+    "qty_path": "item.quantity",
+    "store_id_path": "store.id",
+    "qty_mode": "set"
+  },
+  "read": {
+    "method": "POST",
+    "url": "https://shop.test/api/cart/view",
+    "headers": {},
+    "body": {"v": 1},
+    "field_map": {
+      "lines_path": "cart.items",
+      "product_id": "pid",
+      "name": "name",
+      "qty": "count",
+      "price": "price",
+      "subtotal": "cart.bill.item_total",
+      "total": "cart.bill.to_pay",
+      "fees": {"handling": "cart.bill.handling", "delivery": "cart.bill.delivery"},
+      "out_of_stock": "oos"
+    }
+  },
+  "location": {
+    "current": {
+      "method": "GET",
+      "url": "https://shop.test/api/location/current",
+      "headers": {},
+      "body": null,
+      "store_id_path": "store.id",
+      "lat_path": "lat",
+      "lon_path": "lon",
+      "area_path": "area"
+    },
+    "select": {
+      "mode": "latlon",
+      "method": "POST",
+      "url": "https://shop.test/api/location/select",
+      "headers": {},
+      "body": {"latitude": 0, "longitude": 0},
+      "lat_input": "latitude",
+      "lon_input": "longitude"
+    }
+  },
+  "cart_allowlist": [
+    {"url_regex": "^https://shop\\.test/api/cart/add$", "why": "add to cart", "op": "cart"}
+  ],
+  "location_allowlist": [
+    {"url_regex": "^https://shop\\.test/api/location/select$", "why": "pick a saved or current location", "op": "location"}
+  ],
+  "read_post_allowlist": [
+    {"url_regex": "^https://shop\\.test/api/cart/view$", "why": "read the cart"}
+  ]
+}
