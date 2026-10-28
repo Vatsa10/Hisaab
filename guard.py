@@ -13,6 +13,8 @@ MUTATION = re.compile(r"\bmutation\b", re.I)
 # shows a blank page or "Max challenge attempts exceeded".
 CHALLENGE_POST = re.compile(r"^https://[\w.-]+\.awswaf\.com/|/cdn-cgi/challenge-platform/", re.I)
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Playwright resource types aborted when media blocking is on (user syncs only).
+HEAVY_RESOURCE_TYPES = frozenset({"image", "media", "font"})
 
 
 def redact_url(url: str) -> str:
@@ -51,15 +53,22 @@ def decide(method: str, url: str, is_nav: bool, body: str | None,
 class Guard:
     """Holds mutable state (login mode, allowlist) and records what it blocked."""
 
-    def __init__(self, allowlist: list[dict] | None = None, login_mode: bool = False):
+    def __init__(self, allowlist: list[dict] | None = None, login_mode: bool = False, block_media: bool = False):
         self.allowlist = list(allowlist or [])
         self.login_mode = login_mode
+        self.block_media = block_media
         self.blocked: list[dict] = []
+        self.media_blocked = 0
 
     def install(self, context) -> None:
         context.route("**/*", self._handle)
 
     def _handle(self, route, request) -> None:
+        # User syncs skip images/video/fonts to save proxy bytes; never while logging in (captchas are images).
+        if self.block_media and not self.login_mode and request.resource_type in HEAVY_RESOURCE_TYPES:
+            self.media_blocked += 1
+            route.abort("blockedbyclient")
+            return
         try:
             body = request.post_data
         except Exception:  # binary bodies

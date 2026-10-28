@@ -238,11 +238,13 @@ def _wait_for_cdp(port: int, proc: subprocess.Popen, timeout: float = 20) -> Non
 @contextlib.contextmanager
 def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
               profile_dir: Path | None = None, location: dict | None = None,
-              proxy_server: str | None = None):
+              proxy_server: str | None = None, block_media: bool = False):
     """Yield (context, page, guard, capture) for a site's persistent profile.
 
     profile_dir / location override the per-site profile folder and the saved delivery location (per-user runs);
     location None uses the saved one, {} means no location (no geolocation grant or override).
+    block_media aborts image/media/font requests (user syncs, to save proxy bytes); the guard ignores it in
+    login mode.
 
     Chrome is started as a normal browser (no --enable-automation, so no "controlled by automated
     test software" mode that bot filters like Swiggy's reject) and Playwright attaches over CDP.
@@ -250,7 +252,7 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
     cfg = SITES[site]
     profile = (profile_dir or PROFILES / cfg["profile"]).resolve()
     profile.mkdir(parents=True, exist_ok=True)
-    guard, capture = Guard(allowlist, login_mode), Capture()
+    guard, capture = Guard(allowlist, login_mode, block_media), Capture()
     loc = effective_location(location)
     port = _free_port()
     chrome_args = [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",

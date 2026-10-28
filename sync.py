@@ -41,6 +41,10 @@ class RecipeError(Exception):
     pass
 
 
+class RecipeDrift(RecipeError):
+    """The recipe exists but no longer works (fast path and replay both failed) in a sync that may not learn."""
+
+
 class OtpTimeout(TimeoutError):
     """Nobody answered an unattended prompt in time. kind is "otp" or "question"."""
 
@@ -137,11 +141,17 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
 
 # --- learn -------------------------------------------------------------------
 
-def learn(site: str) -> dict:
-    with open_site(site) as (_, page, guard, capture):
-        recipe = agent.discover(site, page, guard, capture)
-    recipes.save(site, recipe)
-    print(f"Saved {recipes.recipe_path(site)}")
+def learn(site: str, profile_dir=None, location: dict | None = None, proxy_server: str | None = None,
+          approve: Callable[[list[dict]], bool] | None = None, preapproved=(), save: bool = True) -> dict:
+    """Run discovery and return the validated recipe. Never blocks media (the agent needs the real page).
+    approve(new_entries) -> bool replaces the terminal prompt for new POST-allowlist entries; preapproved regexes
+    count as already allowed. save=False leaves recipes/ untouched (the caller stores the recipe)."""
+    with open_site(site, profile_dir=profile_dir, location=location,
+                   proxy_server=proxy_server) as (_, page, guard, capture):
+        recipe = agent.discover(site, page, guard, capture, approve=approve, preapproved=preapproved)
+    if save:
+        recipes.save(site, recipe)
+        print(f"Saved {recipes.recipe_path(site)}")
     return recipe
 
 
@@ -244,10 +254,13 @@ def replay(page, capture, recipe: dict, since: str | None, on_progress: Progress
 def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict | None = None,
                  allow_learn: bool = True, proxy_server: str | None = None,
                  recipe_loader: Callable[[str], dict | None] | None = None,
-                 orders_page_url: str | None = None, on_progress: Progress | None = None) -> list[dict]:
+                 orders_page_url: str | None = None, on_progress: Progress | None = None,
+                 block_media: bool = False) -> list[dict]:
     """Fast path -> nav_trace replay -> re-learn; returns the orders (no database).
     on_progress(count, amount) is called after each page of orders (fast path, replay or after a re-learn).
-    allow_learn=False (a user's own sync) never runs the exploring discovery agent: it raises RecipeError instead.
+    allow_learn=False (a user's own sync) never runs the exploring discovery agent: with no recipe it raises
+    RecipeError, and when the recipe no longer works it raises RecipeDrift.
+    block_media aborts image/media/font requests (user syncs).
     recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file.
     orders_page_url (the user's own orders page, found at login) replaces the shared recipe's one."""
     recipe = (recipe_loader or recipes.load)(site)
@@ -256,7 +269,8 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
             raise RecipeError(f"no recipe for {site}; an admin must learn it")
         recipe = learn(site)
     with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
-                   location=location, proxy_server=proxy_server) as (_, page, guard, capture):
+                   location=location, proxy_server=proxy_server,
+                   block_media=block_media) as (_, page, guard, capture):
         orders = None
         goto(page, orders_page_url or recipe["orders_page_url"])
         if recipe.get("fast_path_ok", True):
@@ -274,7 +288,7 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
             except Exception as e:
                 log.warning("%s nav_trace replay failed: %s", site, e)
         if not orders and not allow_learn:
-            raise RecipeError(f"recipe drift for {site}: fast path and replay both failed; an admin must re-learn it")
+            raise RecipeDrift(f"recipe drift for {site}: fast path and replay both failed; an admin must re-learn it")
         if not orders:
             log.warning("DRIFT: %s recipe no longer works; re-running discovery", site)
             capture.clear()

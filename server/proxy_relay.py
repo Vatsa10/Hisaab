@@ -41,9 +41,12 @@ def _status(head: bytes) -> int:
         return 0
 
 
-async def _pipe(reader, writer):
+async def _pipe(reader, writer, count=None):
+    """Copy reader to writer until EOF; count(n) is told every chunk's size."""
     try:
         while data := await reader.read(65536):
+            if count is not None:
+                count(len(data))
             writer.write(data)
             await writer.drain()
     except (OSError, asyncio.IncompleteReadError):
@@ -64,6 +67,7 @@ class Relay:
         self._thread: threading.Thread | None = None
         self._server = None
         self._tasks: set = set()
+        self._bytes = 0  # only the relay's loop thread adds to it
         self._writers: set = set()
 
     # lifecycle ---------------------------------------------------------
@@ -129,6 +133,16 @@ class Relay:
             if self._thread:
                 self._thread.join(5)  # the thread closes the loop itself after cancelling leftovers
         return False
+
+    # metering ----------------------------------------------------------
+    @property
+    def bytes_total(self) -> int:
+        """Bytes piped through the relay in both directions over its whole life (tunnel/body bytes, without
+        the CONNECT handshake)."""
+        return self._bytes
+
+    def _count(self, n: int) -> None:
+        self._bytes += n
 
     # health check ------------------------------------------------------
     def check(self, timeout_s: float = 10, probe_host: str = "www.google.com:443") -> None:
@@ -221,7 +235,7 @@ class Relay:
                 up_writer.write(first + b"\r\n" + b"\r\n".join(keep) + b"\r\n" + auth
                                 + b"Connection: close\r\n\r\n")
                 await up_writer.drain()
-            await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+            await asyncio.gather(_pipe(reader, up_writer, self._count), _pipe(up_reader, writer, self._count))
         except asyncio.CancelledError:
             raise
         except Exception:

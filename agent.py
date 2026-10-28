@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 import llm
+import metering
 import recipes
 from browser import SITES, SessionExpired, fetch_in_page, goto, home_url, scrub_headers
 from guard import BLOCKED_URL, redact_url
@@ -478,6 +479,7 @@ class Discovery:
             return None
         from typesafe_sdk import Noul
         state = self.state() | {"clickable": [mask(describe(e), self.secrets) for e in self.snap["elements"][:60]]}
+        metering.count_jev()  # counted when made: a failed call may still be billed
         try:
             return client.system_one(state=state, questions={"ok": Noul(instructions=question)},
                                      timeout=6).answers["ok"].noul
@@ -592,6 +594,7 @@ class Discovery:
             questions["item"] = Choice(
                 instructions="If the action targets an element (click or typing), which element?",
                 criteria={e["ref"]: mask(describe(e), self.secrets) for e in elements})
+        metering.count_jev()
         try:
             answers = client.system_one(state=self.state(), questions=questions, timeout=6).answers
         except Exception as e:
@@ -935,14 +938,22 @@ def captured_for(recipe: dict, items: list[dict]) -> list[dict]:
     return [c for c in items if _same_endpoint(c, recipe) and 200 <= c["status"] < 300]
 
 
-def confirm_allowlist(entries: list[dict], approved: set[str]) -> bool:
+Approve = Callable[[list[dict]], bool]
+
+
+def confirm_allowlist(entries: list[dict], approved: set[str], approve: Approve | None = None) -> bool:
+    """True once every entry's url_regex is approved. Only the not-yet-approved entries are asked about: through
+    approve(new_entries) when given (an unattended learn: the admin decides), else on the terminal."""
     new = [e for e in entries if e["url_regex"] not in approved]
     if not new:
         return True
-    print("\nThe recipe wants these read-only POST requests allowed:")
-    for e in new:
-        print(f"  {e['url_regex']}   ({e.get('why', '')})")
-    ok = input("Allow them? Bodies containing 'mutation' stay blocked. [y/N] ").strip().lower() == "y"
+    if approve is not None:
+        ok = bool(approve(new))
+    else:
+        print("\nThe recipe wants these read-only POST requests allowed:")
+        for e in new:
+            print(f"  {e['url_regex']}   ({e.get('why', '')})")
+        ok = input("Allow them? Bodies containing 'mutation' stay blocked. [y/N] ").strip().lower() == "y"
     if ok:
         approved.update(e["url_regex"] for e in new)
     return ok
@@ -989,11 +1000,12 @@ def check_page_two(page, recipe: dict, req: dict, data, orders: list[dict]) -> s
     return None
 
 
-def validate(recipe: dict, page, guard, capture, approved: set[str]) -> tuple[list[dict], bool, str | None]:
+def validate(recipe: dict, page, guard, capture, approved: set[str],
+             approve: Approve | None = None) -> tuple[list[dict], bool, str | None]:
     """Replay page 1. Returns (valid orders, fast_path_ok, error)."""
     if err := check_structure(recipe):
         return [], False, err
-    if not confirm_allowlist(recipe.get("read_post_allowlist") or [], approved):
+    if not confirm_allowlist(recipe.get("read_post_allowlist") or [], approved, approve):
         return [], False, "user rejected the POST allowlist; choose a GET endpoint if one exists"
     guard.allowlist = list(recipe.get("read_post_allowlist") or [])
     fm, sample = recipe["field_map"], ""
@@ -1032,7 +1044,8 @@ def validate(recipe: dict, page, guard, capture, approved: set[str]) -> tuple[li
                        f"Page-1 replay: {sample}")
 
 
-def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: str) -> dict:
+def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: str,
+               approve: Approve | None = None, preapproved: Iterable[str] = ()) -> dict:
     client = llm.client()
     ranked = sorted(capture.items, key=score, reverse=True)
     samples = "\n\n".join(f"#{c['id']} {c['method']} {c['url']}\nrequest_body: {(c['request_body'] or '')[:1500]}\n"
@@ -1046,7 +1059,7 @@ def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: s
     messages = [{"role": "user", "content": (f"Only this order list counts: {goal}\n\n" if goal else "") + RECIPE_PROMPT.format(
         site=site, summary=json.dumps([summarize(c) for c in ranked[:80]])[:20000],
         samples=samples, blocked=blocked or "(none)", field_rules=FIELD_RULES)}]
-    approved: set[str] = set()
+    approved: set[str] = set(preapproved)
     for attempt in range(3):
         resp = llm.create("recipe", effort="medium", max_tokens=16_000, messages=messages, client=client)
         messages.append({"role": "assistant", "content": llm.text(resp)})
@@ -1055,7 +1068,7 @@ def synthesize(site: str, page, guard, capture, trace: list[dict], orders_url: s
             if other := sibling_endpoint(site, recipe):
                 raise ValueError(f"that endpoint is {other}'s order feed; find {site}'s own order list "
                                  f"({SITES[site].get('goal', '')})")
-            orders, fast_ok, err = validate(recipe, page, guard, capture, approved)
+            orders, fast_ok, err = validate(recipe, page, guard, capture, approved, approve)
         except SessionExpired:
             raise
         except Exception as e:  # any bad field in the recipe goes back to the model, not up the stack
@@ -1092,9 +1105,15 @@ sub_platform: only when one endpoint mixes different platforms (e.g. food delive
 delivery modes, store types or marketplace tiers. items.price: null if items carry no price."""
 
 
-def learn_from_seed(site: str, page, guard, capture, seed: dict) -> dict:
+def learn_from_seed(site: str, page, guard, capture, seed: dict, approve: Approve | None = None,
+                    preapproved: Iterable[str] = ()) -> dict:
     """Known endpoint + pagination (recipes/<site>.seed.json): fetch page 1 inside the logged-in tab and
-    only learn the field_map from the real response, then validate it."""
+    only learn the field_map from the real response, then validate it.
+    With approve (an unattended learn), the seed's POST-allowlist entries not in preapproved go to approve first;
+    the CLI (approve None) trusts the repo's seed file as before."""
+    if approve is not None and not confirm_allowlist(seed.get("read_post_allowlist") or [], set(preapproved),
+                                                     approve):
+        raise RuntimeError(f"user rejected the POST allowlist of the {site} seed recipe")
     orders_url = seed["orders_page_url"]
     goto(page, orders_url)
     settle(page)
@@ -1128,10 +1147,13 @@ def learn_from_seed(site: str, page, guard, capture, seed: dict) -> dict:
     raise RuntimeError(f"could not map the {site} order response")
 
 
-def discover(site: str, page, guard, capture) -> dict:
-    """Return a validated recipe (not yet saved): from a seed if one exists, else by running the agent."""
+def discover(site: str, page, guard, capture, approve: Approve | None = None,
+             preapproved: Iterable[str] = ()) -> dict:
+    """Return a validated recipe (not yet saved): from a seed if one exists, else by running the agent.
+    approve(new_entries) -> bool decides new POST-allowlist entries instead of the terminal; preapproved regexes
+    count as already allowed."""
     if seed := recipes.load_seed(site):
-        return learn_from_seed(site, page, guard, capture, seed)
+        return learn_from_seed(site, page, guard, capture, seed, approve=approve, preapproved=preapproved)
     hint = recipes.hint_path(site)
     start = hint.read_text(encoding="utf-8").strip() if hint.exists() else home_url(site)
     goto(page, start)
@@ -1141,7 +1163,8 @@ def discover(site: str, page, guard, capture) -> dict:
     log.info("discovery finished: %s", result)
     if not result["success"] and "LOGGED_OUT" in result["note"]:
         raise SessionExpired("not logged in")
-    return synthesize(site, d.page, guard, capture, d.trace, result["url"])  # d.page: the agent may switch tabs
+    # d.page: the agent may switch tabs
+    return synthesize(site, d.page, guard, capture, d.trace, result["url"], approve=approve, preapproved=preapproved)
 
 
 def sibling_endpoint(site: str, recipe: dict) -> str | None:

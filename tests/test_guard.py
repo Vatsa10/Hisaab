@@ -1,6 +1,6 @@
 import pytest
 
-from guard import decide
+from guard import HEAVY_RESOURCE_TYPES, Guard, decide
 
 API = "https://api.example.com/v1/orders"
 ALLOW = [{"url_regex": r"^https://api\.example\.com/graphql$"}]
@@ -67,3 +67,67 @@ def test_allows_bot_challenge_posts(url):
 def test_challenge_lookalike_hosts_still_blocked():
     assert not decide("POST", "https://token.awswaf.com.evil.com/x", False, "{}", False, [])[0]
     assert not decide("POST", "https://www.swiggy.com/api/order/token.awswaf.com", False, "{}", False, [])[0]
+
+
+# --- media blocking (user syncs only) ---------------------------------------------------------------------
+
+class _Route:
+    def __init__(self):
+        self.done = None
+
+    def continue_(self):
+        self.done = "continue"
+
+    def abort(self, reason=None):
+        self.done = ("abort", reason)
+
+
+class _Request:
+    def __init__(self, resource_type, method="GET", url="https://cdn.example.com/a.png", nav=False, body=None):
+        self.resource_type, self.method, self.url, self._nav, self.post_data = resource_type, method, url, nav, body
+
+    def is_navigation_request(self):
+        return self._nav
+
+
+def _run(guard, req):
+    route = _Route()
+    guard._handle(route, req)
+    return route.done
+
+
+def test_heavy_resource_types():
+    assert HEAVY_RESOURCE_TYPES == frozenset({"image", "media", "font"})
+
+
+@pytest.mark.parametrize("kind", ["image", "media", "font"])
+def test_media_blocked_in_sync_mode(kind, caplog):
+    g = Guard(block_media=True)
+    caplog.set_level("DEBUG", logger="guard")
+    assert _run(g, _Request(kind)) == ("abort", "blockedbyclient")
+    assert g.media_blocked == 1 and g.blocked == [] and caplog.text == ""
+
+
+def test_media_not_blocked_in_login_mode():
+    g = Guard(login_mode=True, block_media=True)
+    assert _run(g, _Request("image")) == "continue"
+    assert g.media_blocked == 0
+
+
+def test_media_not_blocked_by_default():
+    g = Guard()
+    assert _run(g, _Request("font")) == "continue" and g.media_blocked == 0
+
+
+def test_block_media_leaves_other_resources_to_decide():
+    g = Guard(block_media=True)
+    assert _run(g, _Request("script", url="https://site.com/app.js")) == "continue"
+    assert _run(g, _Request("fetch", method="POST", url="https://site.com/api/x", body="{}")) == (
+        "abort", "blockedbyclient")
+    assert g.media_blocked == 0 and len(g.blocked) == 1
+
+
+def test_leaving_login_mode_starts_blocking_media():
+    g = Guard(login_mode=True, block_media=True)
+    g.login_mode = False
+    assert _run(g, _Request("image")) == ("abort", "blockedbyclient")

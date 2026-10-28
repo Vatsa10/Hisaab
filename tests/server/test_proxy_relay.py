@@ -301,3 +301,47 @@ def test_open_site_appends_chrome_extra_args(monkeypatch, tmp_path):
 def test_open_site_without_extra_args_env(monkeypatch, tmp_path):
     monkeypatch.delenv("CHROME_EXTRA_ARGS", raising=False)
     assert "--no-sandbox" not in _open_dead(monkeypatch, tmp_path)
+
+
+def test_open_site_passes_block_media(monkeypatch, tmp_path):
+    made = []
+    real = browser.Guard
+
+    def guard(*a, **k):
+        g = real(*a, **k)
+        made.append(g)
+        return g
+
+    monkeypatch.setattr(browser, "Guard", guard)
+    _open_dead(monkeypatch, tmp_path, block_media=True)
+    _open_dead(monkeypatch, tmp_path)
+    assert [g.block_media for g in made] == [True, False]
+
+
+def test_open_site_keyword_order_matches_the_cart_branches():
+    import inspect
+    params = inspect.signature(browser.open_site).parameters
+    assert list(params)[:7] == ["site", "allowlist", "login_mode", "profile_dir", "location", "proxy_server",
+                                "block_media"]
+    assert params["block_media"].default is False
+
+
+def test_relay_counts_bytes(fake_upstream, target):
+    port, _ = fake_upstream
+    with Relay(_url(port)) as relay:
+        assert relay.bytes_total == 0
+        s = socket.create_connection(("127.0.0.1", relay.port), timeout=5)
+        s.sendall(f"CONNECT 127.0.0.1:{target} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += s.recv(4096)
+        request = b"GET / HTTP/1.1\r\nHost: t\r\nX-Pad: " + b"x" * 10_000 + b"\r\nConnection: close\r\n\r\n"
+        s.sendall(request)
+        out = _read_all(s)
+        s.close()
+        deadline = time.monotonic() + 3
+        while relay.bytes_total < len(request) + len(out) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        total = relay.bytes_total
+    assert b"hello from target" in out
+    assert total >= 10_000 and total >= len(request) + len(out)
