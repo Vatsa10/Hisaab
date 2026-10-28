@@ -1,5 +1,5 @@
 /*
- * Expense Agent service worker (registered in production only, see ServiceWorkerRegistrar).
+ * Hisaab service worker (registered in production only, see ServiceWorkerRegistrar).
  *
  * What it handles, and nothing else:
  *   - same-origin page navigations: network first; the last good copy is the offline fallback
@@ -11,7 +11,7 @@
  * intercepted or cached, and non-GET requests and the /auth/ callback are never touched.
  */
 
-const VERSION = "v1";
+const VERSION = "v2";
 const PAGES = `pages-${VERSION}`;
 const STATIC = `static-${VERSION}`;
 

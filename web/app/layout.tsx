@@ -5,12 +5,12 @@ import { STARTUP_SCREENS, startupImageFile, startupImageMedia } from "@/lib/star
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: { default: "Expense Agent", template: "%s · Expense Agent" },
+  title: { default: "Hisaab", template: "%s · Hisaab" },
   description: "Your Blinkit, Zepto, Swiggy and Zomato spending in one place.",
-  applicationName: "Expense Agent",
+  applicationName: "Hisaab",
   appleWebApp: {
     capable: true,
-    title: "Spend",
+    title: "Hisaab",
     statusBarStyle: "default",
     // Launch images in the brand background, so iOS doesn't flash white while starting.
     startupImage: STARTUP_SCREENS.map((s) => ({

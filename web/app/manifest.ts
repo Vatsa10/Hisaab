@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Expense Agent",
-    short_name: "Spend",
+    name: "Hisaab",
+    short_name: "Hisaab",
     description: "Your Blinkit, Zepto, Swiggy and Zomato spending in one place.",
     id: "/",
     start_url: "/spend",

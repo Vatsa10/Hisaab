@@ -21,9 +21,8 @@ export default async function LoginPage({
   return (
     <main className="px-safe mx-auto flex min-h-[100dvh] w-full max-w-[420px] flex-col pb-[calc(env(safe-area-inset-bottom)+1.5rem)] pt-[calc(env(safe-area-inset-top)+3rem)]">
       <BrandMark size={56} />
-      {/* "Spend" is the home-screen name (manifest short_name); the title is the full name. */}
-      <p className="mt-5 text-label font-semibold text-accent">Spend</p>
-      <h1 className="text-title">Expense Agent</h1>
+      <p className="mt-5 text-label font-semibold text-accent">Hisaab</p>
+      <h1 className="text-title">Your food and grocery spending, sorted</h1>
       <p className="mt-1 text-body text-ink-muted">
         Your Blinkit, Zepto, Swiggy and Zomato spending in one place. Read-only: we never order or pay.
       </p>

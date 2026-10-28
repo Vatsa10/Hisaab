@@ -1,4 +1,4 @@
-# Expense Agent PWA (`web/`)
+# Hisaab PWA (`web/`)
 
 The iPhone-first Progressive Web App: Next.js 15 (App Router) + TypeScript, Tailwind CSS 3.4,
 Supabase Auth via `@supabase/ssr`, Vitest + Testing Library. A standalone pnpm project; the
@@ -58,7 +58,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 pnpm --dir web build
   `getSupabaseServerClient()` (anon key + RLS). Actions call the FastAPI service through
   `apiFetch(path, init)` (`lib/api.ts`), which adds `Authorization: Bearer <access token>` and
   throws `ApiError(status, detail)`; status `0` means the server was unreachable.
-- **PWA**: `app/manifest.ts` (name "Expense Agent", short_name "Spend", standalone, theme
+- **PWA**: `app/manifest.ts` (name "Hisaab", short_name "Hisaab", standalone, theme
   `#0a7c55`, background `#f6f7f9`), iOS meta tags, apple-touch-icon and
   `apple-touch-startup-image` launch images (iPhone 12 mini to 15 Pro Max, portrait, listed in
   `lib/startup-images.mjs`) in `app/layout.tsx`, and `public/sw.js`, registered in production
