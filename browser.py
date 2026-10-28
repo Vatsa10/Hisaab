@@ -10,6 +10,9 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -73,9 +76,61 @@ class SessionExpired(Exception):
     pass
 
 
+class SiteThrottled(Exception):
+    """The site rate-limited us (429) or served a bot challenge. kind: "rate_limited" | "challenge"."""
+
+    def __init__(self, kind: str, retry_after_s: int | None = None):
+        super().__init__(f"site throttled: {kind}")
+        self.kind = kind
+        self.retry_after_s = retry_after_s
+
+
+CHALLENGE_MARKERS = re.compile(
+    r"cf-chl|challenge-platform|cf_chl_opt|Attention Required! \| Cloudflare|px-captcha|_pxCaptcha|perimeterx"
+    r"|captcha-delivery|datadome|Access Denied.{0,200}Reference #|Request unsuccessful\. Incapsula",
+    re.I | re.S)
+RETRY_AFTER_CAP = 3600
+BLOCK_SCAN_CHARS = 20_000
+
+
+def classify_block(status: int, text: str) -> str | None:
+    if status == 429:
+        return "rate_limited"
+    if CHALLENGE_MARKERS.search(text or ""):
+        return "challenge"
+    return None
+
+
+def parse_retry_after(value: str | None, now: datetime | None = None) -> int | None:
+    """Retry-After as seconds or an HTTP-date -> seconds from now, capped at 3600; None if unparseable."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return min(int(value), RETRY_AFTER_CAP)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0, min(int((when - now).total_seconds()), RETRY_AFTER_CAP))
+
+
+_PAGE_BLOCK_JS = "() => document.title + '\n' + document.documentElement.outerHTML.slice(0, %d)" % BLOCK_SCAN_CHARS
+
+
+def raise_if_blocked(page) -> None:
+    """One cheap evaluate on the loaded page (safe on a reused warm Chrome); raises SiteThrottled on a challenge."""
+    text = page.evaluate(_PAGE_BLOCK_JS)
+    if CHALLENGE_MARKERS.search(text or ""):
+        raise SiteThrottled("challenge")
+
+
 _FETCH_JS = """async ({url, method, headers, body}) => {
   const r = await fetch(url, {method, headers, body, credentials: 'include', signal: AbortSignal.timeout(60000)});
-  return {status: r.status, url: r.url, text: await r.text()};
+  return {status: r.status, url: r.url, text: await r.text(), retryAfter: r.headers.get('retry-after')};
 }"""
 
 
@@ -112,6 +167,8 @@ def fetch_in_page(page, req: dict) -> dict:
         body = json.dumps(body)
         headers.setdefault("content-type", "application/json")
     r = page.evaluate(_FETCH_JS, {"url": req["url"], "method": req["method"], "headers": headers, "body": body})
+    if kind := classify_block(r["status"], r["text"]):
+        raise SiteThrottled(kind, parse_retry_after(r.get("retryAfter")))
     if r["status"] in (401, 403) or LOGIN_URL.search(r["url"]):
         raise SessionExpired(f"HTTP {r['status']}")
     if r["status"] >= 400:
@@ -199,6 +256,18 @@ class Capture:
         self.items.clear()
 
 
+CHROME_ENV_ALLOW = tuple(
+    "PATH HOME USER LOGNAME DISPLAY TZ LANG LANGUAGE LC_ALL XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_CACHE_HOME TMPDIR "
+    "FONTCONFIG_PATH FONTCONFIG_FILE SYSTEMROOT WINDIR COMSPEC PATHEXT LOCALAPPDATA APPDATA USERPROFILE TEMP TMP "
+    "PROGRAMFILES PROGRAMFILES(X86) PROGRAMDATA NUMBER_OF_PROCESSORS PROCESSOR_ARCHITECTURE".split())
+_ENV_ALLOWED = frozenset(CHROME_ENV_ALLOW)
+
+
+def chrome_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Only the allow-listed variables: Chrome (and any page script) must never see DATABASE_URL, keys, proxy creds."""
+    return {k: v for k, v in (os.environ if base is None else base).items() if k.upper() in _ENV_ALLOWED}
+
+
 _CHROME_PATHS = (r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
                  r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
                  r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
@@ -260,11 +329,12 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
                    "--hide-crash-restore-bubble", "--window-size=1280,960"]
     if proxy_server:
         # <-loopback> clears Chrome's implicit loopback bypass so even 127.0.0.1 goes via the relay
-        chrome_args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>"]
+        chrome_args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>",
+                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
     chrome_args += os.environ.get("CHROME_EXTRA_ARGS", "").split()  # e.g. --no-sandbox in a container
     proc = subprocess.Popen(
         chrome_args + ["about:blank"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=chrome_env())
     try:
         _wait_for_cdp(port, proc)
         with sync_playwright() as pw:

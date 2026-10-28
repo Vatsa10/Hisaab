@@ -116,6 +116,7 @@ def _no_learning(monkeypatch):
     monkeypatch.setattr(sync.agent, "discover", boom)
     monkeypatch.setattr(sync.recipes, "save", boom)
     monkeypatch.setattr(sync, "goto", lambda *a, **k: None)
+    monkeypatch.setattr(sync, "raise_if_blocked", lambda page: None)
 
     @contextlib.contextmanager
     def fake_open(*a, **k):

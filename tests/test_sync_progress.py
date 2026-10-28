@@ -52,6 +52,7 @@ def test_fetch_orders_passes_on_progress_to_both_paths(monkeypatch):
 
     monkeypatch.setattr(sync, "open_site", fake_open)
     monkeypatch.setattr(sync, "goto", lambda *a, **k: None)
+    monkeypatch.setattr(sync, "raise_if_blocked", lambda page: None)
     got = {}
 
     def fast(page, recipe, since, on_progress=None):

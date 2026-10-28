@@ -192,6 +192,7 @@ def test_learn_saves_by_default(monkeypatch):
 def _drifting(monkeypatch, opened):
     _fake_open_site(monkeypatch, opened)
     monkeypatch.setattr(sync, "goto", lambda page, url: None)
+    monkeypatch.setattr(sync, "raise_if_blocked", lambda page: None)
 
     def fail(*a, **k):
         raise sync.RecipeError("nothing")

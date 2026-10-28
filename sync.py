@@ -10,7 +10,7 @@ import agent
 import db
 import recipes
 import browser
-from browser import LOGIN_URL, SITES, SessionExpired, fetch_in_page, open_site
+from browser import LOGIN_URL, SITES, SessionExpired, SiteThrottled, fetch_in_page, open_site, raise_if_blocked
 
 log = logging.getLogger("sync")
 
@@ -224,6 +224,8 @@ def replay(page, capture, recipe: dict, since: str | None, on_progress: Progress
     next_page = max(clicked, default=1) + 1
     for _ in range(MAX_REPLAY_SCROLLS):
         hits = agent.captured_for(recipe, capture.items)
+        if any(c["status"] == 429 for c in hits):
+            raise SiteThrottled("rate_limited")
         if any(c["status"] in (401, 403) for c in hits):
             raise SessionExpired("order API returned 401/403")
         before = len(orders)
@@ -273,17 +275,18 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
                    block_media=block_media) as (_, page, guard, capture):
         orders = None
         goto(page, orders_page_url or recipe["orders_page_url"])
+        raise_if_blocked(page)
         if recipe.get("fast_path_ok", True):
             try:
                 orders = fast_path(page, recipe, since, on_progress)
-            except SessionExpired:
+            except (SessionExpired, SiteThrottled):
                 raise
             except Exception as e:
                 log.warning("%s fast path failed: %s", site, e)
         if not orders:
             try:
                 orders = replay(page, capture, recipe, since, on_progress)
-            except SessionExpired:
+            except (SessionExpired, SiteThrottled):
                 raise
             except Exception as e:
                 log.warning("%s nav_trace replay failed: %s", site, e)
