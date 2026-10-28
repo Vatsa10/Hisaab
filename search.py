@@ -195,7 +195,7 @@ def _lookup_store(page, recipe: dict, location: dict) -> tuple[str | None, objec
     bind_location(req, store.get("location_inputs") or [], location)
     try:
         data = browser.fetch_in_page(page, req)
-    except browser.SessionExpired:
+    except (browser.SessionExpired, browser.SiteThrottled):
         raise
     except Exception as e:
         raise SearchTransient(f"store lookup failed ({type(e).__name__})") from e
@@ -253,7 +253,7 @@ def fast_attempt(page, req: dict) -> tuple[str, object]:
     """The in-page replay: ("ok", data) or (outcome, None). A logout (401/403, login redirect) propagates."""
     try:
         return "ok", browser.fetch_in_page(page, req)
-    except browser.SessionExpired:
+    except (browser.SessionExpired, browser.SiteThrottled):
         raise
     except ValueError:  # json.JSONDecodeError: a 2xx body that is not JSON
         log.info("fast path: unparseable 2xx response")
@@ -279,7 +279,7 @@ def page_attempt(page, capture, recipe: dict, url: str | None) -> tuple[list[dic
     mark = len(capture.items)
     try:
         browser.goto(page, url)
-    except browser.SessionExpired:
+    except (browser.SessionExpired, browser.SiteThrottled):
         raise
     except Exception as e:
         log.info("page fallback: navigation failed (%s)", type(e).__name__)
@@ -345,7 +345,7 @@ def search_products(site: str, queries, location: dict, recipe: dict, profile_di
             _, page, _guard, capture):
         try:
             browser.goto(page, recipe["home_url"])
-        except browser.SessionExpired:
+        except (browser.SessionExpired, browser.SiteThrottled):
             raise
         except Exception as e:
             raise SearchTransient(f"{site} home page did not load ({type(e).__name__})") from e

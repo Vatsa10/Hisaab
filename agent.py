@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 import llm
 import metering
 import recipes
-from browser import SITES, SessionExpired, fetch_in_page, goto, home_url, scrub_headers
+from browser import SITES, SessionExpired, SiteThrottled, fetch_in_page, goto, home_url, scrub_headers
 from guard import BLOCKED_URL, redact_url
 
 log = logging.getLogger("agent")
@@ -991,6 +991,8 @@ def check_page_two(page, recipe: dict, req: dict, data, orders: list[dict]) -> s
         return None
     try:
         page2 = recipes.valid_orders(recipes.extract_orders(fetch_in_page(page, nxt), recipe["field_map"]))
+    except SiteThrottled:
+        raise
     except Exception:
         return None  # can't tell; sync will stop at the first failing page
     if page2 and {o["order_id"] for o in page2} <= {o["order_id"] for o in orders}:
@@ -1022,6 +1024,8 @@ def validate(recipe: dict, page, guard, capture, approved: set[str],
         # The page is logged in (discovery saw the orders), so a 401 here means the API wants the site's
         # own auth headers, which we never copy. Fall back to the passively captured response.
         sample = f"in-page replay rejected ({e}); the site signs its own requests"
+    except SiteThrottled:
+        raise
     except Exception as e:
         sample = f"fetch failed: {e}"
     hits = captured_for(recipe, capture.items)

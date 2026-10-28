@@ -118,7 +118,7 @@ def parse_retry_after(value: str | None, now: datetime | None = None) -> int | N
     return max(0, min(int((when - now).total_seconds()), RETRY_AFTER_CAP))
 
 
-_PAGE_BLOCK_JS = "() => document.title + '\n' + document.documentElement.outerHTML.slice(0, %d)" % BLOCK_SCAN_CHARS
+_PAGE_BLOCK_JS = "() => document.title + '\n' + ((document.body && document.body.innerText) || '').slice(0, %d)" % BLOCK_SCAN_CHARS
 
 
 def raise_if_blocked(page) -> None:
@@ -137,6 +137,18 @@ _FETCH_JS = """async ({url, method, headers, body}) => {
 RETRY_STATUS = {403, 429, 500, 502, 503, 504}
 
 
+def _raise_if_throttled_response(r) -> None:
+    """A 429 or a bot-challenge body is never retried (the 4 s / 8 s waits only make it worse and cost sync time)."""
+    if r.status == 429:
+        raise SiteThrottled("rate_limited", parse_retry_after((r.headers or {}).get("retry-after")))
+    try:
+        body = r.text()[:BLOCK_SCAN_CHARS]
+    except Exception:
+        return
+    if CHALLENGE_MARKERS.search(body):
+        raise SiteThrottled("challenge")
+
+
 def goto(page, url: str, tries: int = 3) -> None:
     """page.goto that retries transient bot-filter/5xx responses (e.g. Swiggy's first-load 403)."""
     for i in range(tries):
@@ -144,7 +156,10 @@ def goto(page, url: str, tries: int = 3) -> None:
             r = page.goto(url, wait_until="domcontentloaded")
             if not r or r.status not in RETRY_STATUS:
                 break
+            _raise_if_throttled_response(r)
             log.warning("HTTP %s on %s, retrying", r.status, urlsplit(url).path)
+        except SiteThrottled:
+            raise
         except Exception as e:
             if "ERR_ABORTED" in str(e) or "interrupted by another navigation" in str(e):
                 # SPAs (Zomato) replace a navigation with their own client-side one: fine if we landed on the site.
