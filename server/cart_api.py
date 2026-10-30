@@ -98,3 +98,81 @@ def post_choice(request_id: str, body: ChoiceBody, user: str = Depends(current_u
     except (cart.CartError, cart.BadChoice) as e:
         raise http_error(e) from None
     return {"summary": summary}
+
+
+# --- cart fill (Plan 6) -----------------------------------------------------------------------------------------
+
+class FillBody(BaseModel):
+    site: str = Field(min_length=1, max_length=32)
+
+
+def fill_error(e: Exception, site: str | None = None) -> HTTPException:
+    """A fill error as the status and exact user-facing detail the PWA shows as is."""
+    from server import fill, site_health
+    app = fill._app(site) if site else ""
+    if isinstance(e, (limits.LimitExceeded, limits.BudgetPaused)):
+        return limits.to_http(e)
+    if isinstance(e, site_health.SiteCooling):
+        return site_health.to_http(e)
+    if isinstance(e, fill.NotFound):
+        return HTTPException(404, "not found")
+    if isinstance(e, fill.NotReady):
+        return HTTPException(409, "Prices are still loading.")
+    if isinstance(e, fill.FoodNotFillable):
+        return HTTPException(422, fill.FOOD_NOTE)
+    if isinstance(e, fill.NoPrices):
+        return HTTPException(422, f"{app} has no prices in this check.")
+    if isinstance(e, fill.Unavailable):
+        return HTTPException(503, f"Filling carts on {app} isn't available right now.")
+    if isinstance(e, fill.NeedsConnection):
+        return HTTPException(409, e.message)
+    if isinstance(e, fill.Stale):
+        return HTTPException(409, "These prices are over 30 minutes old. Check again first.")
+    if isinstance(e, fill.AlreadyFilled):
+        return HTTPException(409, f"This cart was already filled on {app}.")
+    if isinstance(e, fill.NothingToAdd):
+        return HTTPException(409, f"Nothing to add on {app}.")
+    if isinstance(e, fill.FillRunning):
+        return HTTPException(409, "A cart is already being filled.")
+    if isinstance(e, fill.NotConfirmable):
+        return HTTPException(409, "These prices have expired. Check again.")
+    raise e
+
+
+@router.get("/checks/{request_id}/fill")
+def get_fill_options(request_id: str, user: str = Depends(current_user), conn=Depends(get_conn)):
+    from server import fill
+    try:
+        return fill.fill_options(conn, user, request_id, None, settings())
+    except (fill.NotFound, fill.NotReady) as e:
+        raise fill_error(e) from None
+
+
+@router.post("/checks/{request_id}/fill", status_code=202)
+def post_fill(request_id: str, body: FillBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    from server import fill, site_health
+    try:
+        fill._request(conn, user, request_id)               # not the owner's: 404 before anything else
+        if body.site in fill.FILL_SITES:
+            site_health.raise_if_cooling(conn, body.site)   # a site that is limiting us is not asked again
+        return fill.start_fill(conn, user, request_id, body.site, None, settings())
+    except (fill.NotFound, fill.NotReady, fill.FoodNotFillable, fill.NoPrices, fill.Unavailable,
+            fill.NeedsConnection, fill.Stale, fill.AlreadyFilled, fill.NothingToAdd, fill.FillRunning,
+            limits.LimitExceeded, limits.BudgetPaused, site_health.SiteCooling) as e:
+        raise fill_error(e, body.site) from None
+
+
+@router.post("/fills/{fill_id}/confirm", status_code=202)
+def post_confirm(fill_id: str, user: str = Depends(current_user), conn=Depends(get_conn)):
+    from server import fill, site_health
+    old = fill.get_fill(conn, fill_id, user)
+    if old is None:
+        raise HTTPException(404, "not found")
+    site = old["site"]
+    try:
+        if site in fill.FILL_SITES:
+            site_health.raise_if_cooling(conn, site)
+        return fill.confirm_fill(conn, user, fill_id, None, settings())
+    except (fill.NotConfirmable, fill.Unavailable, fill.NeedsConnection, limits.LimitExceeded,
+            limits.BudgetPaused, site_health.SiteCooling) as e:
+        raise fill_error(e, site) from None

@@ -34,7 +34,8 @@ class FeeRulesBody(BaseModel):
 
 
 # Which sites each learn kind covers: order history on connectable sites, grocery search, restaurants+menus.
-LEARN_SITES = {"orders": admin.CONNECTABLE_SITES, "search": cart.SEARCH_SITES, "food": cart.FOOD_SITES}
+LEARN_SITES = {"orders": admin.CONNECTABLE_SITES, "search": cart.SEARCH_SITES, "food": cart.FOOD_SITES,
+               "cart": cart.SEARCH_SITES}
 
 
 class DecideBody(BaseModel):
@@ -72,6 +73,7 @@ def build_router(current_user, get_conn) -> APIRouter:
         users = [{"user_id": u["user_id"], "email": u["email"], "proxy_gb": round(u["proxy_mb"] / 1000, 4),
                   "ai_tokens": int(u["ai_tokens"]), "worker_minutes": round(u["worker_seconds"] / 60, 2),
                   "syncs": u["syncs"], "cart_checks": u["cart_checks"],
+                  "cart_fills": u["cart_fills"],
                   "inr": round(budget.cost_inr(u["proxy_mb"], u["ai_tokens"], u["worker_seconds"], s), 2)}
                  for u in admin.usage_by_user(conn, month)]
         users.sort(key=lambda u: (-u["inr"], u["user_id"]))
@@ -103,7 +105,7 @@ def build_router(current_user, get_conn) -> APIRouter:
         return Response(status_code=204)
 
     @router.post("/learn/{site}", status_code=202)
-    def learn(site: str, kind: Literal["orders", "search", "food"] = "orders", user: str = Depends(require_admin),
+    def learn(site: str, kind: Literal["orders", "search", "food", "cart"] = "orders", user: str = Depends(require_admin),
               conn=Depends(get_conn)):
         _known(site)
         if site not in LEARN_SITES[kind]:
@@ -114,11 +116,14 @@ def build_router(current_user, get_conn) -> APIRouter:
         row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user, account)).fetchone()
         if row is None or row[0] != "connected":
             raise HTTPException(409, f"Connect {_app(account)} on your own account first.")
+        if kind == "cart" and conn.execute(
+                "SELECT 1 FROM recipes WHERE site=%s AND kind='search' AND healthy", (site,)).fetchone() is None:
+            raise HTTPException(409, f"Learn {_app(site)} prices (search) first.")
         if kind != "orders":
             prof = store.get_profile(conn, user) or {}
             if prof.get("lat") is None or prof.get("lon") is None:
                 raise HTTPException(409, "Add your delivery address first.")
-        busy = f"A learn for {_app(site)} is already running."
+        busy = "A learn is already running." if kind == "cart" else f"A learn for {_app(site)} is already running."
         if conn.execute("SELECT 1 FROM jobs WHERE site=%s AND type='learn' AND status IN ('queued','running')",
                         (site,)).fetchone() is not None:
             raise HTTPException(409, busy)

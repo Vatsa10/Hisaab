@@ -94,7 +94,7 @@ def usage_by_user(conn, month: str) -> list[dict]:
             "SELECT u.user_id::text AS user_id, lower(a.email) AS email, "
             "sum(u.proxy_mb)::float8 AS proxy_mb, sum(u.ai_tokens)::bigint AS ai_tokens, "
             "sum(u.worker_seconds)::float8 AS worker_seconds, sum(u.syncs)::int AS syncs, "
-            "sum(u.cart_checks)::int AS cart_checks "
+            "sum(u.cart_checks)::int AS cart_checks, sum(u.cart_fills)::int AS cart_fills "
             "FROM usage u LEFT JOIN auth.users a ON a.id = u.user_id "
             "WHERE u.day >= %s AND u.day < %s GROUP BY u.user_id, a.email ORDER BY u.user_id",
             (first, nxt)).fetchall()
@@ -125,7 +125,34 @@ def site_health(conn, now: datetime, admin_user_id: str, s: Settings | None = No
             "ON true ORDER BY s.n",
             (list(CONNECTABLE_SITES), str(admin_user_id), list(SYNC_TYPES), since, now)).fetchall()
     orders = [{**r, "op": None, "db_site": r["site"], **health.health_fields(conn, s, r["site"], now)} for r in rows]
-    return orders + _search_health(conn, since, now, admin_user_id)
+    return orders + _search_health(conn, since, now, admin_user_id) + _cart_health(conn, since, now, admin_user_id)
+
+
+
+def _cart_health(conn, since: datetime, now: datetime, admin_user_id: str) -> list[dict]:
+    """One kind 'cart' row per grocery search site: the cart recipe's state, the 7 days' fill_cart outcomes, the
+    admin's own connection for the site's account (a cart recipe is learned on a real account: needs_account) and
+    whether a cart recipe waits for approval."""
+    recipes = {r[0]: r[1:] for r in conn.execute(
+        "SELECT site, version, learned_at, healthy, paused, health_note FROM recipes WHERE kind = 'cart'")}
+    outcomes = {r[0]: r[1:] for r in conn.execute(
+        "SELECT site, count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), "
+        "max(finished_at) FILTER (WHERE status='done') FROM jobs "
+        "WHERE type='fill_cart' AND finished_at >= %s AND finished_at <= %s GROUP BY 1", (since, now))}
+    connected = {r[0] for r in conn.execute(
+        "SELECT site FROM connections WHERE user_id=%s AND status='connected'", (str(admin_user_id),))}
+    pending = {r[0] for r in conn.execute(
+        "SELECT site FROM recipe_approvals WHERE kind='cart' AND status='pending'")}
+    out = []
+    for site in cart.SEARCH_SITES:
+        version, learned_at, healthy, paused, note = recipes.get(site, (None, None, True, False, None))
+        ok, failed, last_ok = outcomes.get(site, (0, 0, None))
+        out.append({"site": site, "kind": "cart", "op": "fill", "db_site": cart.db_site(site), "version": version,
+                    "learned_at": learned_at, "healthy": bool(healthy), "paused": bool(paused),
+                    "health_note": note, "syncs_ok_7d": int(ok), "syncs_failed_7d": int(failed),
+                    "last_ok_at": last_ok, "admin_connected": cart.db_site(site) in connected,
+                    "needs_account": True, "pending_approval": site in pending})
+    return out
 
 
 def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> list[dict]:

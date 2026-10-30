@@ -298,6 +298,8 @@ def _card(state: str, label: str, sublabel: str | None = None, href: str | None 
 def fill_options(conn, user_id: str, request_id: str, now: datetime | None, s: Settings) -> dict:
     """The Fill button of each ok card, in the precedence order of the plan (Plan 6 T5)."""
     req = _request(conn, user_id, request_id)
+    if req["status"] != "done":
+        raise NotReady()
     left = limits.cart_fills_left(conn, user_id, now, s)
     out = {"fills_left": left, "fills_limit": s.cart_fills_per_day, "sites": {}}
     cards = {site: c for site, c in _results(conn, req["id"]).items() if c["status"] == "ok"}

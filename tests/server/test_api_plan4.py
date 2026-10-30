@@ -230,7 +230,7 @@ def test_admin_costs_converts_usage_to_inr(client, pg):
                                   "worker_inr_per_minute": 0.2}
     first = body["users"][0]
     assert first == {"user_id": B, "email": "user@example.com", "proxy_gb": 1.0, "ai_tokens": 10_000,
-                     "worker_minutes": 10.0, "syncs": 2, "cart_checks": 1, "inr": 402.5}
+                     "worker_minutes": 10.0, "syncs": 2, "cart_checks": 1, "cart_fills": 0, "inr": 402.5}
     assert [u["user_id"] for u in body["users"]] == [B, A]
     assert body["spent_inr"] == pytest.approx(402.55)
     assert (body["pct"], body["level"]) == (8, "ok")

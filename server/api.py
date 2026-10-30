@@ -244,17 +244,18 @@ def connect(site: str, body: PhoneBody, user: str = Depends(current_user), conn=
 
 
 def _relay_to_running_connect(conn, job_id: str, user: str, text: str, stage: str | None = None) -> Response:
-    """NOTIFY otp_<job id> with text, for the caller's own running connect job (and, when stage is given, only
-    while the job's progress stage is that). The worker's prompt LISTENs on this one channel for OTPs and answers
-    alike. The text is never stored or logged."""
+    """NOTIFY otp_<job id> with text, for the caller's own running connect job (a running fill_cart job too, when
+    a stage is given) and, when stage is given, only while the job's progress stage is that. The worker's prompt
+    LISTENs on this one channel for OTPs and answers alike. The text is never stored or logged."""
     try:
         jid = str(uuid.UUID(job_id))
     except ValueError:
         raise HTTPException(404, "not found") from None
     row = conn.execute(
-        "SELECT 1 FROM jobs WHERE id=%s AND user_id=%s AND type='connect' AND status='running'"
+        "SELECT 1 FROM jobs WHERE id=%s AND user_id=%s AND status='running'"
+        " AND (type='connect' OR (type='fill_cart' AND %s::text IS NOT NULL))"
         " AND (%s::text IS NULL OR progress->>'stage' = %s::text)",
-        (jid, user, stage, stage),
+        (jid, user, stage, stage, stage),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "not found")
@@ -314,6 +315,8 @@ def my_limits(user: str = Depends(current_user), conn=Depends(get_conn)):
             "refresh_limit": s.refresh_per_app_per_day,
             "cart_checks_left": limits.cart_checks_left(conn, user, None, s),
             "cart_checks_limit": s.cart_checks_per_day,
+            "cart_fills_left": limits.cart_fills_left(conn, user, None, s),
+            "cart_fills_limit": s.cart_fills_per_day,
             "budget_paused": budget.is_paused(conn, None, s.app_tz),
             "resets_at": reset.astimezone(ZoneInfo(s.app_tz)).isoformat()}
 

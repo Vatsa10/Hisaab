@@ -159,14 +159,6 @@ def test_choice_endpoint_scoped_to_owner(client, token_a, token_b, pg):
     assert _checks(pg) == 1
 
 
-def test_no_fill_cart_route_or_job(client, token_a, pg):
-    from server.api import app
-    assert not [r for r in app.routes if "fill" in getattr(r, "path", "")]
-    grocery_user(pg, sites=("zepto", "blinkit", "swiggy"))
-    assert _post(client, token_a).status_code == 202
-    assert pg.execute("select count(*) from jobs where type='fill_cart'").fetchone()[0] == 0
-
-
 # --- admin ------------------------------------------------------------------------------------------------------
 
 def test_admin_routes_forbidden_for_non_admin(client, token_a, pg):

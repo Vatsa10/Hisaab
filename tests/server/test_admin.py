@@ -53,7 +53,7 @@ def test_usage_by_user_sums_ist_month(pg):
     pg.execute("insert into usage(user_id, day, ai_tokens) values (%s, '2026-10-15', 5)", (B,))  # no auth row
     rows = {r["user_id"]: r for r in admin.usage_by_user(pg, "2026-10")}
     assert rows[A] == {"user_id": A, "email": "a@example.com", "proxy_mb": 150.0, "ai_tokens": 20,
-                       "worker_seconds": 120.0, "syncs": 2, "cart_checks": 4}
+                       "worker_seconds": 120.0, "syncs": 2, "cart_checks": 4, "cart_fills": 0}
     assert rows[B]["email"] is None and rows[B]["ai_tokens"] == 5
     assert admin.usage_by_user(pg, "2026-08") == []
 
