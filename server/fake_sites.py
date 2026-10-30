@@ -5,8 +5,11 @@ import os
 import random
 import time
 from datetime import datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
+import browser
 import sync
+from server import match
 
 FAKE_OTP = "123456"
 MONTHS = 6
@@ -31,10 +34,51 @@ def login(site, phone, prompt, **_) -> bool:
     return prompt("Enter the OTP sent to your phone", "otp") == FAKE_OTP
 
 
-def learn(site, approve, preapproved=(), **_) -> dict:
-    """A deterministic orders recipe for the fake site. Its one POST-allowlist entry goes to approve([entry])
-    unless preapproved already holds its regex; a refusal is sync.RecipeError("POST allowlist rejected")."""
-    entry = {"url_regex": f"^https://fake\\.{site}\\.test/api/orders$", "why": "fake order list"}
+def _post_entry(site: str, path: str, why: str, approve, preapproved) -> list[dict]:
+    """The POST-allowlist entry for one fake endpoint: asked of approve() unless preapproved already holds it."""
+    entry = {"url_regex": f"^https://fake\\.{site}\\.test{path}$", "why": why}
+    if entry["url_regex"] not in set(preapproved) and not approve([entry]):
+        raise sync.RecipeError("POST allowlist rejected")
+    return [entry]
+
+
+def _learn_search(site, approve, preapproved) -> dict:
+    post = site == "instamart"
+    allow = _post_entry(site, "/api/search", "fake product search", approve, preapproved) if post else []
+    return {"home_url": f"https://fake.{site}.test/", "method": "POST" if post else "GET",
+            "endpoint": f"https://fake.{site}.test/api/search", "query_param": "q", "location_inputs": [],
+            "store": None, "read_post_allowlist": allow, "fee_map": None,
+            "field_map": {"products_path": "products", "product_id": "product_id", "name": "name", "brand": "brand",
+                          "pack_size": "pack_size", "price": "price", "mrp": "mrp", "in_stock": "in_stock"}}
+
+
+def _learn_food(site, approve, preapproved) -> dict:
+    post = site == "zomato"
+    allow = _post_entry(site, "/api/search", "fake restaurant search", approve, preapproved) if post else []
+    home = f"https://fake.{site}.test/"
+    restaurants = {"home_url": home, "method": "POST" if post else "GET",
+                   "endpoint": f"https://fake.{site}.test/api/search" if post
+                   else f"https://fake.{site}.test/api/restaurants",
+                   "query_param": "q", "location_inputs": [], "read_post_allowlist": allow, "fee_map": None,
+                   "field_map": {"restaurants_path": "restaurants", "restaurant_id": "restaurant_id", "name": "name",
+                                 "locality": "locality", "lat": "lat", "lon": "lon"}}
+    menu = {"home_url": home, "method": "GET", "endpoint": f"https://fake.{site}.test/api/menu",
+            "restaurant_param": "restaurant_id", "location_inputs": [], "read_post_allowlist": [], "fee_map": None,
+            "field_map": {"dishes_path": "dishes", "dish_id": "dish_id", "name": "name", "price": "price",
+                          "veg": "veg", "in_stock": "in_stock", "packaging": "packaging"}}
+    return {"restaurants": restaurants, "menu": menu}
+
+
+def learn(site, approve, preapproved=(), kind="orders", **_) -> dict:
+    """A deterministic recipe for the fake site. kind "orders" (default): the orders recipe; "search": the grocery
+    search recipe (GET; Instamart POSTs); "food": {"restaurants", "menu"} (Swiggy GET; Zomato's restaurant search
+    POSTs). Each POST-allowlist entry goes to approve([entry]) unless preapproved already holds its regex; a
+    refusal is sync.RecipeError("POST allowlist rejected")."""
+    if kind == "search":
+        return _learn_search(site, approve, preapproved)
+    if kind == "food":
+        return _learn_food(site, approve, preapproved)
+    entry ={"url_regex": f"^https://fake\\.{site}\\.test/api/orders$", "why": "fake order list"}
     if entry["url_regex"] not in set(preapproved) and not approve([entry]):
         raise sync.RecipeError("POST allowlist rejected")
     return {"orders_page_url": f"https://fake.{site}.test/orders", "endpoint": f"https://fake.{site}.test/api/orders",
@@ -124,3 +168,117 @@ def saved_addresses(site) -> list[dict]:
                          "lat": round(_FAKE_HOME["lat"] + _FAKE_NUDGE.get(account, 0.0), 6)}
     second = _FAKE_SECOND.get(account, _FAKE_WORK) | {"address_id": f"fake-{account}-2", "is_default": False}
     return [home, second]
+
+
+# --- compare fakes (Plan 5): grocery search, restaurant search and menus ------------------------------------------
+
+def logged_out_sites() -> frozenset[str]:
+    """Sites whose fake session has "expired" (env FAKE_LOGGED_OUT_SITES, comma-separated; local runs only)."""
+    return frozenset(x.strip() for x in (os.getenv("FAKE_LOGGED_OUT_SITES") or "").split(",") if x.strip())
+
+
+def __getattr__(name):  # fake_sites.LOGGED_OUT_SITES always reflects the environment as it is now
+    if name == "LOGGED_OUT_SITES":
+        return logged_out_sites()
+    raise AttributeError(name)
+
+
+def _check_session(site: str) -> None:
+    if site in logged_out_sites():
+        raise browser.SessionExpired("fake session expired")
+
+
+# (product name as an app lists it, brand, base price)
+FAKE_CATALOG = [
+    ("Amul Taza Milk 500ml", "Amul", 29), ("Farm Eggs 6 pcs", None, 54), ("Banana Robusta 1kg", None, 60),
+    ("Onion 1kg", None, 40), ("Tomato 500g", None, 30), ("Britannia Brown Bread (400 g)", "Britannia", 50),
+    ("Amul Butter 100g", "Amul", 58), ("Maggi Noodles 4 pack", "Maggi", 56), ("Coriander Bunch", None, 10),
+    ("Aashirvaad Atta 5kg", "Aashirvaad", 260), ("Curd 400g", None, 35), ("Potato 1kg", None, 35),
+    ("Amul Taaza Toned Milk 1 L", "Amul", 60), ("Milk Bikis Biscuits 200 g", "Britannia", 30),
+    ("Lay's Classic Salted Chips 52 g", "Lay's", 20), ("Lay's Magic Masala Chips 52 g", "Lay's", 20),
+]
+SITE_PRICE_FACTOR = {"zepto": Decimal("0.92"), "blinkit": Decimal("1.00"), "instamart": Decimal("1.06")}
+OUT_OF_STOCK = {"instamart": {"Lay's Classic Salted Chips 52 g"}}
+NOT_STOCKED = {"blinkit": {"Coriander Bunch"}}
+
+
+def _slug(text: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in text.lower()).strip("-")
+
+
+def _catalog(site: str) -> list[dict]:
+    factor = SITE_PRICE_FACTOR[site]
+    rows = []
+    for name, brand, base in FAKE_CATALOG:
+        if name in NOT_STOCKED.get(site, ()):
+            continue
+        price = int((Decimal(base) * factor).quantize(Decimal(1), ROUND_HALF_UP))
+        rows.append({"product_id": f"{site}-{_slug(name)}", "name": name, "brand": brand, "pack_size": None,
+                     "price": price, "mrp": round(price * 1.1, 2), "in_stock": name not in OUT_OF_STOCK.get(site, ())})
+    return rows
+
+
+def search(site, queries, **_) -> dict:
+    """{"products": {query: [rows]}, "fee_info": {}}: the catalog entries that share a word with the query."""
+    _check_session(site)
+    rows = _catalog(site)
+    return {"products": {q: [r for r in rows if match.tokens(q) & match.tokens(r["name"])] for q in queries},
+            "errors": {}, "fee_info": {}}
+
+
+# (id slug, name, locality, lat, lon, is_open)
+_FAKE_FOOD = {
+    "swiggy": [("meghana", "Meghana Foods", "Gorwa", 22.3310, 73.1510, True),
+               ("truffles", "Truffles", "Gorwa", 22.3290, 73.1490, True),
+               ("behrouz", "Behrouz Biryani", "Gorwa", 22.3320, 73.1480, True),
+               ("burger-singh", "Burger Singh", "Gorwa", 22.3305, 73.1505, True),
+               ("theobroma", "Theobroma", "Gorwa", 22.3295, 73.1495, True)],
+    "zomato": [("meghana", "Meghana Foods", "Gorwa", 22.3310, 73.1510, True),
+               ("truffles-cafe", "Truffles Cafe", "Gorwa", 22.3290, 73.1490, True),
+               ("behrouz", "Behrouz Biryani", "Gorwa", 22.3320, 73.1480, True),
+               ("behrouz-alkapuri", "Behrouz Biryani", "Alkapuri", 22.3100, 73.1800, True),
+               ("burger-singh", "Burger Singh", "Gorwa", 22.3305, 73.1505, False)],
+}
+
+
+def _restaurant_row(site: str, r: tuple) -> dict:
+    slug, name, locality, lat, lon, is_open = r
+    rid = f"{site}-{slug}"
+    return {"restaurant_id": rid, "name": name, "locality": locality, "lat": lat, "lon": lon, "distance_km": None,
+            "is_open": is_open, "url": f"https://fake.{site}.test/restaurant/{rid}"}
+
+
+def search_restaurants(site, query, **_) -> dict:
+    """{"restaurants": [rows], "fee_info": {}}: the listings sharing any name word with the query."""
+    _check_session(site)
+    words = match.tokens(query)
+    return {"restaurants": [_restaurant_row(site, r) for r in _FAKE_FOOD[site] if words & match.tokens(r[1])],
+            "fee_info": {}}
+
+
+# (name, price, packaging, veg); Zomato's listing carries no packaging field
+_MEGHANA = {
+    "swiggy": [("Chicken Biryani (Half)", 220, 15, False), ("Chicken Biryani (Full)", 380, 20, False),
+               ("Paneer Biryani", 260, 10, True), ("Veg Biryani", 200, 10, True), ("Chicken 65", 240, 10, False)],
+    "zomato": [("Chicken Biryani - Half", 235, None, False), ("Chicken Biryani - Full", 395, None, False),
+               ("Paneer Biryani", 250, None, True), ("Veg Biryani", 205, None, True),
+               ("Chicken 65", 245, None, False)],
+}
+
+
+def fetch_menu(site, restaurant_id, **_) -> dict:
+    """{"is_open", "dishes", "fee_info"} for a fake restaurant id."""
+    _check_session(site)
+    listing = next((r for r in _FAKE_FOOD[site] if f"{site}-{r[0]}" == str(restaurant_id)), None)
+    if listing is None:
+        return {"is_open": False, "dishes": [], "fee_info": {}}
+    if listing[1] == "Meghana Foods":
+        rows = _MEGHANA[site]
+    else:
+        rng = random.Random(f"fake-menu-{site}-{listing[0]}")
+        rows = [(f"{listing[1]} {d}", rng.randint(120, 380), None, bool(rng.getrandbits(1)))
+                for d in rng.sample(DISHES, 3)]
+    dishes = [{"dish_id": f"{restaurant_id}-d{n}", "name": name, "variant": None, "price": float(price),
+               "veg": veg, "in_stock": True, "packaging": float(pack) if pack is not None else None}
+              for n, (name, price, pack, veg) in enumerate(rows, 1)]
+    return {"is_open": listing[5], "dishes": dishes, "fee_info": {}}

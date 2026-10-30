@@ -209,3 +209,15 @@ def test_user_deleted_between_due_and_enqueue_does_not_abort_the_tick(pg, monkey
     r = scheduler.tick(pg, S(), NOW)
     assert r["enqueued"] == 1 and sent == [1]
     assert [row[0] for row in pg.execute("select user_id::text from jobs").fetchall()] == [other]
+
+
+def test_tick_finalizes_stale_carts_and_purges_food_cache(pg):
+    from server import food_cart
+    pg.execute("insert into restaurant_cache (user_id, site, geo_key, query_norm, results, fetched_at) "
+               "values (%s,'swiggy','22.33,73.15','pizza','[]', %s)", (U, NOW - timedelta(hours=30)))
+    pg.execute("insert into restaurant_cache (user_id, site, geo_key, query_norm, results, fetched_at) "
+               "values (%s,'swiggy','22.33,73.15','dosa','[]', %s)", (U, NOW - timedelta(hours=1)))
+    r = scheduler.tick(pg, S(), NOW)
+    assert r["carts_finalized"] == 0
+    assert pg.execute("select query_norm from restaurant_cache").fetchall() == [("dosa",)]
+    assert food_cart.PURGE_AFTER_S == 86400

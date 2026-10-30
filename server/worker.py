@@ -22,17 +22,22 @@ from psycopg import sql
 
 import addresses
 import browser
+import food_learn
+import food_search
 import llm
 import metering
+import search
+import search_learn
 import sync
-from server import addresses_store, categorize_pg, fake_sites, jobs, notify, recipe_admin, store, usage, vault
+from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
+                    store, usage, vault)
 from server.config import SITE_NAMES, Settings, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
 
 log = logging.getLogger("worker")
 
-JOB_TYPES = ("connect", "sync", "learn")
+JOB_TYPES = ("connect", "sync", "learn", "search")
 MAX_ERROR_LEN = 300
 
 
@@ -298,12 +303,24 @@ RELEARN_FAILED_BODY = ("Its order recipe stopped working and the automatic re-le
                        "Review it in the admin view.")
 
 
-def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str) -> None:
-    """Pause the site's orders recipe and email every admin (once per site per IST day)."""
+PRICE_NO_LEARNER_BODY = "Its price recipe stopped working and no admin account is connected to re-learn it."
+PRICE_RELEARN_FAILED_BODY = ("Its price recipe stopped working and the automatic re-learn did not publish a new one. "
+                             "Review it in the admin view.")
+# learn kind -> the recipe kinds it publishes
+LEARN_RECIPE_KINDS = {"orders": ("orders",), "search": ("search",), "food": ("restaurants", "menu")}
+
+
+def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str, kind: str = "orders") -> None:
+    """Pause the site's recipe(s) of this learn kind (orders, search or food) and email every admin (once per
+    site and kind per IST day)."""
     try:
-        recipe_admin.pause_site(conn, site, "orders", note, reason="auto")
-        notify.alert_admins(conn, kind="site_paused", title=f"{_app(site)} sync paused", body=body,
-                            dedupe_key=f"site_paused:{site}:{usage.today(tz=s.app_tz)}")
+        for recipe_kind in LEARN_RECIPE_KINDS[kind]:
+            recipe_admin.pause_site(conn, site, recipe_kind, note, reason="auto")
+        if kind == "orders":
+            title, key = f"{_app(site)} sync paused", f"site_paused:{site}:{usage.today(tz=s.app_tz)}"
+        else:
+            title, key = f"{_app(site)} prices paused", f"site_paused:{kind}:{site}:{usage.today(tz=s.app_tz)}"
+        notify.alert_admins(conn, kind="site_paused", title=title, body=body, dedupe_key=key)
     except Exception as e:
         log.error("could not pause %s after drift (%s)", site, type(e).__name__)
         return
@@ -314,11 +331,19 @@ def _is_auto_learn(job: jobs.Job) -> bool:
     return job.type == "learn" and bool((job.payload or {}).get("auto"))
 
 
+def _learn_kind(job: jobs.Job) -> str:
+    """What a learn job learns: the payload's kind ("orders" when absent or unknown)."""
+    kind = (job.payload or {}).get("kind")
+    return kind if kind in LEARN_RECIPE_KINDS else "orders"
+
+
 def _pause_after_failed_relearn(conn, s: Settings, job: jobs.Job, error: str) -> None:
     """Ruling R8: an unattended (drift) learn that did not publish a recipe, however it ended, pauses the site
     and alerts the admins. A supervised learn never pauses."""
     if _is_auto_learn(job):
-        _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN], RELEARN_FAILED_BODY)
+        kind = _learn_kind(job)
+        _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN],
+                         RELEARN_FAILED_BODY if kind == "orders" else PRICE_RELEARN_FAILED_BODY, kind)
 
 
 def _requeue_stale(conn, s: Settings) -> int:
@@ -349,6 +374,28 @@ def _on_drift(conn, s: Settings, job: jobs.Job, db_site: str, note: str) -> None
         log.error("could not enqueue a re-learn for %s (%s)", job.site, type(e).__name__)
 
 
+def _on_search_drift(conn, s: Settings, job: jobs.Job, db_site: str, recipe_kind: str, note: str) -> None:
+    """Ruling R11, as _on_drift for a price recipe: on the healthy -> unhealthy transition, enqueue an unattended
+    learn of that kind ("search", or "food" for a restaurants / menu recipe) on a connected admin account, or,
+    with none, pause the site's recipes of that kind and alert the admins."""
+    kind = "search" if recipe_kind == "search" else "food"
+    try:
+        if not recipe_admin.mark_drift(conn, job.site, recipe_kind, note[:MAX_ERROR_LEN]):
+            return
+        learner = recipe_admin.admin_learner(conn, db_site)
+    except Exception as e:
+        log.error("drift handling for %s %s failed (%s)", job.site, kind, type(e).__name__)
+        return
+    if learner is None:
+        return _pause_and_alert(conn, s, job.site, "drift: no admin account connected", PRICE_NO_LEARNER_BODY, kind)
+    try:
+        jobs.enqueue(conn, learner, "learn", job.site, {"reason": "drift", "auto": True, "kind": kind})
+    except jobs.Conflict:
+        pass
+    except Exception as e:
+        log.error("could not enqueue a %s re-learn for %s (%s)", kind, job.site, type(e).__name__)
+
+
 def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay, seconds: float) -> None:
     """Add this job's proxy, AI and worker time to the user's usage for today (IST). Never fails the job."""
     try:
@@ -367,23 +414,70 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     An auto (drift) learn never lets a new POST through; a supervised one asks the admin for each. The admin's
     profile is saved before anything is published, so a failed save never pauses a site whose recipe is live."""
     auto = bool((job.payload or {}).get("auto"))
+    kind = _learn_kind(job)
+    recipe_kinds = LEARN_RECIPE_KINDS[kind]
     jobs.set_progress(conn, job.id, stage="learning")
     if auto:
         approve = recipe_admin.deny_new_posts
     else:
-        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, "orders", s.approval_timeout_s)
-    current = store.get_recipe(conn, job.site) or {}
-    preapproved = [e["url_regex"] for e in current.get("read_post_allowlist") or []
-                   if isinstance(e, dict) and e.get("url_regex")]
-    recipe = (fake_sites.learn if fake else sync.learn)(
-        job.site, profile_dir=profile_dir, location=_location(conn, job.user_id), proxy_server=proxy_server,
-        approve=approve, preapproved=preapproved, save=False)
+        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, recipe_kinds[0], s.approval_timeout_s)
+    preapproved = []
+    for recipe_kind in recipe_kinds:  # what the site's current recipes already allow needs no new approval
+        current = store.get_recipe(conn, job.site, recipe_kind) or {}
+        preapproved += [e["url_regex"] for e in current.get("read_post_allowlist") or []
+                        if isinstance(e, dict) and e.get("url_regex")]
+    location = _location(conn, job.user_id)
+    if kind == "orders":
+        learned = {"orders": (fake_sites.learn if fake else sync.learn)(
+            job.site, profile_dir=profile_dir, location=location, proxy_server=proxy_server, approve=approve,
+            preapproved=preapproved, save=False)}
+    elif fake:
+        out = fake_sites.learn(job.site, approve, preapproved, kind=kind)
+        learned = {"search": out} if kind == "search" else out
+    elif kind == "search":
+        learned = {"search": search_learn.learn_search(job.site, location=location, profile_dir=profile_dir,
+                                                       proxy_server=proxy_server, approve=approve,
+                                                       preapproved=preapproved, llm=_learn_llm)}
+    else:
+        learned = food_learn.learn_food(job.site, location=location, profile_dir=profile_dir,
+                                        proxy_server=proxy_server, approve=approve, preapproved=preapproved)
     save_profile()
-    result = recipe_admin.apply_learned(conn, job.site, "orders", recipe, set(getattr(approve, "approved", ())),
-                                        job.id, reason="drift_relearn" if auto else "learned")
+    approved = set(getattr(approve, "approved", ()))
+    reason = "drift_relearn" if auto else "learned"
+    results = [recipe_admin.apply_learned(conn, job.site, recipe_kind, learned[recipe_kind], approved, job.id,
+                                          reason=reason) for recipe_kind in recipe_kinds]
+    result = next((r for r in results if r["status"] == "pending"), results[-1])
     jobs.set_progress(conn, job.id, stage="learned", approval_id=result["approval_id"], status=result["status"],
                       version=result["version"])
     return result
+
+
+def _learn_llm(prompt: str) -> dict:
+    """The search learner's LLM: one JSON-object reply from llm.py (Claude Haiku, under its cost policy)."""
+    resp = llm.create("search_learn", effort="medium", max_tokens=8000, messages=[{"role": "user", "content": prompt}])
+    return llm.json_reply(resp)
+
+
+JUDGE_PROMPT = ('Shopping-list line: "{text}"\nFor each product below, is it the same item the line asks for '
+                '(same kind, brand if one is named, and size)? Reply with JSON only: {{"answers": [true or false, '
+                'one per product, in order]}}.\n{products}')
+
+
+def _judge():
+    """The near-match judge for match.match_item: one cheap LLM call per uncertain item, listing at most 3
+    product names. Any failure is "unsure" (None), which never accepts a product."""
+    def judge(text: str, names: list[str]) -> list:
+        try:
+            listing = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(names))
+            resp = llm.create("match_judge", effort="low", max_tokens=400,
+                              messages=[{"role": "user", "content": JUDGE_PROMPT.format(text=text, products=listing)}])
+            answers = llm.json_reply(resp).get("answers")
+            if isinstance(answers, list) and len(answers) == len(names):
+                return [a if isinstance(a, bool) else None for a in answers]
+        except Exception as e:
+            log.warning("match judge failed (%s)", type(e).__name__)
+        return [None] * len(names)
+    return judge
 
 
 def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, proxy_server: str | None,
@@ -405,6 +499,109 @@ def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, pro
         log.info("job %s: %d saved addresses on %s", job.id, n, db_site)
     except Exception as e:
         log.warning("job %s: saved addresses not refreshed (%s)", job.id, type(e).__name__)
+
+
+class _SearchEnd(Exception):
+    """A search job that ends without a price: result is the app's cart_results status, error its short code."""
+
+    def __init__(self, result: str, error: str | None = None):
+        super().__init__(result, error)
+        self.result, self.error = result, error
+
+
+def _address_query(row: dict) -> str:
+    """The address text the browser layer reads a city from ('society, area, city, state'). Saved addresses carry no
+    state, so the country fills that slot."""
+    return ", ".join(x for x in (row.get("line"), row.get("area"), row.get("city"), "India") if x)
+
+
+def _search_location(conn, job: jobs.Job) -> dict | None:
+    """Where this job searches: the app's own saved address (the job's address_id, else the one for the user's
+    chosen place), as a browser location. None when the app has no usable saved address."""
+    address_id = (job.payload or {}).get("address_id")
+    row = (addresses_store.get(conn, job.user_id, job.site, str(address_id)) if address_id
+           else addresses_store.saved_for(conn, job.user_id, job.site))
+    if not row or row.get("lat") is None or row.get("lon") is None:
+        return None
+    return {"query": _address_query(row), "lat": row["lat"], "lon": row["lon"]}
+
+
+def _search_recipe(conn, site: str, kind: str) -> dict:
+    row = conn.execute("SELECT recipe, healthy, paused FROM recipes WHERE site=%s AND kind=%s", (site, kind)).fetchone()
+    if row is None or not row[1] or row[2]:
+        raise _SearchEnd("unavailable", "unavailable")
+    return row[0]
+
+
+def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server: str | None,
+               fake: bool = False) -> None:
+    """Run one compare job on the user's own session and store what it finds. op "products" prices a grocery
+    check on this app; "restaurants" fills the user's restaurant cache; "menu" fills the menu cache and, for a
+    check, prices it. Raises _SearchEnd for an outcome without a price, browser.SessionExpired for a logged-out
+    session and the search errors for run_job to turn into results. Never logs items, queries or addresses."""
+    p = job.payload or {}
+    op, request_id = p.get("op"), p.get("request_id")
+    if op not in ("products", "restaurants", "menu"):
+        raise _SearchEnd("failed", "bad_op")
+    request = None
+    if request_id:
+        request = cart.get_request(conn, job.user_id, request_id)
+        if request is None:
+            raise _SearchEnd("failed", "request_gone")
+    recipe = _search_recipe(conn, job.site, "search" if op == "products" else op)
+    location = _search_location(conn, job)
+    if location is None and not request_id:  # a lookup with no saved address falls back to the profile's place
+        location = _location(conn, job.user_id)
+    if not location:
+        raise _SearchEnd("unserviceable", cart.NO_SAVED_ADDRESS)
+    block_media = s.sync_block_media
+    jobs.set_progress(conn, job.id, stage="searching")
+
+    if op == "products":
+        qs = [match.parse_query(i, str(it.get("text") or ""), it.get("qty") or 1)
+              for i, it in enumerate(request["items"])]
+        queries = list(dict.fromkeys(q.text for q in qs))
+        if fake:
+            found = fake_sites.search(job.site, queries)
+        else:
+            found = search.search_products(job.site, queries, location, recipe, profile_dir,
+                                           proxy_server=proxy_server, block_media=block_media)
+        judge = _judge() if s.match_judge and not fake else None
+        by_query = {q: [x for r in rows if (x := match.from_raw(r))] for q, rows in found["products"].items()}
+        matched = [match.match_item(q, by_query[q.text], judge) for q in qs if q.text in by_query]
+        jobs.set_progress(conn, job.id, stage="matched", count=len(matched))
+        cart.record_site_result(conn, request_id, job.site, "ok", matched,
+                                meta={"fee_info": found.get("fee_info") or {}})
+        return
+
+    profile = store.get_profile(conn, job.user_id) or {}
+    if op == "restaurants":
+        query = str(p.get("query") or "")
+        if fake:
+            found = fake_sites.search_restaurants(job.site, query)
+        else:
+            found = food_search.search_restaurants(job.site, query, location, recipe, profile_dir,
+                                                   proxy_server=proxy_server, block_media=block_media)
+        if profile.get("lat") is not None and profile.get("lon") is not None:
+            food_cart.put_restaurants(conn, job.user_id, job.site,
+                                      food_cart.geo_key(profile["lat"], profile["lon"]), query,
+                                      found["restaurants"])
+        jobs.set_progress(conn, job.id, stage="found", count=len(found["restaurants"]))
+        return
+
+    restaurant_id = str(p.get("restaurant_id") or "")
+    if fake:
+        menu = fake_sites.fetch_menu(job.site, restaurant_id)
+    else:
+        menu = food_search.fetch_menu(job.site, restaurant_id, location, recipe, profile_dir,
+                                      proxy_server=proxy_server, url=p.get("url"), block_media=block_media)
+    food_cart.put_menu(conn, job.user_id, job.site, restaurant_id, menu)
+    jobs.set_progress(conn, job.id, stage="found", count=len(menu.get("dishes") or []))
+    if request is not None:
+        listing = ((request.get("restaurant") or {}).get("listings") or {}).get(job.site) or {}
+        food_cart.record_menu(conn, request_id, job.site,
+                              {**menu, "fetched_at": datetime.now(timezone.utc).isoformat()}, request["items"],
+                              listing.get("distance_km"))
 
 
 def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
@@ -439,6 +636,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     def fail(error: str, status: str | None = None, touch_connection: bool = True) -> None:
         """Finish the job as failed. touch_connection=False leaves the connection row (and its "logged you out"
         notification) alone: a learn that never started on the admin's account is not about their session."""
+        if job.type == "search":
+            return end_search("needs_login" if error == "needs_login" else "failed", error=error)
         if touch_connection:
             before = _status(conn, job.user_id, db_site)
             if status is None and before == "syncing":
@@ -451,6 +650,27 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                          body="Reconnect to keep your spending up to date.", url="/accounts",
                          user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
         _pause_after_failed_relearn(conn, s, job, error)
+
+    def end_search(result: str, error: str | None = None) -> None:
+        """Finish a search job without a price: file the app's result for its check, finish the job as failed,
+        and, for a logged-out session, mark the connection and tell the user once. A search never changes the
+        connection's status otherwise."""
+        request_id = (job.payload or {}).get("request_id")
+        if request_id:
+            try:
+                cart.record_site_result(conn, request_id, job.site, result, error=error)
+            except cart.NotFound:
+                pass
+            except Exception as e:
+                log.warning("job %s: result not recorded (%s)", job.id, type(e).__name__)
+        before = _status(conn, job.user_id, db_site)
+        if result == "needs_login" and before != "needs_login":
+            store.set_connection(conn, job.user_id, db_site, status="needs_login")
+        jobs.finish(conn, job.id, error=error or result, worker_id=job.worker_id)
+        if result == "needs_login" and before != "needs_login":
+            _notify_user(conn, s, kind="needs_login", title=f"{_app(db_site)} logged you out",
+                         body="Log in again to keep comparing prices and syncing orders.", url="/accounts",
+                         user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
 
     def save_profile() -> None:
         if fake:
@@ -481,8 +701,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         except vault.VaultError as e:
             log.warning("job %s: stored profile unusable (%s); starting empty", job.id, type(e).__name__)
             shutil.rmtree(profile_dir, ignore_errors=True)
-            if job.type == "sync":
+            if job.type in ("sync", "search"):
                 return fail("needs_login", "needs_login")
+        if job.type == "search" and not restored and not fake:
+            return fail("needs_login", "needs_login")  # compares run on the user's own session: none stored
         if job.type == "learn" and not restored and not fake:
             # A learn runs on the admin's logged-in account; with none stored the job fails, but the admin's
             # connection row is neither written nor reported as logged out.
@@ -511,7 +733,15 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 result = _do_learn(job, conn, s, profile_dir, proxy_server, listen, fake, save_profile)
                 jobs.finish(conn, job.id, worker_id=job.worker_id)
                 if auto_learn and result["status"] == "pending":
-                    _pause_and_alert(conn, s, job.site, "drift re-learn needs admin approval", RELEARN_FAILED_BODY)
+                    kind = _learn_kind(job)
+                    _pause_and_alert(conn, s, job.site, "drift re-learn needs admin approval",
+                                     RELEARN_FAILED_BODY if kind == "orders" else PRICE_RELEARN_FAILED_BODY, kind)
+                return
+
+            if job.type == "search":
+                _do_search(job, conn, s, profile_dir, proxy_server, fake=fake)
+                save_profile()  # the session is the user's own; a good run keeps what the site refreshed
+                jobs.finish(conn, job.id, worker_id=job.worker_id)
                 return
 
             if job.type == "connect":
@@ -540,6 +770,15 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                          user_id=job.user_id, dedupe_key=f"first_sync:{job.id}")
     except browser.SessionExpired:
         fail("needs_login", "needs_login")
+    except _SearchEnd as e:
+        end_search(e.result, e.error)
+    except search.Unserviceable:
+        end_search("unserviceable")
+    except search.SearchDrift as e:
+        end_search("failed", "recipe_drift")
+        op = (job.payload or {}).get("op")
+        _on_search_drift(conn, s, job, db_site, "search" if op == "products" else str(op),
+                         (str(e).splitlines() or [""])[0])
     except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
         fail(f"{e.kind}_timeout", "error")
     except sync.RecipeDrift as e:
@@ -571,6 +810,11 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             metered.close()
         except Exception as e:  # metering must never fail or escape a job
             log.warning("job %s: meter close failed (%s)", job.id, type(e).__name__)
+        if job.type == "search" and (job.payload or {}).get("request_id"):
+            try:  # the check closes as soon as every app has an answer
+                cart.finalize_if_complete(conn, job.payload["request_id"], s)
+            except Exception as e:
+                log.warning("job %s: check not finalized (%s)", job.id, type(e).__name__)
         _record_usage(conn, job, s, meter, relay, time.monotonic() - started)
 
 

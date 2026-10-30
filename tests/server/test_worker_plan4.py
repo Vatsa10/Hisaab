@@ -331,7 +331,7 @@ def test_learn_job_uses_learn_timeout_for_heartbeat(pg, monkeypatch):
 
 
 def test_learn_is_a_worker_job_type():
-    assert worker.JOB_TYPES == ("connect", "sync", "learn")
+    assert worker.JOB_TYPES == ("connect", "sync", "learn", "search")
 
 
 def test_shutdown_fails_a_learn_job(pg):
