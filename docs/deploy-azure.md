@@ -11,6 +11,8 @@ Two Container Apps (API and Chrome worker), a scheduler job, plus ACR, Storage, 
 - A clean git tree: `deploy.sh` refuses to run with uncommitted or untracked changes, because the image tag is the commit sha.
 - Anthropic (Claude Haiku 5.5) and TypeSafe API keys, a profile master key, and a proxy URL template.
 - Python on PATH (the script uses it to write the parameters file).
+- `CORS_ORIGINS` in `.env.deploy`: the PWA origin(s) the API accepts, comma-separated (for example `https://hisaab.example.com`).
+- Email: if you set `smtpHost`, also pass `smtpPort` and `smtpStarttls` (their defaults, 1025 and off, are the local Mailpit values).
 
 ## One-time: Supabase migrations
 
@@ -78,7 +80,7 @@ The profile vault encrypts each user's Chrome profile with a key derived from on
   protection). The managed identity holds "Key Vault Secrets User"; only the worker app references the secret
   (a Key Vault reference, `profile-master-key`), and the API has no copy at all. Per-user keys are derived from it
   with HKDF. Cost: one vault, one secret, a few cents a month. Rotation: replace the secret version, then restart the
-  worker. A wrong or rotated key is detected by the vault's key canary (a key check inside every blob), so the worker
+  worker. A wrong or rotated key is detected by the vault's key check (a check value stored inside every blob), so the worker
   refuses to restore profiles with it instead of corrupting them.
 - **Option B:** a separate envelope key per user in Key Vault (the master key never leaves the vault, and revoking one
   user's key is possible). Cost: a Key Vault key per user plus a wrap/unwrap call on every profile restore and save
