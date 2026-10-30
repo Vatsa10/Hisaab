@@ -51,7 +51,7 @@
     }
   },
   "cart_allowlist": [
-    {"url_regex": "^https://shop\\.test/api/cart/add$", "why": "add to cart", "op": "cart"}
+    {"url_regex": "^https://shop\\.test/api/cart/add$", "why": "add to cart", "op": "cart", "qty_path": "item.quantity"}
   ],
   "location_allowlist": [
     {"url_regex": "^https://shop\\.test/api/location/select$", "why": "pick a saved or current location", "op": "location"}

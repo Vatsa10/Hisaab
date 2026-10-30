@@ -594,3 +594,24 @@ def test_fixture_is_a_valid_cart_recipe(monkeypatch):
     monkeypatch.setattr(cart_guard, "host_ok", lambda site, host: host == "shop.test")
     assert cart_recipe.check_cart_recipe(recipe(), "shop") is None
     assert cart_recipe.check_cart_recipe(recipe(location__select=ADDRESS_SELECT), "shop") is None
+
+
+def test_every_fill_request_passes_the_final_cart_guard(monkeypatch, shop):
+    from cart_guard import decide_cart
+    policy = cart_recipe.policy_for(recipe(), SEARCH_RECIPE)
+    seen = []
+    real = shop.handle
+
+    def guarded(page, req):
+        body = req.get("body")
+        text = None if body is None else body if isinstance(body, str) else json.dumps(body)
+        ok, why = decide_cart(req["method"], req["url"], False, text, policy, headers=req.get("headers"))
+        seen.append((req["method"], urlsplit(req["url"]).path, ok, why))
+        assert ok, (req["url"], why)
+        return real(page, req)
+
+    monkeypatch.setattr(browser, "fetch_in_page", guarded)
+    shop.cart = {"butter": 2}
+    out = run_fill(shop, plan=[add("p1", 2), ask_item()], ask=lambda q, c: "c2")
+    assert out["status"] == "done"
+    assert ("POST", "/api/cart/add", True, "cart add") in seen
