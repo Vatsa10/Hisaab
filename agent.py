@@ -21,6 +21,7 @@ import llm
 import metering
 import recipes
 from browser import SITES, SessionExpired, SiteThrottled, fetch_in_page, goto, home_url, scrub_headers
+from cart_guard import forbidden_category
 from guard import BLOCKED_URL, redact_url
 
 log = logging.getLogger("agent")
@@ -260,6 +261,33 @@ def click_refusal(el: dict, login: bool = False) -> str | None:
     return None
 
 
+# Cart learning (Plan 6): may click "Add" / "+" (even inside a form) and pick a location, never anything else.
+CART_CLICK_BLOCK = re.compile(
+    r"\b(check ?out|pay\w*|place (the )?order|proceed|confirm order|remove|delete|clear|empty|coupon|apply|wallet|"
+    r"log ?out|sign ?out|cancel\w*|reorder|buy again|(add|new|edit|save|change|update) (new )?address)\b", re.I)
+# Beyond the plan's list: icon-only "-" buttons labelled by what they do, plural / promo wording, cart resets
+# ("Replace cart?", "Start afresh"), wishlists, instant buys, logins and wallet credit.
+CART_CLICK_EXTRA = re.compile(
+    r"\b(decrease|decrement|reduce|minus|subtract|coupons|wallets|vouchers?|promo\w*|reset|replace|afresh|"
+    r"start afresh|wishlist|save for later|buy now|order now|log ?in|sign ?in|redeem|cash|wallet|tips?|"
+    r"donat\w*|swiggy money|cashback|zepto pass|swiggy one|subscri\w*|gift ?wrap\w*)\b|\w*cash\b", re.I)
+# A bare minus, times / close cross or bin glyph: lowers a quantity or removes a line.
+BARE_MINUS = re.compile(r"^\s*(?:[-\u2212\u2013\u00d7\u2715]|\U0001F5D1\ufe0f?)\s*$")
+
+
+def cart_click_refusal(el: dict) -> str | None:
+    """Why the cart learner must not click an element, or None. Submit buttons are allowed ("Add" sits in forms)."""
+    texts = [str(el.get(k) or "") for k in ("text", "label")]
+    blob = " ".join(texts)
+    if CART_CLICK_BLOCK.search(blob) or CART_CLICK_EXTRA.search(blob):
+        return f"text looks like a checkout, removal or account action: {blob[:60]!r}"
+    if any(BARE_MINUS.match(t) for t in texts):
+        return "a minus, cross or bin button lowers or removes a cart line"
+    if el.get("href") and (cat := forbidden_category(el["href"], None, False)):
+        return f"link points to a forbidden URL ({cat})"
+    return None
+
+
 def site_allows_host(site: str, url: str) -> bool:
     base = urlsplit(SITES[site]["home"]).hostname.removeprefix("www.")
     host = urlsplit(url).hostname or ""
@@ -373,6 +401,10 @@ class Discovery:
             self.GOAL = f"{self.GOAL} Target: {goal}"
         self.done = None
 
+    def refuse_click(self, el: dict) -> str | None:
+        """The click policy for this agent; subclasses (the cart learner) swap it."""
+        return click_refusal(el, self.login)
+
     # --- actions (also exposed to Claude as tools) ---
 
     def prompt(self, text: str, kind: str = "question") -> str:
@@ -431,7 +463,7 @@ class Discovery:
         el = self.refs.get(element_ref)
         if not el:
             return {"error": "unknown ref"}
-        if why := click_refusal(el, self.login):
+        if why := self.refuse_click(el):
             return {"error": f"refused: {why}"}
         how = click_ref(self.page, element_ref)
         self.follow_new_tab()
@@ -501,7 +533,7 @@ class Discovery:
 
     def auto_load_more(self) -> bool:
         """Code, not the model, clicks a visible 'Load More' / 'Next' / next page number (as with the OTP)."""
-        elements = [e for e in self.snap["elements"] if not click_refusal(e, self.login)]
+        elements = [e for e in self.snap["elements"] if not self.refuse_click(e)]
         nums = sorted(int(e["text"].strip()) for e in elements if PAGE_NUMBER.match(e.get("text") or ""))
         target = (next((e for e in elements if MORE_BUTTON.search(e.get("text") or "")), None) or
                   next((e for e in elements if nums and (e.get("text") or "").strip() == str(nums[0])), None))

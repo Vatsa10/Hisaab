@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+from cart_guard import CartGuard
 from guard import Guard
 
 log = logging.getLogger("browser")
@@ -321,10 +322,21 @@ def _wait_for_cdp(port: int, proc: subprocess.Popen, timeout: float = 20) -> Non
     raise RuntimeError("Chrome did not open its debugging port in time")
 
 
+def _bypass_service_workers(context, page, done: set[int]) -> None:
+    """Cart mode: make the page's requests bypass service workers, so every fetch goes through context.route."""
+    if id(page) in done:
+        return
+    session = context.new_cdp_session(page)
+    session.send("Network.enable")
+    session.send("Network.setBypassServiceWorker", {"bypass": True})
+    done.add(id(page))
+
+
 @contextlib.contextmanager
 def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
               profile_dir: Path | None = None, location: dict | None = None,
-              proxy_server: str | None = None, block_media: bool = False):
+              proxy_server: str | None = None,
+              block_media: bool = False, cart_policy=None):
     """Yield (context, page, guard, capture) for a site's persistent profile.
 
     profile_dir / location override the per-site profile folder and the saved delivery location (per-user runs);
@@ -332,13 +344,21 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
     block_media aborts image/media/font requests (user syncs, to save proxy bytes); the guard ignores it in
     login mode.
 
+    cart_policy (a cart_guard.CartPolicy) installs the add-only CartGuard instead of the read-only Guard; it is
+    refused together with login_mode, before Chrome starts. block_media applies to the CartGuard.
+
     Chrome is started as a normal browser (no --enable-automation, so no "controlled by automated
     test software" mode that bot filters like Swiggy's reject) and Playwright attaches over CDP.
     """
+    if login_mode and cart_policy is not None:
+        raise ValueError("cart mode cannot log in")
     cfg = SITES[site]
     profile = (profile_dir or PROFILES / cfg["profile"]).resolve()
     profile.mkdir(parents=True, exist_ok=True)
-    guard, capture = Guard(allowlist, login_mode, block_media), Capture()
+    cart_mode = cart_policy is not None
+    guard = (CartGuard(cart_policy, block_media, site=site) if cart_mode
+             else Guard(allowlist, login_mode, block_media))
+    capture = Capture()
     loc = effective_location(location)
     port = _free_port()
     chrome_args = [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
@@ -370,11 +390,32 @@ def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool =
                 context.set_geolocation({"latitude": loc["lat"], "longitude": loc["lon"]})
             guard.install(context)
             capture.install(context)
+            on_page = None
+            if cart_mode:
+                # Service-worker fetches skip context.route: every page (and any page opened later) bypasses them.
+                bypassed: set[int] = set()
+                for p in context.pages:
+                    _bypass_service_workers(context, p, bypassed)  # raises: never run cart mode unguarded
+
+                def on_page(p):
+                    try:
+                        _bypass_service_workers(context, p, bypassed)
+                    except Exception:
+                        log.warning("service-worker bypass failed on a new page; closing it")
+                        with contextlib.suppress(Exception):
+                            p.close()
+
+                context.on("page", on_page)
             page = context.pages[0] if context.pages else context.new_page()
+            if cart_mode:
+                _bypass_service_workers(context, page, bypassed)
             try:
                 yield context, page, guard, capture
             finally:
                 try:  # detach handlers first so in-flight responses don't raise CancelledError on close
+                    if cart_mode:
+                        context.remove_listener("page", on_page)
+                        context.remove_listener("response", guard._on_response)
                     context.remove_listener("response", capture._on_response)
                     context.unroute_all(behavior="ignoreErrors")
                     cdp.send("Browser.close")
