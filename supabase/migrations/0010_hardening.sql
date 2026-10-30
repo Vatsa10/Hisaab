@@ -20,6 +20,7 @@ revoke all on site_backoff from anon, authenticated;
 grant all on site_backoff to service_role;
 
 alter table recipes add column if not exists paused_changed_at timestamptz;
+alter table recipes add column if not exists paused_reason text check (paused_reason in ('auto', 'manual'));
 create or replace function recipes_paused_changed() returns trigger language plpgsql as $$
 begin
   if new.paused is distinct from old.paused then new.paused_changed_at := now(); end if;

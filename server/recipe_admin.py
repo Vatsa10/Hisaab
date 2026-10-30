@@ -323,18 +323,19 @@ def mark_drift(conn, site: str, kind: str, note: str) -> bool:
     ).rowcount == 1
 
 
-def pause_site(conn, site: str, kind: str, note: str) -> bool:
+def pause_site(conn, site: str, kind: str, note: str, reason: str = "manual") -> bool:
     """Pause the site: the scheduler skips it and manual refresh is refused until it is resumed or a recipe
     is published. False when the site has no recipe row (never learned: nothing to pause; its jobs already
-    fail as no_recipe). No placeholder row is ever created."""
-    return conn.execute("UPDATE recipes SET paused=true, health_note=%s WHERE site=%s AND kind=%s",
-                        (note, site, kind)).rowcount == 1
+    fail as no_recipe). No placeholder row is ever created. `reason` is "manual" (an admin) or "auto" (the
+    error budget or drift); admin site health reports it."""
+    return conn.execute("UPDATE recipes SET paused=true, paused_reason=%s, health_note=%s WHERE site=%s AND kind=%s",
+                        (reason, note, site, kind)).rowcount == 1
 
 
 def resume_site(conn, site: str, kind: str) -> bool:
     """The admin resumes the site: unpaused and healthy again, so syncs retry the recipe (a new drift marks it
     unhealthy again). False when the site has no recipe row."""
-    return conn.execute("UPDATE recipes SET paused=false, healthy=true, health_note=NULL WHERE site=%s AND kind=%s",
+    return conn.execute("UPDATE recipes SET paused=false, paused_reason=NULL, healthy=true, health_note=NULL WHERE site=%s AND kind=%s",
                         (site, kind)).rowcount == 1
 
 

@@ -135,3 +135,57 @@ def test_main_once_runs_one_tick(pg, monkeypatch):
     monkeypatch.setattr(scheduler, "tick", lambda *a, **k: calls.append(1) or real(*a, **k))
     assert scheduler.main(once=True) == 0
     assert len(calls) == 1 and len(jobs(pg)) == 1
+
+
+def _failed_syncs(pg, n, site="zepto"):
+    for _ in range(n):
+        pg.execute("insert into jobs (user_id, type, site, profile, status, error, created_at, finished_at) "
+                   "values (%s,'sync',%s,%s,'failed','RuntimeError: x',%s,%s)",
+                   (U, site, site, NOW - timedelta(hours=1), NOW - timedelta(hours=1)))
+
+
+def test_tick_pauses_site_over_error_budget_and_emails_admins(pg):
+    pg.execute("insert into admins (email) values ('a@x.com')")
+    pg.execute("insert into recipes (site, kind, recipe) values ('zepto','orders','{}')")
+    _failed_syncs(pg, 10)
+    r = scheduler.tick(pg, S(), NOW)
+    assert r["paused_sites"] == [["zepto", "orders"]]
+    assert pg.execute("select paused from recipes").fetchone() == (True,)
+    assert pg.execute("select kind from notifications where kind='error_budget'").fetchall() == [("error_budget",)]
+    assert scheduler.tick(pg, S(), NOW)["paused_sites"] == []
+
+
+def test_tick_sends_needs_login_reminder_once(pg):
+    pg.execute("insert into connections (user_id, site, status, needs_login_at) values (%s,'zepto','needs_login',%s)",
+               (U, NOW - timedelta(hours=73)))
+    pg.execute("insert into connections (user_id, site, status, needs_login_at) values (%s,'blinkit','needs_login',%s)",
+               (U, NOW - timedelta(hours=10)))
+    assert scheduler.tick(pg, S(), NOW)["reminders"] == 1
+    assert scheduler.tick(pg, S(), NOW + timedelta(hours=1))["reminders"] == 0
+    assert scheduler.tick(pg, S(), NOW + timedelta(hours=100))["reminders"] == 1  # blinkit, now past 72h
+    assert pg.execute("select count(*) from notifications where kind='needs_login_reminder'").fetchone() == (2,)
+
+
+def test_tick_skips_cooling_site(pg):
+    from server import site_health
+    conn_row(pg, "zepto")
+    conn_row(pg, "blinkit")
+    site_health.record_throttle(pg, "zepto", "rate_limited", 0, S(), now=NOW, rand=lambda: 0)
+    assert scheduler.due_connections(pg, NOW, 24) == [(U, "blinkit")]
+    assert scheduler.tick(pg, S(), NOW)["enqueued"] == 1
+    assert scheduler.due_connections(pg, NOW + timedelta(minutes=5), 24) == [(U, "zepto")]
+
+
+def test_tick_result_has_new_keys(pg):
+    r = scheduler.tick(pg, S(), NOW)
+    assert r["paused_sites"] == [] and r["reminders"] == 0
+    assert {"skipped", "level", "enqueued", "sent"} <= set(r)
+
+
+def test_main_checks_hosted_config(monkeypatch):
+    seen = []
+    monkeypatch.setattr("server.config.check_hosted", lambda s, role: seen.append(role))
+    monkeypatch.setattr(scheduler, "settings", lambda: S())
+    monkeypatch.setattr(scheduler.psycopg, "connect", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert scheduler.main(once=True) == 1
+    assert seen == ["scheduler"]

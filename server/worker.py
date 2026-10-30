@@ -301,7 +301,7 @@ RELEARN_FAILED_BODY = ("Its order recipe stopped working and the automatic re-le
 def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str) -> None:
     """Pause the site's orders recipe and email every admin (once per site per IST day)."""
     try:
-        recipe_admin.pause_site(conn, site, "orders", note)
+        recipe_admin.pause_site(conn, site, "orders", note, reason="auto")
         notify.alert_admins(conn, kind="site_paused", title=f"{_app(site)} sync paused", body=body,
                             dedupe_key=f"site_paused:{site}:{usage.today(tz=s.app_tz)}")
     except Exception as e:

@@ -132,7 +132,7 @@ def check_error_budget(conn, s: Settings, now: datetime) -> list[tuple[str, str]
             continue
         what = "syncs" if kind == "orders" else "price checks"
         note = f"Paused automatically: {failed} of {total} {what} failed in the last {h} hours."
-        recipe_admin.pause_site(conn, site, kind, note)
+        recipe_admin.pause_site(conn, site, kind, note, reason="auto")
         notify.alert_admins(
             conn, kind="error_budget",
             title=f"{_app(site)} {'sync' if kind == 'orders' else 'prices'} paused: too many failures",

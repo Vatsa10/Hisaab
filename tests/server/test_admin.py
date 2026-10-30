@@ -91,3 +91,19 @@ def test_site_health_counts_last_7_days(pg):
     assert (b["version"], b["learned_at"], b["healthy"], b["paused"]) == (None, None, True, False)
     assert (b["syncs_ok_7d"], b["syncs_failed_7d"], b["last_ok_at"], b["admin_connected"]) == (0, 0, None, False)
     assert admin.site_health(pg, NOW, B)[0]["admin_connected"] is False
+
+
+def test_site_health_paused_reason_auto_manual(pg):
+    from server import recipe_admin
+    add_user(pg, A, "owner@example.com")
+    store.put_recipe(pg, "zepto", {"endpoint": "https://www.zepto.com/api/orders"})
+    store.put_recipe(pg, "blinkit", {"endpoint": "https://blinkit.com/api/orders"})
+    store.put_recipe(pg, "swiggy", {"endpoint": "https://www.swiggy.com/api/orders"})
+    recipe_admin.pause_site(pg, "zepto", "orders", "n", reason="auto")
+    recipe_admin.pause_site(pg, "blinkit", "orders", "n")
+    rows = {r["site"]: r for r in admin.site_health(pg, NOW, A) if r["kind"] == "orders"}
+    assert rows["zepto"]["paused_reason"] == "auto" and rows["blinkit"]["paused_reason"] == "manual"
+    assert rows["swiggy"]["paused_reason"] is None and rows["zomato"]["paused_reason"] is None
+    recipe_admin.resume_site(pg, "zepto", "orders")
+    rows = {r["site"]: r for r in admin.site_health(pg, NOW, A) if r["kind"] == "orders"}
+    assert rows["zepto"]["paused_reason"] is None

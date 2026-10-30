@@ -108,7 +108,7 @@ def site_health(conn, now: datetime, admin_user_id: str) -> list[dict]:
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(
             "SELECT s.site, 'orders' AS kind, r.version, r.learned_at, coalesce(r.healthy, true) AS healthy, "
-            "coalesce(r.paused, false) AS paused, r.health_note, "
+            "coalesce(r.paused, false) AS paused, CASE WHEN r.paused THEN coalesce(r.paused_reason, 'manual') END AS paused_reason, r.health_note, "
             "coalesce(j.ok, 0)::int AS syncs_ok_7d, coalesce(j.failed, 0)::int AS syncs_failed_7d, "
             "j.last_ok_at, coalesce(c.status = 'connected', false) AS admin_connected "
             "FROM unnest(%s::text[]) WITH ORDINALITY AS s(site, n) "
@@ -130,7 +130,7 @@ def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> 
     rows = [(s, "search", "products") for s in cart.SEARCH_SITES]
     rows += [(s, k, k) for s in cart.FOOD_SITES for k in cart.FOOD_KINDS]
     recipes = {(r[0], r[1]): r[2:] for r in conn.execute(
-        "SELECT site, kind, version, learned_at, healthy, paused, health_note FROM recipes")}
+        "SELECT site, kind, version, learned_at, healthy, paused, health_note, paused_reason FROM recipes")}
     outcomes = {(r[0], r[1]): r[2:] for r in conn.execute(
         "SELECT site, coalesce(payload->>'op', ''), "
         "count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed'), "
@@ -140,10 +140,11 @@ def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> 
         "SELECT site FROM connections WHERE user_id=%s AND status='connected'", (str(admin_user_id),))}
     out = []
     for site, kind, op in rows:
-        version, learned_at, healthy, paused, note = recipes.get((site, kind), (None, None, True, False, None))
+        version, learned_at, healthy, paused, note, reason = recipes.get((site, kind), (None, None, True, False, None, None))
         ok, failed, last_ok = outcomes.get((site, op), (0, 0, None))
         out.append({"site": site, "kind": kind, "op": op, "db_site": cart.db_site(site), "version": version, "learned_at": learned_at,
                     "healthy": bool(healthy), "paused": bool(paused), "health_note": note,
+                    "paused_reason": (reason or "manual") if paused else None,
                     "syncs_ok_7d": int(ok), "syncs_failed_7d": int(failed), "last_ok_at": last_ok,
                     "admin_connected": cart.db_site(site) in connected})
     return out

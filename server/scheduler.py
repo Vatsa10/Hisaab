@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
-from server import budget, jobs, notify
+from server import budget, config, jobs, notify, session, site_health
 from server.config import Settings, settings
 
 log = logging.getLogger("scheduler")
@@ -21,7 +21,8 @@ MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augus
 def due_connections(conn, now: datetime, interval_h: int) -> list[tuple[str, str]]:
     """Connections whose scheduled sync is due: connected (or errored after at least one sync), last synced more than
     interval_h ago, no sync/connect job active or created within interval_h (so a failed run is not retried the same
-    interval), and an orders recipe that is not unhealthy or paused (no recipe row does not exclude)."""
+    interval), an orders recipe that is not unhealthy or paused (no recipe row does not exclude), and a site that is not
+    cooling down after throttling."""
     iv = timedelta(hours=interval_h)
     rows = conn.execute(
         "SELECT c.user_id, c.site FROM connections c "
@@ -33,7 +34,7 @@ def due_connections(conn, now: datetime, interval_h: int) -> list[tuple[str, str
         "  AND (NOT r.healthy OR r.paused)) "
         "ORDER BY c.last_synced_at NULLS FIRST, c.user_id, c.site",
         (now - iv, now - iv)).fetchall()
-    return [(str(u), site) for u, site in rows]
+    return [(str(u), site) for u, site in rows if site_health.cooldown_until(conn, site, now) is None]
 
 
 def _month_names(month: str) -> tuple[str, str]:
@@ -68,8 +69,11 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
                 enqueued += 1
             except jobs.Conflict:
                 pass
+        paused = [[site, kind] for site, kind in site_health.check_error_budget(conn, s, now)]
+        reminders = session.remind(conn, s, now)
         sent = notify.dispatch(conn, s)
-        return {"skipped": False, "level": state.level, "enqueued": enqueued, "sent": sent}
+        return {"skipped": False, "level": state.level, "enqueued": enqueued, "sent": sent,
+                "paused_sites": paused, "reminders": reminders}
     finally:
         conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 
@@ -77,6 +81,7 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
 def main(once: bool = False, max_loops: int | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     s = settings()
+    config.check_hosted(s, "scheduler")
     stop = threading.Event()
     old = None
     if threading.current_thread() is threading.main_thread():
@@ -89,8 +94,9 @@ def main(once: bool = False, max_loops: int | None = None) -> int:
                 if conn is None:
                     conn = psycopg.connect(s.database_url, autocommit=True)
                 r = tick(conn, s)
-                log.info("tick skipped=%s level=%s enqueued=%s sent=%s", r.get("skipped"), r.get("level"),
-                         r.get("enqueued"), r.get("sent"))
+                log.info("tick skipped=%s level=%s enqueued=%s sent=%s paused=%s reminders=%s", r.get("skipped"),
+                         r.get("level"), r.get("enqueued"), r.get("sent"), len(r.get("paused_sites", [])),
+                         r.get("reminders"))
             except Exception as e:
                 log.error("tick failed (%s)", type(e).__name__)
                 if conn is not None:
