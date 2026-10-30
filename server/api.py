@@ -422,3 +422,6 @@ app.include_router(admin_api.build_router(current_user, get_conn))
 from server import cart_api  # noqa: E402
 
 app.include_router(cart_api.router)
+from server import food_api  # noqa: E402
+
+app.include_router(food_api.router)
