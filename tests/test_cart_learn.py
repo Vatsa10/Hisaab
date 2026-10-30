@@ -200,7 +200,8 @@ def test_location_permission_needs_approval(site):
 def test_preapproved_entries_not_asked_again(site):
     pre = [{"url_regex": r"^https://www\.zepto\.com/api/user/location/select$", "why": "pick location",
             "op": "location"},
-           {"url_regex": r"^https://www\.zepto\.com/api/cart/add$", "why": "add to cart", "op": "cart"}]
+           {"url_regex": r"^https://www\.zepto\.com/api/cart/add$", "why": "add to cart", "op": "cart",
+            "qty_path": "quantity"}]
     asked = []
     out = learn(approve=lambda entries: asked.append(entries) or True, preapproved=pre)
     assert asked == []
@@ -209,8 +210,17 @@ def test_preapproved_entries_not_asked_again(site):
     assert site.guard.policy.cart[0]["url_regex"] == pre[1]["url_regex"]
 
 
+def test_proposed_cart_entry_carries_qty_path(site):
+    asked = []
+    out = learn(approve=lambda entries: asked.append(entries) or True)
+    cart_entry = next(e for batch in asked for e in batch if e["op"] == "cart")
+    assert cart_entry["qty_path"] == "quantity"
+    assert out["recipe"]["cart_allowlist"][0]["qty_path"] == out["recipe"]["add"]["qty_path"]
+
+
 def test_preapproved_entries_pass_guard_checks(site):
-    for bad in ({"url_regex": r"^https://evil\.example/api/cart/add$", "why": "x", "op": "cart"},
+    for bad in ({"url_regex": r"^https://evil\.example/api/cart/add$", "why": "x", "op": "cart", "qty_path": "q"},
+                {"url_regex": r"^https://www\.zepto\.com/api/cart/add$", "why": "x", "op": "cart"},  # no qty_path
                 {"url_regex": r"^https://www\.zepto\.com/.*$", "why": "x", "op": "read"}):
         with pytest.raises(RecipeError, match="preapproved"):
             learn(preapproved=[bad])

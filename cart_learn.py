@@ -407,6 +407,12 @@ def _add_requests(items: list[dict], guard, ids: list[str]) -> list[dict]:
             and any(i in c["url"] or i in (c.get("request_body") or "") for i in ids)]
 
 
+def _qty_path(c: dict, ids: list[str], store_id) -> str | None:
+    """Where the first add request carries quantity 1 (a number, not the product or store id)."""
+    skip = {str(i) for i in ids} | ({str(store_id)} if store_id is not None else set())
+    return _value_path(c, lambda v: _num(v) == 1 and str(v) not in skip)
+
+
 def _learn_add(page, guard, capture, products: list[tuple[str, str]], store_id, approve) -> tuple[dict, str]:
     ids = [p[0] for p in products]
     row = (products[0][1], [n for _, n in products[1:]])  # every click targets the probe product's row only
@@ -414,6 +420,12 @@ def _learn_add(page, guard, capture, products: list[tuple[str, str]], store_id, 
     if not _click(page, ADD_BUTTON, row):
         raise RecipeError("no Add button found")
     entries = propose(guard.blocked, ids, "cart", "add the planned product to the cart")
+    for e in entries:  # the guard only accepts a cart entry that names where its quantity is (add-only check)
+        b = next(b for b in guard.blocked if (b.get("method") or "").upper() == "POST" and matches(e["url_regex"], b["url"]))
+        qp = _qty_path({"url": b["url"], "request_body": b.get("body")}, ids, store_id)
+        if qp is None:
+            raise RecipeError("couldn't find the quantity in the add request")
+        e["qty_path"] = qp
     if not entries and not _add_requests(capture.items, guard, ids):
         raise RecipeError("the Add button sent no cart request")
     _ask(guard, "cart", entries, approve, "cart permission rejected")
@@ -432,7 +444,7 @@ def _learn_add(page, guard, capture, products: list[tuple[str, str]], store_id, 
     pid = next(i for i in ids if _value_path(first, _same(i)))
     pid_path = _value_path(first, _same(pid))
     sid_path = _value_path(first, _same(store_id)) if store_id is not None else None
-    qty_path = _value_path(first, lambda v: _num(v) == 1 and str(v) not in (str(pid), str(store_id)))
+    qty_path = _qty_path(first, [pid], store_id)
     if qty_path is None or qty_path in (pid_path, sid_path):
         raise RecipeError("couldn't find the quantity in the add request")
     mode = qty_mode_from(_value_at(first, qty_path), _value_at(second, qty_path))
