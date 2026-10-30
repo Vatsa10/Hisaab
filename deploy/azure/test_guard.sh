@@ -40,4 +40,20 @@ check "exclusion then !*"             1 'deploy\n!*\n'
 check "seed negation before exclusion" 0 '!recipes/*.seed.json\ndeploy/azure/.env.deploy\n'
 check "comment then negation ignored" 0 'deploy\n# !**\n'
 
+# git_tree_clean: each case runs in its own throwaway repo.
+repo_case() { # name expected(0|1) setup-command
+  local d got
+  d="$(mktemp -d)"
+  (cd "$d" && git init -q . && git config user.email t@example.invalid && git config user.name t \
+    && echo a > tracked.txt && git add tracked.txt && git commit -q -m init && eval "$3")
+  if git_tree_clean "$d"; then got=0; else got=1; fi
+  rm -rf "$d"
+  if [ "$got" -eq "$2" ]; then echo "PASS $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi
+}
+repo_case "clean repo"     0 ':'
+repo_case "untracked file" 1 'echo b > new.txt'
+repo_case "modified file"  1 'echo b >> tracked.txt'
+repo_case "staged file"    1 'echo b >> tracked.txt && git add tracked.txt'
+repo_case "not a repo"     1 'rm -rf .git'
+
 [ "$fails" -eq 0 ] && echo "ALL PASS" || { echo "$fails FAILED"; exit 1; }

@@ -28,3 +28,12 @@ dockerignore_excludes_env_deploy() {
   done < "$file"
   [ "$excluded" -eq 1 ]
 }
+
+# git_tree_clean <dir>
+# Returns 0 only when `git -C <dir> status --porcelain` prints nothing: modified, staged and untracked files all
+# count as dirty, so a deploy always matches one commit (the image tag is that commit's sha).
+git_tree_clean() {
+  local dir="$1" out
+  out="$(git -C "$dir" status --porcelain 2>/dev/null)" || return 1
+  [ -z "$out" ]
+}

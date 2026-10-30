@@ -3,11 +3,12 @@ FROM --platform=linux/amd64 python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PIP_NO_CACHE_DIR=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Kolkata
 
-# Real Google Chrome (headful, under Xvfb), fonts for Indic scripts and emoji, tini as PID 1.
+# Real Google Chrome (headful, under Xvfb), fonts for Indic scripts and emoji, tini as PID 1, tzdata for TZ.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl gnupg tini xvfb \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg tini tzdata xvfb \
         fonts-noto-core fonts-noto-color-emoji \
     && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
@@ -16,6 +17,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends google-chrome-stable \
     && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Managed Chrome policy: WebRTC may not reveal the real IP around the proxy.
+COPY docker/chrome-policies/webrtc.json /etc/opt/chrome/policies/managed/webrtc.json
 
 WORKDIR /app
 COPY requirements.txt .
