@@ -86,21 +86,177 @@ function pin(a: AppAddress): [number, number] | null {
   return a.lat != null && a.lon != null ? [a.lat, a.lon] : null;
 }
 
-export function samePlace(a: AppAddress, b: AppAddress): boolean {
-  const pa = pin(a);
-  const pb = pin(b);
-  if (pa && pb && distanceM(pa, pb) <= SAME_PLACE_M) return true;
-  const la = normLine(a.line);
-  return la !== "" && la === normLine(b.line);
+// --- Same-place matcher: a scored, classic (no LLM) rule set mirrored from server/address_match.py. Display only;
+// pricing always uses each app's own address_id. Both sides run tests/fixtures/address_pairs.json.
+export const MATCH_THRESHOLD = 0.75;
+const NEAR_M = 30;
+const FAR_M = 250;
+const PIN_VETO_FREE_M = 50;
+const W_GEO = 0.45;
+const W_TEXT = 0.55;
+const PIN_BONUS = 0.15;
+const UNIT_BONUS = 0.4;
+const ABBREV: Record<string, string> = {
+  soc: "society", apt: "apartment", apts: "apartments", flt: "flat", nr: "near", opp: "opposite", rd: "road",
+  st: "street", sec: "sector", ph: "phase", blk: "block", bldg: "building", no: "number", hno: "house number",
+};
+const PLACES = new Set(
+  ("india karnataka gujarat maharashtra delhi telangana tamil nadu kerala rajasthan haryana uttar pradesh punjab " +
+    "bengal bengaluru bangalore vadodara baroda mumbai pune hyderabad chennai kolkata ahmedabad surat gurgaon " +
+    "gurugram noida kochi jaipur").split(" "),
+);
+const FILLER = new Set("flat house number tower block wing near opposite the".split(" "));
+const GROUP_WORDS = new Set(["tower", "block", "wing"]);
+const AREA_WORDS = new Set("road street main cross lane sector phase layout nagar area".split(" "));
+const PIN_RE = /^[1-9]\d{5}$/;
+const NUM_RE = /^\d{1,5}[a-z]?$/;
+
+function tokens(text: string): string[] {
+  const s = text.normalize("NFKC").toLowerCase().replace(/[‘’'`´]/g, "");
+  const out: string[] = [];
+  for (const t of s.replace(/[^0-9a-z]+/g, " ").split(" ").filter(Boolean)) out.push(...(ABBREV[t] ?? t).split(" "));
+  return out;
+}
+
+export interface ParsedAddress {
+  pin: string | null;
+  unit: string | null;
+  tokens: string[];
+  name: string;
+}
+
+export function parseAddress(...parts: Array<string | null | undefined>): ParsedAddress {
+  const all = tokens(parts.filter(Boolean).join(" "));
+  const pin = all.find((t) => PIN_RE.test(t)) ?? null;
+  const toks = all.filter((t) => t !== pin);
+  let number = -1;
+  for (let i = 0; i < toks.length - 1; i++) {
+    if ((toks[i] === "flat" || toks[i] === "number") && NUM_RE.test(toks[i + 1]!)) {
+      number = i + 1;
+      break;
+    }
+  }
+  if (number < 0) number = toks.findIndex((t) => NUM_RE.test(t));
+  let tower: string | null = null;
+  const used = new Set<number>();
+  for (let i = 0; i < toks.length && tower === null; i++) {
+    if (!GROUP_WORDS.has(toks[i]!)) continue;
+    for (const j of [i + 1, i - 1]) {
+      const c = toks[j];
+      if (c !== undefined && j >= 0 && c.length <= 2 && !FILLER.has(c) && j !== number) {
+        tower = c;
+        used.add(j);
+        break;
+      }
+    }
+  }
+  if (tower === null && number > 0 && /^[a-z]$/.test(toks[number - 1]!)) {
+    tower = toks[number - 1]!;
+    used.add(number - 1);
+  }
+  const unit = number >= 0 ? (tower ?? "") + toks[number]! : null;
+  if (number >= 0) used.add(number);
+  const rest = toks.filter((t, i) => !used.has(i) && !PLACES.has(t) && !FILLER.has(t));
+  return { pin, unit, tokens: rest, name: rest.filter((t) => !AREA_WORDS.has(t)).join(" ") };
+}
+
+export function levenshteinRatio(a: string, b: string): number {
+  if (!a && !b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur.push(Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] !== b[j - 1] ? 1 : 0)));
+    }
+    prev = cur;
+  }
+  return 1 - prev[b.length]! / Math.max(a.length, b.length);
+}
+
+type PlaceLike = Pick<AppAddress, "line" | "area" | "city" | "lat" | "lon">;
+
+/** How likely two saved addresses are one place; 0 on a veto (different flat, or different PIN beyond 50 m). */
+export function placeScore(a: PlaceLike, b: PlaceLike): number {
+  const pa = parseAddress(a.line, a.area, a.city);
+  const pb = parseAddress(b.line, b.area, b.city);
+  const ga = pin(a as AppAddress);
+  const gb = pin(b as AppAddress);
+  const d = ga && gb ? distanceM(ga, gb) : null;
+  if (pa.unit && pb.unit && pa.unit !== pb.unit) return 0;
+  if (pa.pin && pb.pin && pa.pin !== pb.pin && !(d !== null && d <= PIN_VETO_FREE_M)) return 0;
+  const sa = new Set(pa.tokens);
+  const sb = new Set(pb.tokens);
+  let text = 0;
+  if (sa.size && sb.size) {
+    const inter = [...sa].filter((t) => sb.has(t)).length;
+    text = 0.5 * (inter / (sa.size + sb.size - inter)) + 0.5 * levenshteinRatio(pa.name, pb.name);
+  }
+  let total = text;
+  if (d !== null) {
+    const geo = d <= NEAR_M ? 1 : d >= FAR_M ? 0 : (FAR_M - d) / (FAR_M - NEAR_M);
+    total = W_GEO * geo + W_TEXT * text;
+  }
+  if (pa.pin && pa.pin === pb.pin) total += PIN_BONUS;
+  if (pa.unit && pa.unit === pb.unit) total += UNIT_BONUS;
+  return total;
+}
+
+export function samePlace(a: PlaceLike, b: PlaceLike): boolean {
+  return placeScore(a, b) >= MATCH_THRESHOLD;
+}
+
+/**
+ * Display groups: union-find over pairs that score at least the threshold, best pair first, never two rows of one
+ * app in a group. Rows come in display order (defaults first). A group is led by its default address, else its
+ * highest-scoring member; the rest keep their order.
+ */
+export function groupRows(rows: readonly AppAddress[]): AppAddress[][] {
+  const n = rows.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const members = new Map<number, number[]>(rows.map((_, i) => [i, [i]]));
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]!]!;
+      i = parent[i]!;
+    }
+    return i;
+  };
+  const total = new Array<number>(n).fill(0);
+  const pairs: Array<[number, number, number]> = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const s = placeScore(rows[i]!, rows[j]!);
+      if (s >= MATCH_THRESHOLD) pairs.push([s, i, j]);
+    }
+  }
+  pairs.sort((p, q) => q[0] - p[0] || p[1] - q[1] || p[2] - q[2]);
+  for (const [s, i, j] of pairs) {
+    const ri = find(i);
+    const rj = find(j);
+    if (ri === rj) continue;
+    const sites = new Set(members.get(ri)!.map((k) => rows[k]!.site));
+    if (members.get(rj)!.some((k) => sites.has(rows[k]!.site))) continue;
+    parent[rj] = ri;
+    members.set(ri, [...members.get(ri)!, ...members.get(rj)!]);
+    members.delete(rj);
+    total[i]! += s;
+    total[j]! += s;
+  }
+  return [...members.values()]
+    .map((g) => [...g].sort((x, y) => x - y))
+    .sort((x, y) => x[0]! - y[0]!)
+    .map((g) => {
+      let lead = g.find((k) => rows[k]!.is_default);
+      if (lead === undefined) lead = g.reduce((best, k) => (total[k]! > total[best]! ? k : best), g[0]!);
+      return [rows[lead]!, ...g.filter((k) => k !== lead).map((k) => rows[k]!)];
+    });
 }
 
 /**
  * The user's saved addresses as picker options: one per place, default places first.
  *
- * Each group has a lead (its first row: defaults are visited first, so a default always leads its
- * group). A row joins a group only if it is the same place as that group's lead (never "same as
- * any member", so groups cannot chain across a street) and the group has no row from its app yet
- * (two flats saved on one app are two places, however close).
+ * Places are matched by the scored matcher above (flat/tower key, PIN, society name, distance), at most one row
+ * per app in a group (two flats saved on one app are two places, however close). The default leads its group.
  */
 export function groupOptions(rows: readonly AppAddress[]): AddressOption[] {
   const rank = (s: string) => {
@@ -113,12 +269,7 @@ export function groupOptions(rows: readonly AppAddress[]): AddressOption[] {
       rank(a.site) - rank(b.site) ||
       a.address_id.localeCompare(b.address_id),
   );
-  const groups: AppAddress[][] = [];
-  for (const r of sorted) {
-    const home = groups.find((g) => samePlace(r, g[0]!) && !g.some((m) => m.site === r.site));
-    if (home) home.push(r);
-    else groups.push([r]);
-  }
+  const groups = groupRows(sorted);
   return groups.map((g): AddressOption => {
     const lead = g[0]!;
     const send = pin(lead) ? lead : (g.find((m) => pin(m)) ?? lead);

@@ -1,0 +1,178 @@
+[
+ {
+  "name": "same flat written differently merges",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Flat 1204, B Wing, Shanti Soc",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "blinkit",
+   "address_id": "blinkit1",
+   "line": "B-1204 Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.33105,
+   "lon": 73.15103
+  },
+  "same": true
+ },
+ {
+  "name": "two flats in one society stay apart",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Flat 1204, B Wing, Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "blinkit",
+   "address_id": "blinkit1",
+   "line": "Flat 1205, B Wing, Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.33102,
+   "lon": 73.15101
+  },
+  "same": false
+ },
+ {
+  "name": "same society 40 m apart, no unit, text agrees",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "swiggy",
+   "address_id": "swiggy1",
+   "line": "Shanti Society, Gorwa",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.33136,
+   "lon": 73.151
+  },
+  "same": true
+ },
+ {
+  "name": "40 m apart, text differs",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "swiggy",
+   "address_id": "swiggy1",
+   "line": "Om Heights",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.33136,
+   "lon": 73.151
+  },
+  "same": false
+ },
+ {
+  "name": "different PIN 100 m apart",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Shanti Society 390016",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "swiggy",
+   "address_id": "swiggy1",
+   "line": "Shanti Society 390019",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.3319,
+   "lon": 73.151
+  },
+  "same": false
+ },
+ {
+  "name": "curly apostrophe, commas, caps",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "FLAT 12, ,, ST. MARY’S SOC.,",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "zomato",
+   "address_id": "zomato1",
+   "line": "flat 12 st marys society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.33102,
+   "lon": 73.15101
+  },
+  "same": true
+ },
+ {
+  "name": "far apart same text",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "swiggy",
+   "address_id": "swiggy1",
+   "line": "Shanti Society",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.35,
+   "lon": 73.17
+  },
+  "same": false
+ },
+ {
+  "name": "no pin on one side, same text",
+  "a": {
+   "site": "zepto",
+   "address_id": "zepto1",
+   "line": "Tower B, Prestige Tech Park",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": 22.331,
+   "lon": 73.151
+  },
+  "b": {
+   "site": "zomato",
+   "address_id": "zomato1",
+   "line": "Tower B,  Prestige Tech Park!",
+   "area": "Gorwa",
+   "city": "Vadodara",
+   "lat": null,
+   "lon": null
+  },
+  "same": true
+ }
+]

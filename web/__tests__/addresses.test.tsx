@@ -25,7 +25,15 @@ vi.mock("@/lib/addresses", async (importOriginal) => {
 import { ApiError } from "@/lib/api";
 import { AddressPicker } from "@/components/account/AddressPicker";
 import { AddressRow } from "@/components/connect/AddressRow";
-import { groupOptions, type AppAddress } from "@/lib/addresses";
+import vectors from "../../tests/fixtures/address_pairs.json";
+import { groupOptions, samePlace, type AppAddress } from "@/lib/addresses";
+
+describe("samePlace (shared vectors with server/address_match.py)", () => {
+  it.each(vectors.map((v) => [v.name, v] as const))("%s", (_name, v) => {
+    expect(samePlace(v.a as AppAddress, v.b as AppAddress)).toBe(v.same);
+    expect(samePlace(v.b as AppAddress, v.a as AppAddress)).toBe(v.same);
+  });
+});
 
 function addr(over: Partial<AppAddress>): AppAddress {
   return {
@@ -75,15 +83,13 @@ describe("groupOptions", () => {
     ]);
   });
 
-  it("compares with the group's lead, so places 140 m apart do not chain", () => {
-    // A, B, C on three apps, each 140 m north of the last: A-B and B-C are "the same place", A-C is not.
-    const step = 140 / 111_195; // degrees of latitude
+  it("puts at most one row per app in a group, even when more rows match", () => {
     const opts = groupOptions([
-      addr({ site: "zepto", address_id: "a", line: "A", lat: 12.9 }),
-      addr({ site: "blinkit", address_id: "b", line: "B", lat: 12.9 + step }),
-      addr({ site: "swiggy", address_id: "c", line: "C", lat: 12.9 + 2 * step }),
+      addr({ site: "zepto", address_id: "a", line: "Shanti Society", lat: 12.9 }),
+      addr({ site: "zepto", address_id: "b", line: "Shanti Society", lat: 12.9 }),
+      addr({ site: "swiggy", address_id: "c", line: "Shanti Society", lat: 12.9 }),
     ]);
-    expect(opts.map((o) => o.members.map((m) => m.address_id))).toEqual([["a", "b"], ["c"]]);
+    expect(opts.map((o) => o.members.length).sort()).toEqual([1, 2]);
   });
 
   it("never puts two addresses from one app in one place", () => {

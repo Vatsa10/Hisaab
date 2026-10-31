@@ -553,6 +553,31 @@ def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, pro
         log.warning("job %s: saved addresses not refreshed (%s)", job.id, type(e).__name__)
 
 
+def _address_changed(job: jobs.Job, conn, db_site: str, profile_dir: Path, proxy_server: str | None, fake: bool,
+                     address_id: str | None = None, near: tuple[float, float] | None = None) -> bool:
+    """Re-read this app's saved addresses before pricing or adding, and say whether the address this job was priced
+    or planned for is gone or its pin moved more than SAME_PLACE_M. A failed refresh keeps the last good list (so
+    it reads as unchanged); this never raises and never logs an address."""
+    try:
+        before = (addresses_store.get(conn, job.user_id, job.site, str(address_id)) if address_id
+                  else addresses_store.saved_for(conn, job.user_id, job.site, near))
+    except Exception as e:
+        log.warning("job %s: saved address not read (%s)", job.id, type(e).__name__)
+        before = None
+    with timing.Phase("addresses"):
+        _refresh_addresses(job, conn, db_site, profile_dir, proxy_server, fake)
+    if before is None:
+        return False
+    try:
+        after = addresses_store.get(conn, job.user_id, job.site, before["address_id"])
+    except Exception:
+        return False
+    if after is None:
+        return True
+    a, b = addresses_store._pin(before), addresses_store._pin(after)
+    return bool(a and b and addresses.distance_m(a, b) > addresses_store.SAME_PLACE_M)
+
+
 class _SearchEnd(Exception):
     """A search job that ends without a price: result is the app's cart_results status, error its short code."""
 
@@ -593,6 +618,10 @@ def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server
     session and the search errors for run_job to turn into results. Never logs items, queries or addresses."""
     p = job.payload or {}
     op, request_id = p.get("op"), p.get("request_id")
+    if op == "addresses":  # the picker's "Refresh addresses": one read-only fetch, nothing is priced
+        with timing.Phase("addresses"):
+            _refresh_addresses(job, conn, addresses.db_site(job.site), profile_dir, proxy_server, fake)
+        return
     if op not in ("products", "restaurants", "menu"):
         raise _SearchEnd("failed", "bad_op")
     request = None
@@ -601,6 +630,9 @@ def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server
         if request is None:
             raise _SearchEnd("failed", "request_gone")
     recipe = _search_recipe(conn, job.site, "search" if op == "products" else op)
+    if request_id and _address_changed(job, conn, addresses.db_site(job.site), profile_dir, proxy_server, fake,
+                                       p.get("address_id")):
+        raise _SearchEnd("unserviceable", "address_changed")
     location = _search_location(conn, job)
     if location is None and not request_id:  # a lookup with no saved address falls back to the profile's place
         location = _location(conn, job.user_id)
@@ -696,6 +728,11 @@ def _do_fill(job: jobs.Job, conn, s: Settings, ctx, profile_dir: Path, proxy_ser
     reach the app on the job's progress; an unanswered one is a skip. Never logs in, never logs cart contents."""
     f, recipe, search_recipe = ctx
     fid, site = f["id"], job.site
+    pl = f.get("priced_location") or {}
+    near = (pl["lat"], pl["lon"]) if pl.get("lat") is not None and pl.get("lon") is not None else None
+    if _address_changed(job, conn, addresses.db_site(site), profile_dir, proxy_server, fake, near=near):
+        fills.fail_fill(conn, fid, "address_changed", s)  # before any add: nothing was sent
+        return
     fills.mark_started(conn, fid)
     jobs.set_progress(conn, job.id, stage="starting", done=0, total=len(f["plan"]))
     prompt = make_prompt(listen(), conn, job.id, s.otp_timeout_s)

@@ -217,6 +217,16 @@ PLACE = (22.3310, 73.1510)
 LINE = "12 Main Road"
 
 
+@pytest.fixture(autouse=True)
+def _apps_keep_their_addresses(pg, monkeypatch):
+    """_world seeds each app's saved address at the user's place; the per-job address refresh must read that same
+    list back (the fake's own addresses are in Bengaluru), so a compare is priced where the test put the user."""
+    from server import addresses_store as store_
+    monkeypatch.setattr(fake_sites, "saved_addresses",
+                        lambda site: [{k: v for k, v in r.items() if k != "site"}
+                                      for r in store_._rows(pg, A, "swiggy" if site == "instamart" else site)])
+
+
 def _world(pg, connected, lat=PLACE[0], lon=PLACE[1]):
     """A user at PLACE with these apps connected (saved address there) and every compare recipe learned by the fake."""
     pg.execute("insert into profiles (user_id, address, lat, lon) values (%s,%s,%s,%s)",

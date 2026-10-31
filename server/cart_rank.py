@@ -160,8 +160,10 @@ def _cells(request: dict, site: str, matches: list) -> dict[int, dict]:
 
 # --- cards -------------------------------------------------------------------------------------------------------
 
-def _note_and_action(site: str, status: str, declined: list) -> tuple[str, dict | None]:
+def _note_and_action(site: str, status: str, declined: list, error: str | None = None) -> tuple[str, dict | None]:
     app = _app(site)
+    if status == "unserviceable" and error == "address_changed":
+        return f"Your saved address in {app} changed. Pick it again.", None
     if status == "unserviceable":
         return f"{app} doesn't deliver to this address.", None
     if status == "unavailable":
@@ -403,7 +405,7 @@ def build_summary(request: dict, results: list[dict], fee_rules: dict[str, tuple
             continue
         status = status if status in NON_OK_ORDER else "failed"
         card = _empty_card(r["site"], status)
-        card["note"], card["action"] = _note_and_action(r["site"], status, declined)
+        card["note"], card["action"] = _note_and_action(r["site"], status, declined, r.get("error"))
         other.append(_Entry(card))
 
     ok_entries.sort(key=lambda e: (e.unresolved, e.card["total"] if e.card["total"] is not None else math.inf,

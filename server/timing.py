@@ -8,7 +8,7 @@ import logging
 import time
 
 log = logging.getLogger("timing")
-PHASES = ("open", "session_check", "fetch", "parse", "store")
+PHASES = ("open", "session_check", "addresses", "fetch", "parse", "store")
 _current: contextvars.ContextVar["Recorder | None"] = contextvars.ContextVar("timing_recorder", default=None)
 
 

@@ -331,6 +331,39 @@ def refresh(site: str, user: str = Depends(current_user), conn=Depends(get_conn)
     return {"job_id": job_id, "refresh_left": left}
 
 
+ADDRESS_REFRESH_GAP_S = 120
+
+
+@app.post("/addresses/refresh", status_code=202)
+def refresh_addresses(user: str = Depends(current_user), conn=Depends(get_conn)):
+    """Re-read the user's saved addresses on their connected apps (a read-only job per app, no sync, no limit
+    slot). At most once per 2 minutes per user."""
+    with conn.transaction():
+        conn.execute("select pg_advisory_xact_lock(hashtext(%s))", (f"addr-refresh:{user}",))
+        last = conn.execute(
+            "SELECT extract(epoch from now() - max(created_at)) FROM jobs WHERE user_id=%s AND type='search' "
+            "AND payload->>'op'='addresses'", (user,)).fetchone()[0]
+        if last is not None and last < ADDRESS_REFRESH_GAP_S:
+            wait = max(1, int(ADDRESS_REFRESH_GAP_S - last) + 1)
+            raise HTTPException(429, "Addresses were just refreshed. Try again in a couple of minutes.",
+                                headers={"Retry-After": str(wait)})
+        sites = [r[0] for r in conn.execute(
+            "SELECT site FROM connections WHERE user_id=%s AND status IN ('connected','syncing') ORDER BY site",
+            (user,)).fetchall()]
+        if not sites:
+            raise HTTPException(409, "Connect an app first.")
+        queued = []
+        for site in sites:
+            if recipe_admin.is_paused(conn, site):
+                continue
+            try:
+                jobs.enqueue(conn, user, "search", site, {"op": "addresses"})
+                queued.append(site)
+            except jobs.Conflict:  # a job is already running on that app; it refreshes its own addresses
+                queued.append(site)
+    return {"sites": queued}
+
+
 @app.get("/me")
 def me(user: str = Depends(current_user), conn=Depends(get_conn)):
     return {"user_id": user, "email": admin.user_email(conn, user), "is_admin": recipe_admin.is_admin(conn, user)}

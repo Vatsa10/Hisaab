@@ -170,12 +170,22 @@ _FAKE_SECOND = {
 _FAKE_NUDGE = {"zepto": 0.0, "blinkit": 0.0002, "swiggy": -0.0002, "zomato": 0.0003}  # degrees lat, under 40 m
 
 
+def _env_sites(name: str) -> frozenset[str]:
+    return frozenset(x.strip() for x in (os.getenv(name) or "").split(",") if x.strip())
+
+
 def saved_addresses(site) -> list[dict]:
-    """Two saved addresses per app, already in addresses.normalise() form (Instamart: Swiggy's)."""
+    """Two saved addresses per app, already in addresses.normalise() form (Instamart: Swiggy's). Read live from the
+    environment, so tests can change an address between calls: FAKE_ADDRESS_MOVED_SITES (comma-separated accounts)
+    moves the home pin about a kilometre; FAKE_ADDRESS_DELETED_SITES removes the home address."""
     account = "swiggy" if site == "instamart" else site
     home = _FAKE_HOME | {"address_id": f"fake-{account}-home", "is_default": True,
                          "lat": round(_FAKE_HOME["lat"] + _FAKE_NUDGE.get(account, 0.0), 6)}
     second = _FAKE_SECOND.get(account, _FAKE_WORK) | {"address_id": f"fake-{account}-2", "is_default": False}
+    if account in _env_sites("FAKE_ADDRESS_MOVED_SITES"):
+        home["lat"] = round(home["lat"] + 0.01, 6)
+    if account in _env_sites("FAKE_ADDRESS_DELETED_SITES"):
+        return [second]
     return [home, second]
 
 

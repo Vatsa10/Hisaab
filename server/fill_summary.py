@@ -91,6 +91,8 @@ def _error_line(status: str, error: str | None, a: int, app: str, conn: str) -> 
         "needs_login": f"{conn} logged you out. Reconnect it, then try again. {n}",
         "recipe_drift": f"Filling {app} carts stopped working. We've told the team. {n}",
         "location_changed": f"{app}'s location changed again. Nothing was added.",
+        "address_changed": f"Your saved address in {app} changed. Check it in the {app} app, then check prices again. "
+                           "Nothing was added.",
         "nothing_added": f"{app} didn't accept any of the items. Nothing was added.",
     }
     return lines.get(error, f"Something went wrong. {n}")
