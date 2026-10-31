@@ -363,6 +363,9 @@ def _create(conn, user_id: str, request_id: str, site: str, plan: list[dict], pr
     """Consume a fill, insert the row and enqueue its job, all or nothing."""
     try:
         with conn.transaction():
+            # A deleted user (token still valid) gets NoSuchUser -> 401, never a foreign-key 500.
+            if conn.execute("select 1 from auth.users where id = %s for key share", (user_id,)).fetchone() is None:
+                raise jobs.NoSuchUser(user_id)
             left = limits.consume_cart_fill(conn, user_id, now, s)
             fill_id = str(conn.execute(
                 "insert into cart_fills (user_id, request_id, site, plan, priced_location, confirm_location, "

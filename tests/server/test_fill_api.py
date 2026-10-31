@@ -61,6 +61,14 @@ def test_fill_flow_returns_202_and_job(client, token_a, pg):
     assert fills_used(pg) == 1
 
 
+def test_fill_for_deleted_user_is_401_not_500(client, token_a, pg):
+    rid = ready(pg)
+    pg.execute("delete from auth.users where id = %s", (A,))
+    r = post_fill(client, token_a, rid)
+    assert r.status_code == 401
+    assert pg.execute("select count(*) from cart_fills").fetchone()[0] == 0
+
+
 def test_double_fill_is_409(client, token_a, pg):
     rid = ready(pg)
     assert post_fill(client, token_a, rid).status_code == 202
