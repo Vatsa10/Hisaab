@@ -148,6 +148,10 @@ docker run -d --rm --name "$MAILPIT_NAME" -p 127.0.0.1:1025:1025 -p 127.0.0.1:80
 STARTED_MAILPIT=1
 # Every service and the CLI send mail here, and the links in it point at the PWA of this run.
 export SMTP_HOST=127.0.0.1 SMTP_PORT=1025 APP_URL="$WEB_URL"
+# Plan 7 tunables, exported so the API, worker, scheduler and the specs all see the same ones: the error budget
+# judges a site after 5 finished syncs (not 10), and a throttled site cools down for a minute at first.
+export ERROR_BUDGET_MIN_JOBS=5 ERROR_BUDGET_MAX_FAILURE_PCT=30 ERROR_BUDGET_WINDOW_H=24
+export BACKOFF_BASE_S=60 BACKOFF_MAX_S=3600 BACKOFF_RESET_H=24
 
 # wait_for <what> <seconds> <pid or ""> <log> <command...>: poll until the command succeeds.
 wait_for() {

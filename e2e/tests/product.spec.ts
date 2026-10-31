@@ -11,7 +11,7 @@
 // 11th cancelled; Swiggy's every 3rd order is an Instamart grocery order.
 
 import { devices, expect, test, type Browser, type BrowserContextOptions, type Locator, type Page } from "@playwright/test";
-import { invite } from "../helpers/stack";
+import { accessToken as tokenFor, api as apiCall, invite, setAddress, sql, userId } from "../helpers/stack";
 
 const PASSWORD = "e2e-Passw0rd!";
 const FAKE_OTP = "123456";
@@ -545,42 +545,123 @@ test("connect flow updates live", async ({ page, browser }) => {
   }
 });
 
-// ---- speed budgets: compare -> ranked and fill -> done (fake mode, FAKE_PAGE_DELAY_S=0) -------------------------
-// These drive the cart API with the signed-in user's own token. They need the fake world to have learned grocery
-// search and cart recipes, three connected grocery apps and a saved address, so they run only when
-// E2E_SPEED_FULL=1 (the owner's local run once Plan 5/6 are seeded); connect -> synced above always runs.
+// ---- speed budgets: sync, compare -> ranked and fill -> done (fake mode) ----------------------------------------
+// These drive the cart API with the signed-in user's own token. The test seeds what it needs when the database lacks
+// it (the grocery search recipes and Zepto's cart recipe, learned and approved through the admin view like Plan 5 and
+// Plan 6 do), connects three grocery apps for a fresh user and gives them a saved address. When plan5 and plan6 ran
+// first on this database, nothing is re-learned.
+const SYNC_BUDGET_S = Number(process.env.SYNC_BUDGET_S ?? 30);
 const COMPARE_BUDGET_S = Number(process.env.COMPARE_BUDGET_S ?? 20);
 const FILL_BUDGET_S = Number(process.env.FILL_BUDGET_S ?? 30);
 const API_URL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
+const SPEED_ADDRESS = "12 Shanti Society, Gorwa, Vadodara, Gujarat";
+const ADMIN_EMAIL = (process.env.E2E_ADMIN_EMAIL || "admin@e2e.test").toLowerCase();
 
-async function accessToken(page: Page): Promise<string> {
-  const cookies = await page.context().cookies();
-  const raw = cookies
-    .filter((c) => /^sb-.*-auth-token/.test(c.name))
-    .map((c) => c.value)
-    .join("");
-  const text = raw.startsWith("base64-") ? Buffer.from(raw.slice(7), "base64").toString("utf8") : decodeURIComponent(raw);
-  return (JSON.parse(text) as { access_token: string }).access_token;
+function recipesReady(): boolean {
+  const n = sql<[number]>(
+    "select count(*)::int from recipes where healthy and not paused and " +
+      "((site = 'zepto' and kind in ('search','cart')) or (site = 'blinkit' and kind = 'search') or (site = 'instamart' and kind = 'search'))",
+  )[0]![0];
+  return n === 4;
 }
 
-async function api(page: Page, method: "GET" | "POST", path: string, body?: unknown) {
-  const token = await accessToken(page);
-  return page.request.fetch(`${API_URL}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
-    data: body === undefined ? undefined : JSON.stringify(body),
-  });
+/** Learn and approve the recipes the speed test prices and fills with, as the admin, when they are missing. */
+async function seedRecipes(browser: Browser): Promise<void> {
+  if (recipesReady()) return;
+  const context = await secondPhone(browser);
+  const page = await context.newPage();
+  try {
+    if (userId(ADMIN_EMAIL)) {
+      await signIn(page, ADMIN_EMAIL);
+    } else {
+      await page.goto("/login");
+      await page.getByRole("tab", { name: "Create account" }).click();
+      await page.getByLabel("Email", { exact: true }).fill(ADMIN_EMAIL);
+      await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+      await page.getByRole("button", { name: "Create account", exact: true }).click();
+      await expect(page).toHaveURL(/\/spend$/);
+    }
+    for (const app of ["Zepto", "Blinkit", "Swiggy"] as const) {
+      await page.goto("/accounts");
+      await expect(mainHeading(page, "Your apps")).toBeVisible();
+      if (await page.getByRole("button", { name: `Connect ${app}`, exact: true }).isVisible()) {
+        const sheet = await startConnect(page, app, PHONE);
+        await typeOtp(sheet, app, FAKE_OTP);
+        await waitForFirstSync(sheet, app);
+        await closeSheet(page, sheet);
+      }
+    }
+    setAddress(ADMIN_EMAIL, SPEED_ADDRESS, 22.33, 73.15); // after the connects, as plan5 does: price learning needs a place
+    await page.goto("/admin");
+    await expect(mainHeading(page, "Admin")).toBeVisible();
+    await page.getByRole("tab", { name: "Sites" }).click();
+    const learn = async (name: string, button: string, approve?: string) => {
+      const card = page.getByRole("listitem", { name, exact: true });
+      await card.getByRole("button", { name: button, exact: true }).click();
+      const done = card
+        .getByRole("status")
+        .filter({ hasText: /Recipe updated|Learn finished|Waiting for your approval in Approvals/ });
+      if (approve) {
+        const asking = card.getByRole("list", { name: "Requested POST requests" });
+        await expect(asking.or(done)).toBeVisible({ timeout: 120_000 });
+        if (await asking.isVisible()) {
+          await expect(asking).toContainText(approve);
+          await card.getByRole("button", { name: "Approve", exact: true }).click();
+        }
+      }
+      await expect(done).toBeVisible({ timeout: 120_000 });
+    };
+    await learn("Zepto grocery prices", "Learn Zepto grocery prices");
+    await learn("Blinkit grocery prices", "Learn Blinkit grocery prices");
+    await learn("Instamart grocery prices", "Learn Instamart grocery prices", "^https://fake\\.instamart\\.test/api/search$");
+    const cartCard = page
+      .getByRole("list", { name: "Cart filling", exact: true })
+      .getByRole("listitem", { name: "Zepto cart filling", exact: true });
+    await learn("Zepto cart filling", "Learn Zepto cart", "^https://fake\\.zepto\\.test/api/cart/add$");
+    await expect(cartCard).toBeVisible();
+    await page.getByRole("tab", { name: "Approvals", exact: true }).click();
+    const approval = page.getByRole("listitem", { name: /^Zepto cart,/ });
+    await expect(approval).toBeVisible();
+    await approval.getByRole("button", { name: "Approve", exact: true }).click();
+    await expect(approval).toHaveCount(0);
+    expect(recipesReady(), "the speed test could not seed its recipes").toBe(true);
+  } finally {
+    await context.close();
+  }
 }
 
-test("compare -> ranked and fill -> done stay inside their speed budgets", async ({ page }) => {
-  test.skip(process.env.E2E_SPEED_FULL !== "1", "needs seeded cart recipes, connected grocery apps and an address");
-  await signUp(page, "speed");
+/** The signed-in user's API calls (password grant, as the PWA's own session would send). */
+async function api(email: string, method: "GET" | "POST", path: string, body?: unknown) {
+  return apiCall(await tokenFor(email, PASSWORD), method, path, body);
+}
+
+test("sync, compare -> ranked and fill -> done stay inside their speed budgets", async ({ page, browser }) => {
+  test.setTimeout(900_000);
+  await seedRecipes(browser);
+  const email = await signUp(page, "speed");
+
+  // Three grocery apps: each connect -> synced inside the sync budget (from the OTP to the first sync's result).
+  for (const app of ["Zepto", "Blinkit", "Swiggy"] as const) {
+    await openTab(page, "Accounts");
+    const sheet = await startConnect(page, app, PHONE);
+    await otpField(sheet, app);
+    const start = Date.now();
+    await typeOtp(sheet, app, FAKE_OTP);
+    await waitForFirstSync(sheet, app);
+    const syncS = (Date.now() - start) / 1000;
+    console.log(`speed sync ${app} ${syncS.toFixed(1)}s`);
+    expect(syncS, `${app} sync is over its budget`).toBeLessThan(SYNC_BUDGET_S);
+    await closeSheet(page, sheet);
+  }
+  setAddress(email, SPEED_ADDRESS, 22.33, 73.15); // after the connects: a sync re-reads the apps' own addresses
+
   const compareStart = Date.now();
-  const started = await api(page, "POST", "/cart/checks", { items: [{ text: "amul butter", qty: 1 }] });
-  expect(started.status()).toBe(202);
-  const { request_id: requestId } = (await started.json()) as { request_id: string };
+  const started = await api(email, "POST", "/cart/checks", { items: [{ text: "amul butter", qty: 1 }] });
+  expect(started.status).toBe(202);
+  const requestId = started.body.request_id as string;
+  // GET .../fill answers 409 "Prices are still loading." until the check is done, then 200 with a card per app.
   await expect
-    .poll(async () => (await api(page, "GET", `/cart/checks/${requestId}/fill`)).status(), {
+    .poll(async () => (await api(email, "GET", `/cart/checks/${requestId}/fill`)).status, {
       timeout: COMPARE_BUDGET_S * 1000,
       intervals: [250],
     })
@@ -590,19 +671,17 @@ test("compare -> ranked and fill -> done stay inside their speed budgets", async
   expect(compareS, "compare is over its budget").toBeLessThan(COMPARE_BUDGET_S);
 
   const fillStart = Date.now();
-  const filled = await api(page, "POST", `/cart/checks/${requestId}/fill`, { site: "zepto" });
-  expect(filled.status()).toBe(202);
+  const filled = await api(email, "POST", `/cart/checks/${requestId}/fill`, { site: "zepto" });
+  expect(filled.status).toBe(202);
   await expect
     .poll(
       async () => {
-        const options = (await (await api(page, "GET", `/cart/checks/${requestId}/fill`)).json()) as {
-          cards?: Record<string, { state?: string }>;
-        };
-        return options.cards?.zepto?.state;
+        const res = await api(email, "GET", `/cart/checks/${requestId}/fill`);
+        return (res.body as { sites?: Record<string, { state?: string }> }).sites?.zepto?.state;
       },
       { timeout: FILL_BUDGET_S * 1000, intervals: [250] },
     )
-    .toMatch(/filled|done/);
+    .toBe("filled");
   const fillS = (Date.now() - fillStart) / 1000;
   console.log(`speed fill->done ${fillS.toFixed(1)}s`);
   expect(fillS, "fill is over its budget").toBeLessThan(FILL_BUDGET_S);

@@ -9,8 +9,16 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }));
 
 const auth = vi.hoisted(() => ({ signOut: vi.fn(async () => ({})), count: 43 }));
+// A Realtime channel that joins nothing: lib/addresses.ts and lib/jobs.ts follow their rows through it (after setAuth).
+const channel = vi.hoisted(() => {
+  const ch: { on: () => typeof ch; subscribe: () => typeof ch } = { on: () => ch, subscribe: () => ch };
+  return ch;
+});
 vi.mock("@/lib/supabase/client", () => ({
   getSupabaseBrowserClient: () => ({
+    channel: () => channel,
+    removeChannel: async () => "ok",
+    realtime: { setAuth: async () => undefined },
     auth: { signOut: auth.signOut, getSession: async () => ({ data: { session: { user: { id: "u1" } } } }) },
     from: () => ({
       select: () => ({ in: async () => ({ count: auth.count, error: null }) }),

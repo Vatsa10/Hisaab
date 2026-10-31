@@ -314,6 +314,20 @@ automatic syncs slow to every `PAUSED_SYNC_INTERVAL_H` hours (72). Set `MONTHLY_
 `CART_CHECKS_PER_DAY` for the API, worker and scheduler alike. Create the first admin with
 `python cli.py add-admin you@example.com`.
 
+### Data controls and hardening tunables
+
+Users control their data on the Accounts tab: **Disconnect an app** deletes its session and orders, and **Delete
+account** removes everything (type `DELETE`), including the sign-in. The public `/privacy` page says what is read,
+stored and who sees it. `python cli.py verify-erased <user id> <email>` proves nothing of a deleted user remains
+(`NOTHING REMAINS`).
+
+A site that rate-limits us goes into a cool-down (`BACKOFF_BASE_S` 60, doubling up to `BACKOFF_MAX_S` 3600, reset after
+`BACKOFF_RESET_H` 24 quiet hours); refresh and fill answer 503 with `Retry-After` meanwhile. The error budget pauses a
+site automatically when at least `ERROR_BUDGET_MIN_JOBS` (10) jobs in the last `ERROR_BUDGET_WINDOW_H` (24) hours
+finished and more than `ERROR_BUDGET_MAX_FAILURE_PCT` (30) percent failed; admins are emailed and resume it from the
+Sites tab. Before deploying, follow `docs/deploy-checklist.md`; the local full-product run is
+`bash scripts/e2e_local.sh` (`docs/e2e-local.md`).
+
 ## Tests
 
 ```bash

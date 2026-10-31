@@ -7,6 +7,10 @@ only for after you decide to deploy.
 Shell: Git Bash on Windows, from the repo root, Docker Desktop running. Placeholders are in `<angle brackets>`;
 never paste your real phone number or address into a file or commit.
 
+> **Supabase `DATABASE_URL` (pooler).** For the cloud checks use the **session pooler** URL (port 5432 on the pooler
+> host) with `?sslmode=require`. Not the transaction pooler on 6543: the worker `LISTEN`s for OTPs and the CLI
+> `verify-erased` needs a normal session. See `docs/deploy-checklist.md`.
+
 ## 0. Prerequisites
 
 - Python deps installed on the host (`pip install -r requirements.txt`): the token snippet and `publish-recipe` run on the host.
@@ -230,6 +234,26 @@ docker compose exec db psql -U postgres -c "select count(*) from orders where us
 Expected: `connected` with `last_synced_at` newer than in step 7; the order count the same or higher (no duplicates).
 
 PASS = steps 5-8 all matched.
+
+## Plan 7 checks on a real account
+
+Do these on a throwaway account (a spare number if you have one), after section 8 of `docs/deploy-checklist.md` passes
+the connect and refresh steps. Fake sites cannot prove the real apps.
+
+1. **Privacy.** Signed out, open `/privacy`: it reads true for your deployment (see the checklist, section 7).
+2. **Disconnect.** Accounts > Your data > Disconnect <app>. The toast says how many orders were deleted. Spend shows
+   its empty state, Accounts shows "Connect" for that app, and `select count(*) from orders where user_id = '<id>' and
+   site = '<site>'` is 0. Connect the app again: it asks for an OTP (the saved session is gone).
+3. **Delete account.** Accounts > Your data > Delete account, type `DELETE`. You land on the login page with "Your
+   account and all its data are deleted." Signing in again fails.
+4. **`verify-erased`.** With the production `DATABASE_URL` (session pooler) and `PROFILE_STORE_URL` set:
+
+   ```bash
+   python cli.py verify-erased <user id> <email>
+   ```
+
+   It must print `NOTHING REMAINS`. Anything else is a listing of what is left: stop and fix it before inviting users.
+   Note the user id before you delete (`select id from auth.users where email = '...'`).
 
 ## Useful commands
 

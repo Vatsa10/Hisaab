@@ -87,6 +87,7 @@ export interface ApiReply {
   status: number;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   body: any;
+  headers: Headers;
 }
 
 export async function api(token: string, method: string, route: string, body?: unknown): Promise<ApiReply> {
@@ -102,7 +103,7 @@ export async function api(token: string, method: string, route: string, body?: u
   } catch {
     // not JSON: keep the text
   }
-  return { status: res.status, body: parsed };
+  return { status: res.status, body: parsed, headers: res.headers };
 }
 
 // ---- the vault and the user-row locks --------------------------------------------------------------------
@@ -291,3 +292,41 @@ export function fakeStateKeys(email: string, site: string): string[] {
   return Object.keys(readFakeState(fakeStatePath(email, site), site)).sort();
 }
 
+
+// ---- Plan 7: session expiry, cool-downs, the error budget and deletion --------------------------------------
+
+/** Point a user's connection at another orders page; the fake sites end in /expired or /throttle to misbehave. */
+export function setOrdersPage(email: string, site: string, url: string): void {
+  const uid = userId(email);
+  if (!uid) throw new Error("setOrdersPage: no such user");
+  sql("update connections set orders_page_url = %s where user_id = %s::uuid and site = %s", [url, uid, site]);
+}
+
+/**
+ * `n` finished sync jobs for `site` of a throwaway user (not a real account), `failed` of them failed with `error`,
+ * all finished a minute ago: the input of the error budget. Returns the throwaway user id.
+ */
+export function insertFinishedJobs(site: string, n: number, failed: number, error: string): string {
+  const uid = sql<[string]>("select gen_random_uuid()::text")[0]![0];
+  for (let i = 0; i < n; i++) {
+    const bad = i < failed;
+    sql(
+      "insert into jobs (user_id, type, site, profile, status, error, created_at, started_at, finished_at) " +
+        "values (%s::uuid, 'sync', %s, %s, %s, %s, now() - interval '2 minutes', now() - interval '90 seconds', " +
+        "now() - interval '1 minute' - (%s * interval '1 second'))",
+      [uid, site, site, bad ? "failed" : "done", bad ? error : null, i],
+    );
+    // one_active_job only covers queued/running jobs, so finished rows of one user and site do not collide
+  }
+  return uid;
+}
+
+/** `cli.py verify-erased <user id> <email>`: "NOTHING REMAINS" once the account's data is gone (else what is left). */
+export function verifyErased(id: string, email: string): string {
+  try {
+    return python(["cli.py", "verify-erased", id, email]).trim();
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string };
+    return `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || "verify-erased failed";
+  }
+}

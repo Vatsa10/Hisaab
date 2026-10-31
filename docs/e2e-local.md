@@ -45,7 +45,7 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    and `E2E_RUN_DIR` exported), so a spec can stop it and start it again with extra switches: `restartWorker(env)` in
    `e2e/helpers/stack.ts`. The cleanup trap stops a worker a spec restarted too.
 6. **Playwright** (`e2e/`, its own `package.json` with `@playwright/test` pinned, so `web/` keeps no test
-   browser dependency) runs `e2e/tests/product.spec.ts`, `e2e/tests/plan4.spec.ts`, `e2e/tests/plan5.spec.ts` and `e2e/tests/plan6.spec.ts` on the iPhone 14 profile
+   browser dependency) runs `e2e/tests/plan4.spec.ts`, `plan5.spec.ts`, `plan6.spec.ts`, `plan7.spec.ts` and `product.spec.ts` on the iPhone 14 profile
    (WebKit, 390x844, touch).
 7. **Cleanup.** A trap stops the API, the worker and the PWA (with their child processes; `taskkill /T` on
    Windows) however the run ends, removes the Mailpit container, and stops Supabase if this run started it. Set `E2E_KEEP_SUPABASE=1` to keep it.
@@ -58,6 +58,30 @@ whether it refuses a change; the cart is kept), `readFakeCart(email, site)` and 
 fill runs inside the worker, so there is no HTTP request log: "add-only" is checked from the cart's lines, the state
 file holding only a cart, a location and a lock, and the worker log never naming a checkout or place-order call. The
 spec runs alone too: a `beforeAll` learns Zepto's grocery price recipe through the admin view when it is missing.
+
+**Plan 7 tunables.** The script exports `ERROR_BUDGET_MIN_JOBS=5` (the error budget judges a site after 5 finished
+syncs, not 10), `ERROR_BUDGET_MAX_FAILURE_PCT=30`, `ERROR_BUDGET_WINDOW_H=24`, `BACKOFF_BASE_S=60`, `BACKOFF_MAX_S=3600`
+and `BACKOFF_RESET_H=24` before it starts anything, so the API, worker, scheduler and the specs agree.
+`e2e/helpers/stack.ts` has `setOrdersPage(email, site, url)` (a fake orders page ending in `/expired` or `/throttle`
+makes the fake site log the user out or rate-limit), `insertFinishedJobs(site, n, failed, error)` (finished syncs of a
+throwaway user, the error budget's input), `verifyErased(userId, email)` (`cli.py verify-erased`) and `userId(email)`.
+
+**Speed budgets.** The last test of `product.spec.ts` always runs. It learns what it needs through the admin view when
+plan5 and plan6 have not (grocery search recipes for Zepto, Blinkit and Instamart, and Zepto's cart recipe), connects
+Zepto, Blinkit and Swiggy for a fresh user, saves an address, then asserts sync under 30 s per app
+(`SYNC_BUDGET_S`), compare to ranked under 20 s (`COMPARE_BUDGET_S`) and fill to filled under 30 s (`FILL_BUDGET_S`),
+in fake mode. It polls `GET /cart/checks/<id>/fill`: 409 while prices load, then 200 with a card per app
+(`sites.<app>.state`, `filled` once the fill ended).
+
+### `e2e/tests/plan7.spec.ts`
+
+Serial, iPhone 14: `/privacy` is public and linked from the login page; a logged-out session shows the banner "Zepto
+logged you out.", sends the email and refuses a refresh with 409 "Reconnect Zepto first."; a throttled site refuses
+with 503 and `Retry-After` and shows "Cooling down until" in the admin Sites tab; five finished syncs with three
+failures pause Blinkit automatically (admin email, "Paused automatically: 3 of 5 syncs failed"), Resume clears it and
+the same old failures do not pause it again; Disconnect Zepto deletes its orders; Delete account (type `DELETE`) ends
+at the login page with "Your account and all its data are deleted.", `cli.py verify-erased` prints `NOTHING REMAINS`
+and signing in again fails; no horizontal scroll on `/privacy` and on `/accounts` with the data card open.
 
 Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`, or `bash scripts/e2e_local.sh tests/plan4.spec.ts`.
 `E2E_SKIP_BUILD=1` reuses an earlier `web/.next` from this script instead of building again.
