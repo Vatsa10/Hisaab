@@ -27,14 +27,15 @@ import food_learn
 import food_search
 import llm
 import metering
+import recipes
 import search
 import search_learn
 import sync
 from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
-                    store, usage, vault)
+                    session, site_health, sites, store, usage, vault)
 from server import fill as fills
 from server import fill_summary
-from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, settings
+from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, check_hosted, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
 
@@ -266,18 +267,26 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
         conn, job.id, stage="syncing", orders_found=count, amount_found=round(float(amount), 2)))
     orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
                    allow_learn=False, proxy_server=proxy_server,
-                   recipe_loader=lambda site: store.get_recipe(conn, site),
+                   recipe_loader=lambda site: _bound_recipe(conn, site, own.get("orders_page_url")),
                    orders_page_url=own.get("orders_page_url"), on_progress=found_so_far,
                    block_media=block_media)
-    n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
-    total = conn.execute(
-        "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "
-        "AND coalesce(status, '') <> ALL(%s)",
-        (job.user_id, db_site, [o["order_id"] for o in orders], list(_NOT_COUNTED))).fetchone()[0]
+    with jobs.owned(conn, job.id, job.worker_id):  # nothing is written for a job that is no longer ours
+        n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
+        total = conn.execute(
+            "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "
+            "AND coalesce(status, '') <> ALL(%s)",
+            (job.user_id, db_site, [o["order_id"] for o in orders], list(_NOT_COUNTED))).fetchone()[0]
+        store.set_connection(conn, job.user_id, db_site, status="connected",
+                             last_synced_at=datetime.now(timezone.utc))
     jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2))
-    store.set_connection(conn, job.user_id, db_site, status="connected",
-                         last_synced_at=datetime.now(timezone.utc))
     return n, float(total)
+
+
+def _bound_recipe(conn, site: str, orders_page_url: str | None) -> dict | None:
+    """The site's orders recipe with a templated one (Zomato) bound to this user's own orders page. Raises
+    recipes.TemplateError when the page is unknown; run_job turns that into needs_login (a reconnect re-captures it)."""
+    recipe = store.get_recipe(conn, site)
+    return recipes.bind(recipe, orders_page_url) if recipe else recipe
 
 
 def _app(site: str) -> str:
@@ -355,7 +364,7 @@ def _requeue_stale(conn, s: Settings) -> int:
     def on_lost(lost: list[jobs.Job]) -> None:
         for job in lost:
             _pause_after_failed_relearn(conn, s, job, "worker_lost")
-    return jobs.requeue_stale(conn, s.stale_job_s, on_lost=on_lost)
+    return jobs.requeue_stale(conn, s.stale_job_s, s.max_job_attempts, on_lost=on_lost)
 
 
 def _on_drift(conn, s: Settings, job: jobs.Job, db_site: str, note: str) -> None:
@@ -403,11 +412,15 @@ def _on_search_drift(conn, s: Settings, job: jobs.Job, db_site: str, recipe_kind
 def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay, seconds: float) -> None:
     """Add this job's proxy, AI and worker time to the user's usage for today (IST). Never fails the job."""
     try:
-        usage.record(conn, job.user_id, usage.today(tz=s.app_tz),
-                     proxy_mb=(relay.bytes_total if relay is not None else 0) / 1e6,
-                     ai_tokens=meter.ai_tokens(s.jev_tokens_per_call),
-                     worker_seconds=seconds,
-                     syncs=1 if job.type in ("connect", "sync") else 0)
+        with conn.transaction():
+            # A deleted (or being deleted) account gets no usage row: the user row is held while we write.
+            if conn.execute("SELECT 1 FROM auth.users WHERE id=%s FOR KEY SHARE", (job.user_id,)).fetchone() is None:
+                return
+            usage.record(conn, job.user_id, usage.today(tz=s.app_tz),
+                         proxy_mb=(relay.bytes_total if relay is not None else 0) / 1e6,
+                         ai_tokens=meter.ai_tokens(s.jev_tokens_per_call),
+                         worker_seconds=seconds,
+                         syncs=1 if job.type in ("connect", "sync") else 0)
     except Exception as e:
         log.warning("job %s: usage not recorded (%s)", job.id, type(e).__name__)
 
@@ -743,10 +756,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     exit_process = exit_process or os._exit
     started = time.monotonic()
     cfg = browser.SITES[job.site]
-    db_site, sub_platform = cfg.get("db_site", job.site), cfg.get("sub_platform")
+    db_site, sub_platform = sites.db_site(job.site), cfg.get("sub_platform")
     phone = (job.payload or {}).get("phone")
     auto_learn = job.type == "learn" and bool((job.payload or {}).get("auto"))
-    profile_name = jobs.SITE_PROFILE.get(job.site, job.site)
+    profile_name = sites.profile_for(job.site)
     profile_dir = _profiles_root() / job.id
     runs_dir = Path(tempfile.mkdtemp(prefix="ea-runs-"))
     stop_hb = threading.Event()
@@ -761,27 +774,29 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     metered = contextlib.ExitStack()
     meter = metered.enter_context(metering.meter())
 
-    def fail(error: str, status: str | None = None, touch_connection: bool = True) -> None:
+    def fail(error: str, status: str | None = None, touch_connection: bool = True,
+             interrupted: bool = False) -> None:
         """Finish the job as failed. touch_connection=False leaves the connection row (and its "logged you out"
         notification) alone: a learn that never started on the admin's account is not about their session."""
         if job.type == "search":
             return end_search("needs_login" if error == "needs_login" else "failed", error=error)
         if job.type == "fill_cart" and _fill_id(job):  # the fill row never outlives its job unfinished
             try:
-                fills.fail_fill(conn, _fill_id(job), error, s)
+                if interrupted:  # a started fill may have adds in the app's cart: kept, never refunded
+                    fills.interrupt_fill(conn, _fill_id(job), error, s)
+                else:
+                    fills.fail_fill(conn, _fill_id(job), error, s)
             except Exception as e:
                 log.error("job %s: fill not closed (%s)", job.id, type(e).__name__)
         if touch_connection:
             before = _status(conn, job.user_id, db_site)
             if status is None and before == "syncing":
                 status = "error"
-            if status:
+            if status == "needs_login":
+                _expire_session()
+            elif status:
                 store.set_connection(conn, job.user_id, db_site, status=status)
         jobs.finish(conn, job.id, error=error, worker_id=job.worker_id)
-        if touch_connection and status == "needs_login" and before != "needs_login":
-            _notify_user(conn, s, kind="needs_login", title=f"{_app(job.site)} logged you out",
-                         body="Reconnect to keep your spending up to date.", url="/accounts",
-                         user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
         _pause_after_failed_relearn(conn, s, job, error)
 
     def end_search(result: str, error: str | None = None) -> None:
@@ -796,22 +811,40 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 pass
             except Exception as e:
                 log.warning("job %s: result not recorded (%s)", job.id, type(e).__name__)
-        before = _status(conn, job.user_id, db_site)
-        if result == "needs_login" and before != "needs_login":
-            store.set_connection(conn, job.user_id, db_site, status="needs_login")
+        if result == "needs_login":
+            _expire_session()
         jobs.finish(conn, job.id, error=error or result, worker_id=job.worker_id)
-        if result == "needs_login" and before != "needs_login":
-            _notify_user(conn, s, kind="needs_login", title=f"{_app(db_site)} logged you out",
-                         body="Log in again to keep comparing prices and syncing orders.", url="/accounts",
-                         user_id=job.user_id, dedupe_key=f"needs_login:{job.id}")
+
+    def _expire_session() -> None:
+        """The one needs_login path: flip the connection once per episode, tell the user once, then dispatch."""
+        try:
+            session.mark_needs_login(conn, job.user_id, db_site)
+        except Exception as e:
+            log.error("job %s: session expiry not recorded (%s)", job.id, type(e).__name__)
+            return
+        _dispatch(conn, s)
+
+    def throttled_out(e: browser.SiteThrottled) -> None:
+        """R5: the site rate-limited us. Cool the site down; a sync waits and retries, a search reports blocked,
+        any other job fails site_busy."""
+        until = site_health.record_throttle(conn, job.site, e.kind, e.retry_after_s, s)
+        if job.type == "sync":
+            if jobs.requeue(conn, job.id, job.worker_id, run_after=until, max_attempts=s.max_job_attempts):
+                jobs.set_progress(conn, job.id, stage="cooling_down", until=until.isoformat())
+            return
+        if job.type == "search":
+            return end_search("failed", "blocked")
+        fail("site_busy")
 
     def save_profile() -> None:
         if fake:
             return
-        if not restored:  # a fresh profile (nothing restored, or the stored one was unusable) is ours now
-            vault.stamp(profile_dir, job.user_id, profile_name)
-        key = vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
-        store.set_connection(conn, job.user_id, db_site, profile_blob_key=key)
+        try:
+            with jobs.owned(conn, job.id, job.worker_id):  # a job that is no longer ours saves nothing
+                key = vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
+                store.set_connection(conn, job.user_id, db_site, profile_blob_key=key)
+        except jobs.JobGone:
+            log.info("job %s no longer ours; profile not saved", job.id)
 
     def listen():
         nonlocal listen_conn
@@ -823,6 +856,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     try:
         if job.type == "learn" and not recipe_admin.is_admin(conn, job.user_id):
             return fail("not_admin")
+        if job.type == "search" and site_health.cooldown_until(conn, job.site) is not None:
+            return end_search("unavailable", "cooling_down")  # no browser while the site is cooling down
         is_cart_learn = job.type == "learn" and (job.payload or {}).get("kind") == "cart"
         if is_cart_learn and (err := _cart_learn_precheck(conn, job, db_site)):
             return fail(err, touch_connection=False)
@@ -853,6 +888,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             # connection row is neither written nor reported as logged out.
             return fail("needs_login", touch_connection=False)
         profile_dir.mkdir(parents=True, exist_ok=True)
+        if not fake:  # restored or fresh, the directory is stamped with its owner before Chrome and the save
+            vault.stamp(profile_dir, job.user_id, profile_name)
         session_id = _ensure_proxy_session(conn, job.user_id, db_site)
 
         with contextlib.ExitStack() as stack:
@@ -893,6 +930,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
 
             if job.type == "search":
                 _do_search(job, conn, s, profile_dir, proxy_server, fake=fake)
+                site_health.record_success(conn, job.site)
                 save_profile()  # the session is the user's own; a good run keeps what the site refreshed
                 jobs.finish(conn, job.id, worker_id=job.worker_id)
                 return
@@ -908,11 +946,13 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                                 recipe_loader=lambda site: store.get_recipe(conn, site))
                 if not ok:
                     return fail("login_failed", "error")
-                store.set_connection(conn, job.user_id, db_site, status="connected")
+                with jobs.owned(conn, job.id, job.worker_id):
+                    store.set_connection(conn, job.user_id, db_site, status="connected", needs_login_at=None)
                 save_profile()  # a good login is kept even if the first sync below fails
             n, total = _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
                                 fetch=fake_sites.fetch_orders if fake else sync.fetch_orders,
                                 block_media=job.type == "sync" and s.sync_block_media)  # R12: user syncs only
+            site_health.record_success(conn, job.site)
             save_profile()
             _refresh_addresses(job, conn, db_site, profile_dir, proxy_server, fake)
             _categorize(conn)
@@ -921,8 +961,12 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             _notify_user(conn, s, kind="first_sync_done", title=f"{_app(job.site)} is connected",
                          body=f"{n} orders · {notify.format_inr(total)} found", url="/spend",
                          user_id=job.user_id, dedupe_key=f"first_sync:{job.id}")
-    except browser.SessionExpired:
+    except jobs.JobGone:
+        log.info("job %s no longer ours; ending quietly", job.id)
+    except (browser.SessionExpired, recipes.TemplateError):  # TemplateError: the user's orders page is unknown
         fail("needs_login", "needs_login")
+    except browser.SiteThrottled as e:
+        throttled_out(e)
     except _SearchEnd as e:
         end_search(e.result, e.error)
     except search.Unserviceable:
@@ -955,7 +999,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     except Exception as e:
         msg = _clean_error(e, phone)
         log.error("job %s failed: %s", job.id, msg)
-        fail(msg)
+        fail(msg, interrupted=True)
     finally:
         stop_hb.set()
         heartbeat.join(5)
@@ -1041,6 +1085,17 @@ class _Drain:
             self._job = None
             self.idle.set()
 
+    def finish(self) -> None:
+        """The main loop has ended: nothing may be interrupted after this. An interrupt the watchdog raised just
+        as the loop ended is absorbed here."""
+        try:
+            with self._lock:
+                self.stopped.set()
+        except KeyboardInterrupt:
+            self.stopped.set()
+            if not self.aborted:
+                raise
+
     def on_sigterm(self, signum=None, frame=None) -> None:
         if self.requested.is_set():
             return
@@ -1055,21 +1110,28 @@ class _Drain:
             job = self._job
         if job is None:
             return
-        conn = None
-        try:
-            conn = psycopg.connect(self.s.database_url, autocommit=True, connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_S)
-            done = _abort_on_shutdown(job, conn, self.worker_id, self.s)
-        except Exception as e:
-            log.error("could not reach the database to abort job %s (%s)", job.id, type(e).__name__)
-            done = False
-        finally:
-            _close(conn)
+        if job.type == "sync":
+            # A sync is requeued by the main thread once run_job has unwound (Chrome has exited by then), so a
+            # new worker never starts a second Chrome on the same profile while this one is still closing.
+            log.warning("job %s still running after DRAIN_S (%ss): interrupting", job.id, self.s.drain_s)
+        else:
+            conn = None
+            try:
+                conn = psycopg.connect(self.s.database_url, autocommit=True,
+                                       connect_timeout=HEARTBEAT_CONNECT_TIMEOUT_S)
+                done = _abort_on_shutdown(job, conn, self.worker_id, self.s)
+            except Exception as e:
+                log.error("could not reach the database to abort job %s (%s)", job.id, type(e).__name__)
+                done = False
+            finally:
+                _close(conn)
+            log.warning("job %s still running after DRAIN_S (%ss): %s", job.id, self.s.drain_s,
+                        "aborted" if done else "left for the stale-job requeue")
         self.aborted = True
-        log.warning("job %s still running after DRAIN_S (%ss): %s", job.id, self.s.drain_s,
-                    "aborted" if done else "left for the stale-job requeue")
-        if self.stopped.is_set():  # the main loop ended meanwhile: nothing left to interrupt
-            return
-        _thread.interrupt_main()
+        with self._lock:  # only while this job is still the main thread's and the main loop has not ended
+            if self._job is not job or self.stopped.is_set():
+                return
+            _thread.interrupt_main()
         if not self.idle.wait(DRAIN_UNWIND_S) and not self.stopped.is_set():
             log.error("job %s did not unwind after the abort; worker exiting", job.id)
             self.exit_process(EXIT_DRAIN_TIMEOUT)
@@ -1089,6 +1151,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     _check_fake_mode(os.getenv("DATABASE_URL", ""))  # before settings(): no other config error may mask it
     # Fake mode has no vault and no proxy, so their key / template validation (for_worker) does not apply.
     s = settings(for_worker=not _fake_mode())
+    check_hosted(s, "worker")
     _wipe_profiles_root(s.profile_store_url)
     log.info("worker started id=%s", worker_id)
     drain = _Drain(s, worker_id, exit_process)
@@ -1117,7 +1180,9 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 try:
                     run_job(job, conn, s, exit_process=exit_process)
                 except KeyboardInterrupt:
-                    if not drain.aborted:  # Ctrl-C (the drain watchdog has already aborted its job)
+                    # Ctrl-C aborts here; so does a drain abort of a sync (the watchdog only interrupted: Chrome has
+                    # exited by now, so the requeue cannot start a second Chrome on the same profile).
+                    if not drain.aborted or job.type == "sync":
                         _abort_on_shutdown(job, conn, worker_id, s)
                     raise
                 except Exception as e:
@@ -1138,7 +1203,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     except KeyboardInterrupt:
         pass
     finally:
-        drain.stopped.set()
+        drain.finish()
         _close(conn)
         if installed:
             signal.signal(signal.SIGTERM, old_handler if old_handler is not None else signal.SIG_DFL)

@@ -130,11 +130,13 @@ def test_needs_login_notifies_once(pg, monkeypatch):
         raise SessionExpired("HTTP 401")
     monkeypatch.setattr(worker.sync, "fetch_orders", expired)
     store.set_connection(pg, A, "zepto", status="connected")
-    first = _run(pg, A, "sync")
+    _run(pg, A, "sync")
     _run(pg, A, "sync")
     assert pg.execute("select status from connections").fetchone() == ("needs_login",)
-    assert _notes(pg) == [("needs_login", "Zepto logged you out", "Reconnect to keep your spending up to date.",
-                           "/accounts", A, None, f"needs_login:{first}")]
+    notes = _notes(pg)  # one per episode, from session.mark_needs_login
+    assert len(notes) == 1 and notes[0][:6] == (
+        "needs_login", "Zepto logged you out", "Reconnect to keep your spending up to date.",
+        "/accounts?reconnect=zepto", A, None) and notes[0][6].startswith(f"needs_login:{A}:zepto:")
 
 
 # ---------------------------------------------------------------- drift

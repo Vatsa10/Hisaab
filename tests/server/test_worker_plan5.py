@@ -248,7 +248,7 @@ def test_logged_out_search_marks_needs_login_and_notifies(pg, monkeypatch):
     notes = _notes(pg)
     assert len(notes) == 1
     assert notes[0][:4] == ("needs_login", "Zepto logged you out",
-                            "Log in again to keep comparing prices and syncing orders.", "/accounts")
+                            "Reconnect to keep your spending up to date.", "/accounts?reconnect=zepto")
     assert notes[0][4] == A and not saved
 
 

@@ -115,10 +115,14 @@ def page_delay_s() -> float:
         return 0.0
 
 
-def fetch_orders(site, since=None, on_progress=None, **_) -> list[dict]:
+def fetch_orders(site, since=None, on_progress=None, orders_page_url=None, **_) -> list[dict]:
     """Deterministic synthetic orders for the last 6 months (seeded by site). Swiggy returns food orders plus
     Instamart grocery rows (sub_platform='instamart'); the 'instamart' site returns only the latter.
     on_progress(count, amount) is called after each "page" of PAGE_SIZE orders, as the real fetch does."""
+    if str(orders_page_url or "").endswith("/expired"):  # lets the e2e suite exercise the logged-out path
+        raise browser.SessionExpired("fake")
+    if str(orders_page_url or "").endswith("/throttle"):  # ... and the rate-limited one
+        raise browser.SiteThrottled("rate_limited", 60)
     out = _all_orders(site)
     if since:
         out = [o for o in out if o["placed_at"] >= str(since)[:19]]

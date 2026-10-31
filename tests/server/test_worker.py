@@ -433,13 +433,13 @@ def test_corrupt_profile_connect_job_starts_empty(pg, monkeypatch):
     seen = {}
 
     def login(site, phone=None, **k):
-        seen["files"] = list(Path(k["profile_dir"]).iterdir())
+        seen["files"] = [p.name for p in Path(k["profile_dir"]).iterdir()]
         return True
     monkeypatch.setattr(worker.sync, "login", login)
     monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [])
     jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
     worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
-    assert seen["files"] == []
+    assert seen["files"] == [".ea-profile.json"]  # nothing restored; only the owner stamp
     assert pg.execute("select status from jobs").fetchone() == ("done",)
 
 

@@ -532,6 +532,17 @@ def fail_fill(conn, fill_id: str, error: str, s: Settings) -> dict:
     return _finish(conn, fill_id, _failed_outcome(f, error), f.get("open_url") or OPEN_APP_URLS.get(f["site"]), s)
 
 
+def interrupt_fill(conn, fill_id: str, error: str, s: Settings) -> dict:
+    """The job died mid-fill on an unexpected error. A started fill may have adds in the app's cart: it closes as
+    interrupted (still counted, pending items kept, never refunded). One never started is simply failed."""
+    f = get_fill(conn, fill_id)
+    if f is None:
+        return {}
+    started = f["status"] == "filling" or f["started_at"] is not None
+    outcome = _failed_outcome(f, error, "interrupted" if started else "failed")
+    return _finish(conn, fill_id, outcome, f.get("open_url") or OPEN_APP_URLS.get(f["site"]), s)
+
+
 def finalize_lost(conn, s: Settings, now: datetime | None) -> int:
     """Fills whose job died (failed, finished or gone) while the fill was queued or filling (R9). A started fill may
     have added items: interrupted, still counted, and it keeps the slot. One never started is failed and refunded."""

@@ -2,7 +2,8 @@
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-CONNECTION_FIELDS = ("status", "last_synced_at", "orders_page_url", "proxy_session_id", "profile_blob_key")
+CONNECTION_FIELDS = ("status", "last_synced_at", "orders_page_url", "proxy_session_id", "profile_blob_key",
+                     "needs_login_at")
 
 
 def upsert_orders(conn, user_id: str, site: str, orders: list[dict],

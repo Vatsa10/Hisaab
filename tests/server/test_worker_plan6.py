@@ -206,7 +206,8 @@ def test_other_error_fails_the_fill_cleanly(pg, monkeypatch):
     monkeypatch.setattr(cart_fill, "fill_cart", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom 987654")))
     _run(pg, s)
     f = fill.get_fill(pg, fid)
-    assert f["status"] == "failed" and f["error"] == "RuntimeError: boom ***"
+    # the fill had started: its adds may be in the app's cart, so it is interrupted (kept, never refunded)
+    assert f["status"] == "interrupted" and f["error"] == "RuntimeError: boom ***"
 
 
 def test_engine_stop_code_is_interrupted(pg, monkeypatch):
@@ -379,4 +380,4 @@ def test_only_fill_and_cart_learn_use_cart_mode(pg, monkeypatch):
                        "location_allowlist": [], "read_post_allowlist": []}),))
     _run(pg, s)
     assert modes == [True]
-    assert fill.get_fill(pg, fid)["status"] == "failed"
+    assert fill.get_fill(pg, fid)["status"] == "interrupted"
