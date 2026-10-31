@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
-from server import budget, cart, config, food_cart, jobs, notify, session, site_health
+from server import budget, cart, config, fill, food_cart, jobs, notify, session, site_health
 from server.config import Settings, settings
 
 log = logging.getLogger("scheduler")
@@ -76,6 +76,11 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
             finalized = cart.finalize_stale(conn, s, now)
         except Exception as e:
             log.error("stale cart sweep failed (%s)", type(e).__name__)
+        fills_finalized = 0
+        try:  # fills whose job died (R9): interrupted when started, otherwise failed and refunded
+            fills_finalized = fill.finalize_lost(conn, s, now)
+        except Exception as e:
+            log.error("lost fill sweep failed (%s)", type(e).__name__)
         try:
             food_cart.purge_cache(conn, now=now)
         except Exception as e:
@@ -84,7 +89,7 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
         reminders = session.remind(conn, s, now)
         sent = notify.dispatch(conn, s)
         return {"skipped": False, "level": state.level, "enqueued": enqueued, "sent": sent,
-                "paused_sites": paused, "reminders": reminders, "carts_finalized": finalized}
+                "paused_sites": paused, "reminders": reminders, "carts_finalized": finalized, "fills_finalized": fills_finalized}
     finally:
         conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 

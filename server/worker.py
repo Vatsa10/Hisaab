@@ -22,6 +22,7 @@ from psycopg import sql
 
 import addresses
 import browser
+import cart_fill
 import food_learn
 import food_search
 import llm
@@ -31,13 +32,15 @@ import search_learn
 import sync
 from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
                     store, usage, vault)
-from server.config import SITE_NAMES, Settings, settings
+from server import fill as fills
+from server import fill_summary
+from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
 
 log = logging.getLogger("worker")
 
-JOB_TYPES = ("connect", "sync", "learn", "search")
+JOB_TYPES = ("connect", "sync", "learn", "search", "fill_cart")
 MAX_ERROR_LEN = 300
 
 
@@ -52,13 +55,14 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
     timeout_s window down exactly. Raises sync.OtpTimeout(kind) when nothing arrives within timeout_s."""
     channel = "otp_" + job_id.replace("-", "")
 
-    def prompt(text: str, kind: str = "otp") -> str:
+    def prompt(text: str, kind: str = "otp", choices: list | None = None) -> str:
         waiting, answered = PROMPT_STAGES[kind]
         # LISTEN first so a NOTIFY sent right after the app sees the question is not missed.
         listen_conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
         try:
             prompt_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            jobs.set_progress(job_conn, job_id, stage=waiting, question=text, prompt_at=prompt_at)
+            extra = {} if choices is None else {"choices": choices}
+            jobs.set_progress(job_conn, job_id, stage=waiting, question=text, prompt_at=prompt_at, **extra)
             deadline = time.monotonic() + timeout_s
             while (remaining := deadline - time.monotonic()) > 0:
                 for note in listen_conn.notifies(timeout=remaining, stop_after=1):
@@ -604,6 +608,130 @@ def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server
                               listing.get("distance_km"))
 
 
+def _fill_id(job: jobs.Job) -> str | None:
+    v = (job.payload or {}).get("fill_id")
+    return str(v) if v and fills._is_uuid(v) else None
+
+
+def _fill_precheck(job: jobs.Job, conn, s: Settings, db_site: str):
+    """The fill job's gates. Returns (fill, cart recipe, search recipe), or None after finishing the job: a missing
+    fill fails the job (fill_gone); an unusable recipe or connection fails the fill (the job itself is done)."""
+    f = fills.get_fill(conn, _fill_id(job)) if _fill_id(job) else None
+    if f is None:
+        jobs.finish(conn, job.id, error="fill_gone", worker_id=job.worker_id)
+        return None
+    recipe = store.get_recipe(conn, job.site, "cart")
+    if recipe is None or not fills.cart_recipe_ready(conn, job.site):
+        fills.fail_fill(conn, f["id"], "cart_unavailable", s)
+    elif _status(conn, job.user_id, db_site) != "connected":
+        fills.fail_fill(conn, f["id"], "needs_login", s)
+    else:
+        return f, recipe, store.get_recipe(conn, job.site, "search")
+    jobs.finish(conn, job.id, worker_id=job.worker_id)
+    return None
+
+
+def _do_fill(job: jobs.Job, conn, s: Settings, ctx, profile_dir: Path, proxy_server: str | None,
+             listen: Callable[[], object], fake: bool, save_profile: Callable[[], None]) -> None:
+    """Add the fill's plan to the user's cart on their own session (add-only, through the CartGuard). Questions
+    reach the app on the job's progress; an unanswered one is a skip. Never logs in, never logs cart contents."""
+    f, recipe, search_recipe = ctx
+    fid, site = f["id"], job.site
+    fills.mark_started(conn, fid)
+    jobs.set_progress(conn, job.id, stage="starting", done=0, total=len(f["plan"]))
+    prompt = make_prompt(listen(), conn, job.id, s.otp_timeout_s)
+    reported = 0
+
+    def ask(question, choices):
+        try:
+            return prompt(question, "question", choices)
+        except sync.OtpTimeout:
+            return None
+
+    def on_item(item: dict) -> None:
+        nonlocal reported
+        reported += 1
+        fills.record_item(conn, fid, item)
+        jobs.set_progress(conn, job.id, stage="adding", done=reported, total=len(f["plan"]))
+
+    kw = dict(profile_dir=profile_dir, ask=ask, on_item=on_item,
+              on_stage=lambda st: jobs.set_progress(conn, job.id, stage=st), proxy_server=proxy_server,
+              confirm_location=f.get("confirm_location"), max_location_m=s.cart_location_max_m)
+    if fake:
+        outcome = fake_sites.fill_cart(site, f["plan"], f["priced_location"], recipe, search_recipe,
+                                       user_id=job.user_id, state_dir=os.environ.get("FAKE_STATE_DIR"), **kw)
+        open_url = f"https://fake.{site}.test/cart"
+    else:
+        outcome = cart_fill.fill_cart(site, f["plan"], f["priced_location"], recipe, search_recipe, **kw)
+        open_url = OPEN_APP_URLS[site]
+    summary = fills.finish_fill(conn, fid, outcome, open_url, s)
+    save_profile()
+    app, final = fill_summary.app_name(site), (outcome.get("status") or "")
+    if final in ("done", "partial"):
+        _notify_user(conn, s, kind="cart_filled", title=summary.get("title") or f"Your {app} cart is filled",
+                     body=f"Open {app} to review and pay.", url=f"/cart/{f['request_id']}?fill={fid}",
+                     user_id=job.user_id, dedupe_key=f"cart_filled:{fid}")
+    elif final == "needs_confirmation":
+        _notify_user(conn, s, kind="cart_reprice", title=f"Check {app} prices",
+                     body=((summary.get("reprice") or {}).get("total_line") or f"{app} prices changed."),
+                     url=f"/cart/{f['request_id']}?fill={fid}", user_id=job.user_id,
+                     dedupe_key=f"cart_reprice:{fid}")
+
+
+def _on_cart_drift(conn, s: Settings, site: str, note: str) -> None:
+    """On the healthy -> unhealthy transition of the cart recipe: pause cart filling and tell the admins (once a day)."""
+    try:
+        if not recipe_admin.mark_drift(conn, site, "cart", note[:MAX_ERROR_LEN]):
+            return
+        recipe_admin.pause_site(conn, site, "cart", note[:MAX_ERROR_LEN], reason="auto")
+        notify.alert_admins(conn, kind="site_paused", title=f"{_app(site)} cart filling paused",
+                            body="Its cart recipe stopped working. Learn it again from the admin view and approve it.",
+                            dedupe_key=f"site_paused:cart:{site}:{usage.today(tz=s.app_tz)}")
+    except Exception as e:
+        log.error("cart drift handling for %s failed (%s)", site, type(e).__name__)
+        return
+    _dispatch(conn, s)
+
+
+def _cart_learn_precheck(conn, job: jobs.Job, db_site: str) -> str | None:
+    """Why a cart learn cannot start, or None: the admin's connection, the site's search recipe and an address."""
+    if _status(conn, job.user_id, db_site) != "connected":
+        return "needs_login"
+    if not store.get_recipe(conn, job.site, "search"):
+        return "no_search_recipe"
+    if not _location(conn, job.user_id):
+        return "no_address"
+    return None
+
+
+def _do_learn_cart(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server: str | None,
+                   listen: Callable[[], object], fake: bool, save_profile: Callable[[], None]) -> dict:
+    """Learn the site's cart recipe on the admin's account. Every new endpoint needs the admin's live approval and
+    the recipe is always filed as pending (apply_learned). The learn adds items to the admin's real cart."""
+    import cart_learn
+    jobs.set_progress(conn, job.id, stage="learning")
+    approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, "cart", s.approval_timeout_s)
+    current = store.get_recipe(conn, job.site, "cart") or {}
+    preapproved = [dict(e, op=e.get("op") or op)
+                   for op, key in (("cart", "cart_allowlist"), ("location", "location_allowlist"),
+                                   ("read", "read_post_allowlist"))
+                   for e in current.get(key) or [] if isinstance(e, dict) and e.get("url_regex")]
+    if fake:
+        learned = fake_sites.learn(job.site, approve=approve, preapproved=preapproved, kind="cart")
+    else:
+        learned = cart_learn.learn_cart(job.site, profile_dir=profile_dir, location=_location(conn, job.user_id),
+                                        search_recipe=store.get_recipe(conn, job.site, "search"), approve=approve,
+                                        preapproved=preapproved, proxy_server=proxy_server)
+    save_profile()
+    result = recipe_admin.apply_learned(conn, job.site, "cart", learned["recipe"], set(approve.approved), job.id,
+                                        reason="learned")
+    app = _app(job.site)
+    jobs.set_progress(conn, job.id, stage="learned", status=result["status"], approval_id=result["approval_id"],
+                      note=f"Learning added 2 × {learned['probe_item']} to your {app} cart. "
+                           f"Remove it in {app} if you don't want it.")
+    return result
+
+
 def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
     """Run one claimed job. The user's encrypted profile is restored into a fresh per-job directory, the browser
     goes out through the user's sticky proxy session (if configured), the job heartbeats while it runs, and the
@@ -638,6 +766,11 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         notification) alone: a learn that never started on the admin's account is not about their session."""
         if job.type == "search":
             return end_search("needs_login" if error == "needs_login" else "failed", error=error)
+        if job.type == "fill_cart" and _fill_id(job):  # the fill row never outlives its job unfinished
+            try:
+                fills.fail_fill(conn, _fill_id(job), error, s)
+            except Exception as e:
+                log.error("job %s: fill not closed (%s)", job.id, type(e).__name__)
         if touch_connection:
             before = _status(conn, job.user_id, db_site)
             if status is None and before == "syncing":
@@ -690,6 +823,14 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     try:
         if job.type == "learn" and not recipe_admin.is_admin(conn, job.user_id):
             return fail("not_admin")
+        is_cart_learn = job.type == "learn" and (job.payload or {}).get("kind") == "cart"
+        if is_cart_learn and (err := _cart_learn_precheck(conn, job, db_site)):
+            return fail(err, touch_connection=False)
+        fill_ctx = None
+        if job.type == "fill_cart":
+            fill_ctx = _fill_precheck(job, conn, s, db_site)
+            if fill_ctx is None:
+                return
         shutil.rmtree(profile_dir, ignore_errors=True)
         vault_store = None if fake else vault.store_from_url(s.profile_store_url)
         try:
@@ -701,8 +842,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         except vault.VaultError as e:
             log.warning("job %s: stored profile unusable (%s); starting empty", job.id, type(e).__name__)
             shutil.rmtree(profile_dir, ignore_errors=True)
-            if job.type in ("sync", "search"):
+            if job.type in ("sync", "search", "fill_cart"):
                 return fail("needs_login", "needs_login")
+        if job.type == "fill_cart" and not restored and not fake:
+            return fail("needs_login", "needs_login")  # a fill never logs in: no stored session, no fill
         if job.type == "search" and not restored and not fake:
             return fail("needs_login", "needs_login")  # compares run on the user's own session: none stored
         if job.type == "learn" and not restored and not fake:
@@ -728,6 +871,16 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                     log.warning("job %s: proxy %s unavailable (%s)", job.id, _proxy_host(upstream), reason)
                     return fail("proxy_unavailable")
                 proxy_server = relay.url
+
+            if job.type == "fill_cart":
+                _do_fill(job, conn, s, fill_ctx, profile_dir, proxy_server, listen, fake, save_profile)
+                jobs.finish(conn, job.id, worker_id=job.worker_id)
+                return
+
+            if is_cart_learn:
+                _do_learn_cart(job, conn, s, profile_dir, proxy_server, listen, fake, save_profile)
+                jobs.finish(conn, job.id, worker_id=job.worker_id)
+                return
 
             if job.type == "learn":
                 result = _do_learn(job, conn, s, profile_dir, proxy_server, listen, fake, save_profile)
@@ -781,6 +934,9 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                          (str(e).splitlines() or [""])[0])
     except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
         fail(f"{e.kind}_timeout", "error")
+    except cart_fill.CartDrift as e:
+        fail("recipe_drift")
+        _on_cart_drift(conn, s, job.site, (str(e).splitlines() or [""])[0] or "cart drift")
     except sync.RecipeDrift as e:
         fail("recipe_drift")
         if job.type != "learn":
@@ -840,7 +996,7 @@ def _abort_on_shutdown(job: jobs.Job, conn, worker_id: str, s: Settings | None =
     requeue deals with it). An unattended learn aborted this way pauses its site and alerts the admins (s, the
     worker's settings, default read from the environment)."""
     try:
-        if job.type in ("connect", "learn"):
+        if job.type in ("connect", "learn", "fill_cart"):
             if not jobs.finish(conn, job.id, error="worker_shutdown", worker_id=worker_id):
                 return False
             db_site = browser.SITES[job.site].get("db_site", job.site)

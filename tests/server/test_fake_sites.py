@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -365,3 +366,83 @@ def test_fake_learn_asks_approval_for_post_recipes():
     with pytest.raises(sync.RecipeError):
         fake_sites.learn("instamart", lambda e: False, kind="search")
     assert fake_sites.learn("zepto", lambda e: False, preapproved=["^https://fake\\.zepto\\.test/api/orders$"])
+
+
+# --- Plan 6: the fake cart fill ---------------------------------------------------------------------------------
+
+PRICED = {"lat": 22.33, "lon": 73.16, "area": "Gorwa"}
+FAR = {"lat": 22.31, "lon": 73.17, "area": "Elsewhere"}
+
+
+def _item(idx, name, pid, packs, price, action="add"):
+    return {"idx": idx, "label": name, "action": action, "product_id": pid, "name": name, "packs": packs,
+            "price": price, "question": None, "choices": [], "reason": None}
+
+
+def plan6(site="zepto"):
+    p = f"{site}-"
+    ask = _item(5, "milk", None, None, None, "ask")
+    ask.update(question="Which milk?", choices=[
+        {"id": p + "amul-taaza-toned-milk-1-l", "label": "Amul 1 L", "product_id": p + "amul-taaza-toned-milk-1-l",
+         "name": "Amul Taaza Toned Milk 1 L", "packs": 1, "price": 55.0}, {"id": "skip", "label": "Skip"}])
+    return [_item(0, "Amul Taza Milk 500ml", p + "amul-taza-milk-500ml", 2, 27.0),
+            _item(1, "Aashirvaad Atta 5kg", p + "aashirvaad-atta-5kg", 1, 239.0),
+            _item(2, "Farm Eggs 6 pcs", p + "farm-eggs-6-pcs", 1, 50.0),
+            _item(3, "Lay's Classic Salted Chips 52 g", p + "lay-s-classic-salted-chips-52-g", 1, 18.0),
+            _item(4, "Britannia Brown Bread (400 g)", p + "britannia-brown-bread--400-g", 1, 46.0), ask]
+
+
+def _fill(tmp_path, **kw):
+    args = dict(ask=lambda q, c: "zepto-amul-taaza-toned-milk-1-l", on_item=lambda i: None, on_stage=lambda s: None,
+                user_id=A, state_dir=tmp_path)
+    args.update(kw)
+    plan = args.pop("plan", None) or plan6()
+    recipe = fake_sites.learn("zepto", lambda e: True, kind="cart")["recipe"]
+    return fake_sites.fill_cart("zepto", plan, args.pop("priced", PRICED), recipe, None, **args)
+
+
+def test_fake_fill_adds_on_top_and_keeps_existing(tmp_path, fake_mode):
+    out = _fill(tmp_path)
+    assert out["status"] == "partial" and [i["status"] for i in out["items"]].count("added") == 5
+    assert [i["name"] for i in out["items"] if i["status"] == "out_of_stock"] == ["Farm Eggs 6 pcs"]
+    assert (out["cart"]["subtotal"], out["cart"]["total"], out["cart"]["existing_count"]) == (465, 480, 1)
+    assert json.loads((tmp_path / f"{A}-zepto.json").read_text())["cart"]["zepto-amul-butter-100g"]["qty"] == 1
+
+
+def test_fake_locked_location_reprices(tmp_path, fake_mode):
+    (tmp_path / f"{A}-zepto.json").write_text(json.dumps({"cart": {}, "location": FAR, "locked": True}))
+    out = _fill(tmp_path)
+    assert out["status"] == "needs_confirmation" and out["items"] == []
+    new = {r["name"]: r["new_price"] for r in out["repriced"]}
+    assert (new["Aashirvaad Atta 5kg"], new["Britannia Brown Bread (400 g)"]) == (246, 47)
+    again = _fill(tmp_path, confirm_location=FAR)
+    assert again["status"] in ("done", "partial")
+
+
+def test_fake_confirm_location_that_moved_fails(tmp_path, fake_mode):
+    (tmp_path / f"{A}-zepto.json").write_text(json.dumps({"cart": {}, "location": FAR, "locked": True}))
+    out = _fill(tmp_path, confirm_location={"lat": 12.0, "lon": 77.0, "area": "x"})
+    assert (out["status"], out["error"]) == ("failed", "location_changed")
+
+
+def test_fake_unlocked_location_is_selected(tmp_path, fake_mode):
+    (tmp_path / f"{A}-zepto.json").write_text(json.dumps({"cart": {}, "location": FAR, "locked": False}))
+    out = _fill(tmp_path)
+    assert out["location_selected"] is True and out["status"] == "partial"
+
+
+def test_fake_fill_needs_state_dir(fake_mode):
+    with pytest.raises(RuntimeError, match="FAKE_STATE_DIR is not set"):
+        fake_sites.fill_cart("zepto", [], PRICED, {}, None, ask=None, on_item=None, on_stage=None, user_id=A,
+                             state_dir=None)
+
+
+def test_fake_learn_cart_asks_approval():
+    asked = []
+    out = fake_sites.learn("zepto", lambda e: asked.append(e) or True, kind="cart")
+    assert out["probe_item"] == "Amul Taaza Toned Milk 1 L" and len(asked[0]) == 2
+    assert out["recipe"]["add"]["qty_mode"] == "set"
+    assert fake_sites.learn("zepto", lambda e: pytest.fail("asked"), kind="cart",
+                            preapproved=[e["url_regex"] for e in asked[0]])
+    with pytest.raises(sync.RecipeError, match="cart permission rejected"):
+        fake_sites.learn("zepto", lambda e: False, kind="cart")

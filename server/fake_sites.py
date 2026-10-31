@@ -1,15 +1,18 @@
 """Fake delivery-app backends for local end-to-end runs (WORKER_FAKE=1): no browser, no network.
 
 Nothing here logs or stores the phone, the OTP or any answer."""
+import json
 import os
 import random
 import time
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 import browser
+import cart_fill
 import sync
-from server import match
+from server import fees, match
 
 FAKE_OTP = "123456"
 MONTHS = 6
@@ -74,6 +77,8 @@ def learn(site, approve, preapproved=(), kind="orders", **_) -> dict:
     search recipe (GET; Instamart POSTs); "food": {"restaurants", "menu"} (Swiggy GET; Zomato's restaurant search
     POSTs). Each POST-allowlist entry goes to approve([entry]) unless preapproved already holds its regex; a
     refusal is sync.RecipeError("POST allowlist rejected")."""
+    if kind == "cart":
+        return _learn_cart(site, approve, preapproved)
     if kind == "search":
         return _learn_search(site, approve, preapproved)
     if kind == "food":
@@ -282,3 +287,177 @@ def fetch_menu(site, restaurant_id, **_) -> dict:
                "veg": veg, "in_stock": True, "packaging": float(pack) if pack is not None else None}
               for n, (name, price, pack, veg) in enumerate(rows, 1)]
     return {"is_open": listing[5], "dishes": dishes, "fee_info": {}}
+
+
+# --- cart fill fakes (Plan 6): learn a cart recipe, fill a per-user fake cart -------------------------------------
+
+FILL_OUT_OF_STOCK = {"zepto": {"Farm Eggs 6 pcs"}, "blinkit": set(), "instamart": set()}
+FAKE_MAX_QTY = 5
+REPRICE_FACTOR = Decimal("1.03")
+FAKE_FEES = {  # the Plan 5 grocery seeds (supabase/migrations/0008)
+    "zepto": {"delivery": [{"min_subtotal": 0, "fee": 30}, {"min_subtotal": 99, "fee": 0}], "handling": 15,
+              "small_cart": {"below": 99, "fee": 25}, "surge": {"possible": True}},
+    "blinkit": {"delivery": [{"min_subtotal": 0, "fee": 25}, {"min_subtotal": 199, "fee": 0}], "handling": 9,
+                "small_cart": {"below": 99, "fee": 20}, "surge": {"possible": True}},
+    "instamart": {"delivery": [{"min_subtotal": 0, "fee": 35}, {"min_subtotal": 199, "fee": 0}], "handling": 10,
+                  "small_cart": {"below": 99, "fee": 15}, "surge": {"possible": True}},
+}
+FILL_PROBE_ITEM = "Amul Taaza Toned Milk 1 L"
+
+
+def _pack_price(site: str, base: int, reprice: bool) -> int:
+    v = Decimal(base) * SITE_PRICE_FACTOR[site] * (REPRICE_FACTOR if reprice else 1)
+    return int(v.quantize(Decimal(1), ROUND_HALF_UP))
+
+
+def _fill_catalog(site: str, reprice: bool) -> dict[str, tuple[str, int]]:
+    return {f"{site}-{_slug(n)}": (n, _pack_price(site, base, reprice)) for n, _b, base in FAKE_CATALOG}
+
+
+def _learn_cart(site, approve, preapproved) -> dict:
+    """A valid fake cart recipe. The add and the location select go to approve() unless preapproved holds their
+    regexes; a refusal is sync.RecipeError("cart permission rejected")."""
+    host = f"https://fake.{site}.test"
+    add = {"url_regex": f"^https://fake\\.{site}\\.test/api/cart/add$", "why": "add to cart", "op": "cart",
+           "qty_path": "qty"}
+    loc = {"url_regex": f"^https://fake\\.{site}\\.test/api/location/select$",
+           "why": "pick a saved or current location", "op": "location"}
+    known = {e if isinstance(e, str) else (e or {}).get("url_regex") for e in preapproved}
+    ask = [e for e in (add, loc) if e["url_regex"] not in known]
+    if ask and not approve([dict(e) for e in ask]):
+        raise sync.RecipeError("cart permission rejected")
+    recipe = {
+        "kind": "cart", "site": site, "home_url": f"{host}/",
+        "add": {"method": "POST", "url": f"{host}/api/cart/add", "headers": {},
+                "body": {"product_id": "seed", "qty": 1}, "product_id_path": "product_id", "qty_path": "qty",
+                "store_id_path": None, "qty_mode": "set"},
+        "read": {"method": "GET", "url": f"{host}/api/cart", "headers": {}, "body": None,
+                 "field_map": {"lines_path": "lines", "product_id": "product_id", "name": "name", "qty": "qty",
+                               "price": "price", "subtotal": "subtotal", "total": "total",
+                               "fees": {"handling": "fees.handling", "delivery": "fees.delivery"},
+                               "out_of_stock": None}},
+        "location": {"current": {"method": "GET", "url": f"{host}/api/location", "headers": {}, "body": None,
+                                 "store_id_path": None, "lat_path": "lat", "lon_path": "lon", "area_path": "area"},
+                     "select": {"mode": "latlon", "method": "POST", "url": f"{host}/api/location/select",
+                                "headers": {}, "body": {"lat": 0, "lon": 0}, "lat_input": "lat",
+                                "lon_input": "lon"}},
+        "cart_allowlist": [add], "location_allowlist": [loc], "read_post_allowlist": [],
+    }
+    return {"recipe": recipe, "probe_item": FILL_PROBE_ITEM}
+
+
+def _state_path(state_dir, user_id, site) -> Path:
+    return Path(state_dir) / f"{user_id}-{site}.json"
+
+
+def _load_state(path: Path, site: str, priced: dict) -> dict:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"cart": {f"{site}-amul-butter-100g": {"name": "Amul Butter 100g", "qty": 1}},
+            "location": {"lat": priced.get("lat"), "lon": priced.get("lon"), "area": priced.get("area")},
+            "locked": False}
+
+
+def _save_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _cart_view(site: str, state: dict, prices: dict) -> dict:
+    subtotal = sum(prices.get(pid, (None, 0))[1] * line["qty"] for pid, line in state["cart"].items())
+    fee = fees.compute(FAKE_FEES[site], subtotal, True, {"member": False})
+    return {"subtotal": subtotal, "total": subtotal + fee["total"],
+            "fees": {k: fee[k] for k in ("delivery", "handling", "small_cart", "surge") if fee.get(k)},
+            "line_count": len(state["cart"])}
+
+
+def fill_cart(site, plan, priced, recipe, search_recipe, *, ask, on_item, on_stage, user_id, state_dir,
+              confirm_location=None, max_location_m=500, **_) -> dict:
+    """The fake add-only fill on a per-user cart kept in state_dir/<user_id>-<site>.json; the same outcome as
+    cart_fill.fill_cart."""
+    if not state_dir:
+        raise RuntimeError("FAKE_STATE_DIR is not set")
+    path = _state_path(state_dir, user_id, site)
+    target = confirm_location or priced
+    state = _load_state(path, site, priced)
+    prices = _fill_catalog(site, confirm_location is not None)
+    before = {pid: line["qty"] for pid, line in state["cart"].items()}
+
+    on_stage("checking_location")
+    loc = state["location"]
+    app = {"lat": loc["lat"], "lon": loc["lon"], "store_id": None, "area": loc.get("area")}
+    matched = cart_fill.location_matches(app, target, None, max_location_m)
+    if not matched and confirm_location is not None:
+        return cart_fill.outcome("failed", [], None, app_location=app, error="location_changed")
+    selected = False
+    if not matched and not state["locked"]:
+        on_stage("selecting_location")
+        state["location"] = {"lat": target["lat"], "lon": target["lon"], "area": target.get("area")}
+        app = {"lat": target["lat"], "lon": target["lon"], "store_id": None, "area": target.get("area")}
+        matched = selected = True
+        _save_state(path, state)
+    if not matched:
+        on_stage("repricing")
+        again = _fill_catalog(site, True)
+        out = []
+        for item in (i for i in plan if i.get("action") == "add"):
+            name, price = again.get(item.get("product_id"), (None, None))
+            packs = item.get("packs") or 1
+            old = item.get("price")
+            out.append({"idx": item.get("idx"), "name": item.get("name"), "product_id": item.get("product_id"),
+                        "old_price": round(packs * old, 2) if old is not None else None,
+                        "new_price": packs * price if price is not None else None,
+                        "in_stock": name not in FILL_OUT_OF_STOCK[site] if name else False})
+        return cart_fill.outcome("needs_confirmation", [], None, app_location=app, repriced=out)
+
+    on_stage("adding")
+    results, attempted = [], []
+    for item in plan:
+        res = cart_fill._base(item)
+        action = item.get("action")
+        if action == "skip":
+            res["status"] = "skipped"
+            res["skip_reason"] = item.get("reason") if item.get("reason") in cart_fill.SKIP_REASONS else None
+        elif action == "ask":
+            answer = ask(item.get("question"), item.get("choices") or [])
+            choice = None if answer in (None, "skip") else next(
+                (c for c in item.get("choices") or [] if c.get("id") is not None and str(c["id"]) == str(answer)),
+                None)
+            if choice is None:
+                res["status"] = "skipped"
+                res["skip_reason"] = "no_answer" if answer is None else "you_skipped"
+            else:
+                res.update(product_id=choice.get("product_id"), name=choice.get("name"), packs=choice.get("packs"))
+                action = "add"
+        elif action != "add":
+            res["status"] = "not_added"
+        if res["status"] is None:
+            pid, packs = str(res["product_id"]), res["packs"]
+            name = (prices.get(pid) or (res["name"], 0))[0]
+            res["product_id"] = pid
+            if name in FILL_OUT_OF_STOCK[site]:
+                res["status"] = "out_of_stock"
+            else:
+                line = state["cart"].setdefault(pid, {"name": name, "qty": 0})
+                line["qty"] = min(FAKE_MAX_QTY, line["qty"] + packs)
+            attempted.append(len(results))
+        results.append(res)
+        on_item(dict(res))
+    _save_state(path, state)
+
+    after = {pid: line["qty"] for pid, line in state["cart"].items()}
+    checked, existing_changed = cart_fill.verify(before, after, [results[i] for i in attempted])
+    for pos, item in zip(attempted, checked):
+        results[pos] = item
+    cart = _cart_view(site, state, prices)
+    cart["existing_count"] = sum(1 for pid in state["cart"] if before.get(pid, 0) > 0)
+    counts = {s: sum(1 for i in results if i["status"] == s) for s in ("added", "partial")}
+    tried = [i for i in results if not (i["status"] == "skipped" and i["skip_reason"] in cart_fill.USER_SKIPS)]
+    if not counts["added"] and not counts["partial"]:
+        status, error = "failed", "nothing_added"
+    elif all(i["status"] == "added" for i in tried):
+        status, error = "done", None
+    else:
+        status, error = "partial", None
+    return cart_fill.outcome(status, results, cart, app_location=app, location_selected=selected, error=error,
+                             existing_changed=existing_changed)

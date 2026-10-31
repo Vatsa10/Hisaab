@@ -408,7 +408,7 @@ resource worker 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             custom: {
               type: 'postgresql'
               metadata: {
-                query: 'select count(*) from jobs j where j.type in (\'connect\',\'sync\',\'learn\') and (j.status = \'running\' or (j.status = \'queued\' and (j.run_after is null or j.run_after <= now()) and not (j.type = \'sync\' and exists (select 1 from site_backoff b where b.until > now() and (case b.site when \'instamart\' then \'swiggy\' else b.site end) = j.profile))))'
+                query: 'select count(*) from jobs j where j.type in (\'connect\',\'sync\',\'learn\',\'search\',\'fill_cart\') and (j.status = \'running\' or (j.status = \'queued\' and (j.run_after is null or j.run_after <= now()) and not (j.type = \'sync\' and exists (select 1 from site_backoff b where b.until > now() and (case b.site when \'instamart\' then \'swiggy\' else b.site end) = j.profile))))'
                 targetQueryValue: '1'
               }
               auth: [
