@@ -74,6 +74,14 @@ class LocalStore:
         p = self._path(key)
         return p.read_bytes() if p.is_file() else None
 
+    def version(self, key: str) -> str | None:
+        """A token that changes whenever the blob is rewritten (None: no blob)."""
+        p = self._path(key)
+        if not p.is_file():
+            return None
+        st = p.stat()
+        return f"{st.st_mtime_ns}-{st.st_size}"
+
     def delete(self, key: str) -> int:
         p = self._path(key)
         if p.is_file():
@@ -118,6 +126,13 @@ class BlobStore:
         from azure.core.exceptions import ResourceNotFoundError
         try:
             return self._container.download_blob(key).readall()
+        except ResourceNotFoundError:
+            return None
+
+    def version(self, key: str) -> str | None:
+        from azure.core.exceptions import ResourceNotFoundError
+        try:
+            return self._container.get_blob_client(key).get_blob_properties().etag
         except ResourceNotFoundError:
             return None
 
@@ -310,6 +325,11 @@ def save_profile(store, master_key: bytes, user_id: str, profile: str, profile_d
     key = blob_key(user_id, profile)
     store.put(key, _seal(master_key, user_id, profile, _pack(profile_dir)))
     return key
+
+
+def profile_version(store, user_id: str, profile: str) -> str | None:
+    """The stored profile's version token (etag / mtime); a warm Chrome is reused only while it is unchanged."""
+    return store.version(blob_key(user_id, profile))
 
 
 def restore_profile(store, master_key: bytes, user_id: str, profile: str, dest_dir: Path) -> bool:

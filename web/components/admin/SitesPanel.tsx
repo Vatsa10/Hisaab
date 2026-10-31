@@ -207,6 +207,14 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
         </Badge>
       ) : null}
 
+      {s.p50_ms != null ? (
+        <p className="mt-3 text-label tabular-nums text-ink-muted" data-testid="site-speed">
+          Speed <span className="text-ink">{(s.p50_ms / 1000).toFixed(1)}s</span> typical ·{" "}
+          <span className="text-ink">{((s.p95_ms ?? s.p50_ms) / 1000).toFixed(1)}s</span> slowest
+          {s.slow_jobs_window ? <> · {s.slow_jobs_window} over budget</> : null}
+        </p>
+      ) : null}
+
       {cart ? null : (
       <p className="mt-3 text-label tabular-nums text-ink-muted" suppressHydrationWarning>
         <span className="text-ink">{s.syncs_ok_7d}</span> ok ·{" "}

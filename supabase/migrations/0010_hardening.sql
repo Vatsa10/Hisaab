@@ -45,3 +45,6 @@ create table if not exists usage_erased (
 alter table usage_erased enable row level security;
 revoke all on usage_erased from anon, authenticated;
 grant all on usage_erased to service_role;
+
+-- Speed budgets: per-job phase timings ({phases:[{phase,ms}], total_ms, slow}).
+alter table jobs add column if not exists timings jsonb;

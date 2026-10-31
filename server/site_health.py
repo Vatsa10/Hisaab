@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 
-from server import notify, recipe_admin, sites, usage
+from server import notify, recipe_admin, sites, timing, usage
 from server.config import SITE_NAMES, Settings
 
 
@@ -125,7 +125,21 @@ def health_fields(conn, s: Settings, site: str, now: datetime | None = None) -> 
                        (list(sites.same_profile(site)),)).fetchone()
     stats = [st for st in failure_stats(conn, now, s.error_budget_window_h) if st["site"] == site]
     return {"cooldown_until": cooldown_until(conn, site, now), "backoff_level": int(row[0]),
-            "failures_window": sum(st["failed"] for st in stats), "jobs_window": sum(st["total"] for st in stats)}
+            "failures_window": sum(st["failed"] for st in stats), "jobs_window": sum(st["total"] for st in stats),
+            **speed_fields(conn, s, site, now)}
+
+
+def speed_fields(conn, s: Settings, site: str, now: datetime) -> dict:
+    """p50/p95 job time (ms) and the count of jobs flagged slow over the error-budget window, from jobs.timings."""
+    now = usage.as_utc(now)
+    rows = conn.execute(
+        "SELECT (timings->>'total_ms')::float8, coalesce((timings->>'slow')::boolean, false) FROM jobs "
+        "WHERE site = ANY(%s) AND timings IS NOT NULL AND finished_at >= %s AND finished_at <= %s",
+        (list(sites.same_profile(site)), now - timedelta(hours=s.error_budget_window_h), now)).fetchall()
+    times = [r[0] for r in rows if r[0] is not None]
+    p50, p95 = timing.percentile(times, 50), timing.percentile(times, 95)
+    return {"p50_ms": None if p50 is None else int(p50), "p95_ms": None if p95 is None else int(p95),
+            "slow_jobs_window": sum(1 for r in rows if r[1])}
 
 
 def check_error_budget(conn, s: Settings, now: datetime) -> list[tuple[str, str]]:

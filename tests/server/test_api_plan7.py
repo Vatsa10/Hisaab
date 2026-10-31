@@ -107,7 +107,8 @@ def test_site_health_fields_report_cooldown_and_failures(pg):
     """The admin site-health rows take these four fields (admin.py itself arrives with the admin API branch)."""
     s = Settings()
     quiet = site_health.health_fields(pg, s, "zepto")
-    assert quiet == {"cooldown_until": None, "backoff_level": 0, "failures_window": 0, "jobs_window": 0}
+    assert quiet == {"cooldown_until": None, "backoff_level": 0, "failures_window": 0, "jobs_window": 0,
+                     "p50_ms": None, "p95_ms": None, "slow_jobs_window": 0}  # + the speed fields (Task 16)
     for i in range(3):
         pg.execute("insert into jobs(user_id, type, site, profile, status, error, finished_at) "
                    "values (%s, 'sync', 'zepto', 'zepto', %s, %s, now())",

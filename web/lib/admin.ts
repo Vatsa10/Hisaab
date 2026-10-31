@@ -51,6 +51,10 @@ export interface SiteHealth {
   backoff_level?: number;
   failures_window?: number;
   jobs_window?: number;
+  /** Job time over the window (ms) and how many jobs ran over their speed budget. */
+  p50_ms?: number | null;
+  p95_ms?: number | null;
+  slow_jobs_window?: number;
   /** Cart rows only: a cart recipe is waiting in Approvals. */
   pending_approval?: boolean;
 }

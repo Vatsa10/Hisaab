@@ -10,6 +10,7 @@ import agent
 import db
 import recipes
 import browser
+from server import timing
 from browser import LOGIN_URL, SITES, SessionExpired, SiteThrottled, fetch_in_page, open_site, raise_if_blocked
 
 log = logging.getLogger("sync")
@@ -270,15 +271,20 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
         if not allow_learn:
             raise RecipeError(f"no recipe for {site}; an admin must learn it")
         recipe = learn(site)
+    opening = timing.Phase("open")
+    opening.__enter__()
     with open_site(site, allowlist=recipe.get("read_post_allowlist"), profile_dir=profile_dir,
                    location=location, proxy_server=proxy_server,
                    block_media=block_media) as (_, page, guard, capture):
+        opening.__exit__(None, None, None)
         orders = None
-        goto(page, orders_page_url or recipe["orders_page_url"])
-        raise_if_blocked(page)
+        with timing.Phase("session_check"):
+            goto(page, orders_page_url or recipe["orders_page_url"])
+            raise_if_blocked(page)
         if recipe.get("fast_path_ok", True):
             try:
-                orders = fast_path(page, recipe, since, on_progress)
+                with timing.Phase("fetch"):
+                    orders = fast_path(page, recipe, since, on_progress)
             except (SessionExpired, SiteThrottled):
                 raise
             except Exception as e:

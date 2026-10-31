@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 
 import browser
+from server import timing
 from cart_recipe import (_request, add_value, build_add_request, build_current_request, build_location_request,
                          build_read_request, extract_cart, policy_for)
 from recipes import get_path, to_number
@@ -227,9 +228,11 @@ def fill_cart(site, plan, priced, recipe, search_recipe, profile_dir, ask: Calla
     location = {"query": target.get("area"), "lat": target.get("lat"), "lon": target.get("lon")}
     with browser.open_site(site, profile_dir=profile_dir, location=location, proxy_server=proxy_server,
                            block_media=True, cart_policy=policy_for(recipe, search_recipe)) as (_ctx, page, guard, _c):
-        browser.goto(page, recipe["home_url"])
-        return _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage,
-                     confirm_location, max_location_m)
+        with timing.Phase("navigate"):
+            browser.goto(page, recipe["home_url"])
+        with timing.Phase("fetch"):  # the location check, the priced adds and the final cart read
+            return _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage,
+                         confirm_location, max_location_m)
 
 
 def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage, confirm_location,

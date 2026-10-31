@@ -140,6 +140,11 @@ var budgetEnv = [
   { name: 'ERROR_BUDGET_MIN_JOBS', value: errorBudgetMinJobs }
   { name: 'ERROR_BUDGET_MAX_FAILURE_PCT', value: errorBudgetMaxFailurePct }
   { name: 'NEEDS_LOGIN_REMIND_H', value: needsLoginRemindH }
+  { name: 'SYNC_BUDGET_S', value: '30' }
+  { name: 'COMPARE_BUDGET_S', value: '20' }
+  { name: 'FOOD_COMPARE_BUDGET_S', value: '20' }
+  { name: 'FILL_BUDGET_S', value: '30' }
+  { name: 'WARM_CHROME_IDLE_S', value: '120' }
   { name: 'HEARTBEAT_S', value: heartbeatS }
   { name: 'MAX_JOB_S', value: maxJobS }
   { name: 'DRAIN_S', value: drainS }

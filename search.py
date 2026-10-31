@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 import browser
 import recipes
 import sync
+from server import timing
 
 log = logging.getLogger("search")
 
@@ -344,7 +345,9 @@ def search_products(site: str, queries, location: dict, recipe: dict, profile_di
                            location=location, proxy_server=proxy_server, block_media=block_media) as (
             _, page, _guard, capture):
         try:
-            browser.goto(page, recipe["home_url"])
+            with timing.Phase("session_check"):
+                if not browser.on_origin(page, recipe["home_url"]):  # a page already there skips the load
+                    browser.goto(page, recipe["home_url"])
         except (browser.SessionExpired, browser.SiteThrottled):
             raise
         except Exception as e:
@@ -355,19 +358,39 @@ def search_products(site: str, queries, location: dict, recipe: dict, profile_di
             raise Unserviceable(f"{site} has no store for this location")
         if fee_map and fee_map.get("source") == "store":
             fee_info = extract_fee_info(store_data, fee_map)
+        path = recipe["field_map"].get("products_path")
+        prefetched: dict[str, object] = {}
         for i, q in enumerate(queries):
-            if i:
-                _pause()
+            if i == 1:
+                # The first query went alone (a failure there fails the site); the rest are plain in-page API
+                # calls, at most browser.MAX_PARALLEL_FETCH at a time. Any that does not give rows falls back to
+                # search_once below.
+                with timing.Phase("fetch"):
+                    rest = queries[1:]
+                    got = browser.fetch_many_in_page(
+                        page, [build_request(recipe, r, location, store_id) for r in rest])
+                for r, d in zip(rest, got):
+                    if isinstance(d, (browser.SessionExpired, browser.SiteThrottled)):
+                        raise d
+                    if not isinstance(d, Exception) and rows_at(d, path) is not None:
+                        prefetched[r] = d
             try:
-                data = search_once(page, capture, recipe, q, location, store_id)
+                if q in prefetched:
+                    data = prefetched[q]
+                else:
+                    if i and not prefetched:
+                        _pause()
+                    with timing.Phase("fetch"):
+                        data = search_once(page, capture, recipe, q, location, store_id)
             except (SearchDrift, SearchTransient) as e:
                 if i == 0:
                     raise
                 errors[q] = "drift" if isinstance(e, SearchDrift) else "transient"
                 continue
-            products[q] = extract_products(data, recipe["field_map"])[:max_results]
-            if fee_map and fee_map.get("source", "search") == "search":
-                fee_info = extract_fee_info(data, fee_map) | fee_info  # first observation wins per key
+            with timing.Phase("parse"):
+                products[q] = extract_products(data, recipe["field_map"])[:max_results]
+                if fee_map and fee_map.get("source", "search") == "search":
+                    fee_info = extract_fee_info(data, fee_map) | fee_info  # first observation wins per key
     log.info("%s search: %d queries, %d products, %d failed", site, len(queries),
              sum(len(v) for v in products.values()), len(errors))
     return {"products": products, "errors": errors, "fee_info": fee_info}

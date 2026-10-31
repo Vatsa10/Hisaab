@@ -1,5 +1,6 @@
 """Persistent headful Chrome per site, with the read-only guard and JSON response capture."""
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -156,7 +157,7 @@ def goto(page, url: str, tries: int = 3) -> None:
     """page.goto that retries transient bot-filter/5xx responses (e.g. Swiggy's first-load 403)."""
     for i in range(tries):
         try:
-            r = page.goto(url, wait_until="domcontentloaded")
+            r = page.goto(url, wait_until="commit")
             if not r or r.status not in RETRY_STATUS:
                 break
             _raise_if_throttled_response(r)
@@ -173,18 +174,102 @@ def goto(page, url: str, tries: int = 3) -> None:
                 raise
             log.warning("navigation to %s failed (%s), retrying", urlsplit(url).path, str(e).split(" at ")[0][-40:])
         page.wait_for_timeout(4000 * (i + 1))
-    page.wait_for_timeout(2500)
+    _settle(page)
 
 
-def fetch_in_page(page, req: dict) -> dict:
-    """Run a request from inside the page so the site's own cookies apply. Returns parsed JSON."""
+def _settle(page) -> None:
+    """Wait for the document to be interactive (a load-state wait, not a fixed sleep); best effort."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+
+
+def on_origin(page, url: str) -> bool:
+    """Whether the page is already on url's origin (so goto can be skipped)."""
+    try:
+        a, b = urlsplit(page.url), urlsplit(url)
+    except Exception:
+        return False
+    return bool(b.netloc) and (a.scheme, a.netloc) == (b.scheme, b.netloc)
+
+
+MAX_PARALLEL_FETCH = 4
+_FETCH_MANY_JS = """async ({reqs}) => Promise.all(reqs.map(async ({url, method, headers, body}) => {
+  try {
+    const r = await fetch(url, {method, headers, body, credentials: 'include', signal: AbortSignal.timeout(60000)});
+    return {status: r.status, url: r.url, text: await r.text(), retryAfter: r.headers.get('retry-after')};
+  } catch (e) { return {status: 0, url, text: String(e), retryAfter: null, error: true}; }
+}))"""
+
+
+def _prepare(req: dict) -> dict:
     headers = {k: v for k, v in (req.get("headers") or {}).items() if not SECRET_HEADER.search(k)
                and not k.lower().startswith(("sec-", "content-length", "host", "accept-encoding"))}
     body = req.get("body")
     if isinstance(body, (dict, list)):
         body = json.dumps(body)
         headers.setdefault("content-type", "application/json")
-    r = page.evaluate(_FETCH_JS, {"url": req["url"], "method": req["method"], "headers": headers, "body": body})
+    return {"url": req["url"], "method": req["method"], "headers": headers, "body": body}
+
+
+def _parse_fetch(r: dict) -> dict:
+    if r.get("error"):
+        raise RuntimeError("fetch failed")
+    if kind := classify_block(r["status"], r["text"]):
+        raise SiteThrottled(kind, parse_retry_after(r.get("retryAfter")))
+    if r["status"] in (401, 403) or LOGIN_URL.search(r["url"]):
+        raise SessionExpired(f"HTTP {r['status']}")
+    if r["status"] >= 400:
+        raise RuntimeError(f"HTTP {r['status']}: {r['text'][:500]}")
+    return json.loads(r["text"])
+
+
+def fetch_many_in_page(page, reqs: list[dict]) -> list:
+    """Run independent requests inside the one page, at most MAX_PARALLEL_FETCH at a time (Promise.all per
+    batch). One entry per request: the parsed JSON, or the exception for that request (SessionExpired and
+    SiteThrottled included; the caller re-raises those)."""
+    out: list = []
+    for i in range(0, len(reqs), MAX_PARALLEL_FETCH):
+        batch = [_prepare(r) for r in reqs[i:i + MAX_PARALLEL_FETCH]]
+        for r in page.evaluate(_FETCH_MANY_JS, {"reqs": batch}):
+            try:
+                out.append(_parse_fetch(r))
+            except Exception as e:
+                out.append(e)
+    return out
+
+
+class ChromePool:
+    """One warm Chrome handle, reused by consecutive jobs for the same profile key and closed after idle_s
+    without use. A different key closes the old handle first (one Chrome per worker)."""
+
+    def __init__(self, idle_s: float = 120, clock=time.monotonic):
+        self.idle_s, self.clock = idle_s, clock
+        self.key = self.handle = None
+        self.last_used = 0.0
+
+    def get(self, key, start, close):
+        if self.handle is not None and self.key == key and self.clock() - self.last_used <= self.idle_s:
+            self.last_used = self.clock()
+            return self.handle
+        self.close(close)
+        self.key, self.handle, self.last_used = key, start(key), self.clock()
+        return self.handle
+
+    def close_idle(self, close) -> None:
+        if self.handle is not None and self.clock() - self.last_used > self.idle_s:
+            self.close(close)
+
+    def close(self, close) -> None:
+        h, self.handle, self.key = self.handle, None, None
+        if h is not None:
+            close(h)
+
+
+def fetch_in_page(page, req: dict) -> dict:
+    """Run a request from inside the page so the site's own cookies apply. Returns parsed JSON."""
+    r = page.evaluate(_FETCH_JS, _prepare(req))
     if kind := classify_block(r["status"], r["text"]):
         raise SiteThrottled(kind, parse_retry_after(r.get("retryAfter")))
     if r["status"] in (401, 403) or LOGIN_URL.search(r["url"]):
@@ -332,8 +417,175 @@ def _bypass_service_workers(context, page, done: set[int]) -> None:
     done.add(id(page))
 
 
+POOL = ChromePool()
+_warm_key: contextvars.ContextVar = contextvars.ContextVar("warm_chrome_key", default=None)
+
+
+class WarmChrome:
+    """A Chrome the worker keeps open between jobs for one (user, profile, mode). Owns its Playwright, and
+    `cleanups` (the proxy relay, the profile directory) that run when it is finally closed."""
+
+    def __init__(self, key, proc, pw, browser, cdp, context, profile, proxy_server):
+        self.key, self.proc, self.pw, self.browser, self.cdp = key, proc, pw, browser, cdp
+        self.context, self.profile, self.proxy_server = context, profile, proxy_server
+        self.cleanups: list = []
+        self.bypassed: set[int] = set()
+        self.relay = None  # the proxy relay this Chrome was launched through (metered by delta per job)
+        self.version = None  # the vault object version this profile was restored from
+        self.saver = None  # saves the profile to the vault; runs once, after Chrome has exited
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def close(self, save: bool = True) -> None:
+        """Close Chrome, then (save=True) run the saver, then the cleanups (relay, profile directory). The save
+        happens only after Chrome has exited, so the profile is never packed under a live browser."""
+        with contextlib.suppress(Exception):
+            self.cdp.send("Browser.close")
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.proc.kill()
+        with contextlib.suppress(Exception):
+            self.pw.stop()
+        saver, self.saver = self.saver, None
+        if save and saver is not None and self.proc.poll() is not None:
+            try:
+                saver()
+            except Exception as e:
+                log.warning("warm profile not saved (%s)", type(e).__name__)
+        for fn in reversed(self.cleanups):
+            with contextlib.suppress(Exception):
+                fn()
+
+
 @contextlib.contextmanager
+def warm_scope(key):
+    """Jobs that open a site inside this scope keep their Chrome warm in POOL under `key`."""
+    token = _warm_key.set(key)
+    try:
+        yield
+    finally:
+        _warm_key.reset(token)
+
+
+def warm_handle(key) -> "WarmChrome | None":
+    """The pooled Chrome for `key` if it is still open and fresh; no other key matches."""
+    h = POOL.handle
+    if h is not None and POOL.key == key and h.alive() and POOL.clock() - POOL.last_used <= POOL.idle_s:
+        return h
+    return None
+
+
+def close_warm(save: bool = True) -> None:
+    """Close the pooled Chrome. save=True (idle, key switch, shutdown) stores its profile in the vault; save=False
+    (a failed job, needs_login, throttling) discards what the browser holds."""
+    POOL.close(lambda h: h.close(save=save))
+
+
+def close_idle_warm() -> None:
+    POOL.close_idle(lambda h: h.close())
+
+
+def _launch_warm(key, profile: Path, proxy_server: str | None) -> WarmChrome:
+    profile.mkdir(parents=True, exist_ok=True)
+    port = _free_port()
+    chrome_args = [find_chrome(), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
+                   f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
+                   "--hide-crash-restore-bubble", "--window-size=1280,960"]
+    if proxy_server:
+        chrome_args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>",
+                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
+    chrome_args += os.environ.get("CHROME_EXTRA_ARGS", "").split()
+    proc = subprocess.Popen(chrome_args + ["about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=chrome_env())
+    pw = None
+    try:
+        _wait_for_cdp(port, proc)
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        context = browser.contexts[0]
+        cdp = browser.new_browser_cdp_session()
+        # Read-only: no downloads, browser-wide and for the default context. A failure here aborts the launch.
+        cdp.send("Browser.setDownloadBehavior", {"behavior": "deny"})
+        for ctx_id in {t["browserContextId"] for t in cdp.send("Target.getTargets")["targetInfos"]
+                       if t.get("browserContextId")}:
+            cdp.send("Browser.setDownloadBehavior", {"behavior": "deny", "browserContextId": ctx_id})
+        return WarmChrome(key, proc, pw, browser, cdp, context, profile, proxy_server)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        if pw is not None:
+            with contextlib.suppress(Exception):
+                pw.stop()
+        raise
+
+
+@contextlib.contextmanager
+def _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media, cart_policy):
+    h = warm_handle(key)
+    if h is None:
+        close_warm()
+        h = _launch_warm(key, (profile_dir or PROFILES / SITES[site]["profile"]).resolve(), proxy_server)
+        POOL.key, POOL.handle = key, h
+    POOL.last_used = POOL.clock()
+    context, cart_mode = h.context, cart_policy is not None
+    guard = (CartGuard(cart_policy, block_media, site=site) if cart_mode else Guard(allowlist, False, block_media))
+    capture = Capture()
+    loc = effective_location(location)
+    if loc.get("lat") is not None and loc.get("lon") is not None:
+        context.grant_permissions(["geolocation"])
+        context.set_geolocation({"latitude": loc["lat"], "longitude": loc["lon"]})
+    guard.install(context)
+    capture.install(context)
+    on_page = None
+    try:
+        if cart_mode:
+            for p in context.pages:
+                _bypass_service_workers(context, p, h.bypassed)  # raises: never run cart mode unguarded
+
+            def on_page(p):
+                try:
+                    _bypass_service_workers(context, p, h.bypassed)
+                except Exception:
+                    log.warning("service-worker bypass failed on a new page; closing it")
+                    with contextlib.suppress(Exception):
+                        p.close()
+            context.on("page", on_page)
+        page = context.pages[0] if context.pages else context.new_page()
+        if cart_mode:
+            _bypass_service_workers(context, page, h.bypassed)
+        yield context, page, guard, capture
+    except BaseException:
+        close_warm(save=False)  # a job that blew up leaves no half-used browser behind
+        raise
+    finally:
+        if POOL.handle is h:  # still pooled: hand it back clean for the next job
+            with contextlib.suppress(Exception):
+                if cart_mode:
+                    context.remove_listener("page", on_page)
+                    context.remove_listener("response", guard._on_response)
+                context.remove_listener("response", capture._on_response)
+                context.unroute_all(behavior="ignoreErrors")
+            POOL.last_used = POOL.clock()
+
+
 def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
+              profile_dir: Path | None = None, location: dict | None = None,
+              proxy_server: str | None = None,
+              block_media: bool = False, cart_policy=None):
+    """open_site, or its warm variant inside a warm_scope (never for a login): same yield, but Chrome stays
+    open in POOL for the worker's next job for the same (user, profile, mode)."""
+    key = _warm_key.get()
+    if key is not None and not login_mode:
+        return _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media, cart_policy)
+    return _open_site_cold(site, allowlist, login_mode, profile_dir, location, proxy_server, block_media,
+                           cart_policy)
+
+
+@contextlib.contextmanager
+def _open_site_cold(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
               profile_dir: Path | None = None, location: dict | None = None,
               proxy_server: str | None = None,
               block_media: bool = False, cart_policy=None):

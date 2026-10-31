@@ -125,6 +125,11 @@ def set_progress(conn, job_id: str, **progress) -> None:
     conn.execute("UPDATE jobs SET progress = progress || %s WHERE id=%s", (Jsonb(progress), job_id))
 
 
+def set_timings(conn, job_id: str, timings: dict) -> None:
+    """Store the job's phase timings ({phases, total_ms, slow}); names and milliseconds only."""
+    conn.execute("UPDATE jobs SET timings = %s WHERE id=%s", (Jsonb(timings), job_id))
+
+
 def heartbeat(conn, job_id: str, worker_id: str) -> bool:
     """Record that the worker is alive. Only a job still running under worker_id is touched; returns whether
     a row was updated (False means the job was finished, requeued or taken by another worker)."""

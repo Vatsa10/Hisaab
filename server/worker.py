@@ -32,7 +32,7 @@ import search
 import search_learn
 import sync
 from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
-                    session, site_health, sites, store, usage, vault)
+                    session, site_health, sites, store, timing, usage, vault)
 from server import fill as fills
 from server import fill_summary
 from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, check_hosted, settings
@@ -265,12 +265,16 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
     # The app shows "Found so far" from these, live; throttled so a fast fetch does not flood Realtime.
     found_so_far = throttled(lambda count, amount: jobs.set_progress(
         conn, job.id, stage="syncing", orders_found=count, amount_found=round(float(amount), 2)))
-    orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir, location=_location(conn, job.user_id),
-                   allow_learn=False, proxy_server=proxy_server,
-                   recipe_loader=lambda site: _bound_recipe(conn, site, own.get("orders_page_url")),
-                   orders_page_url=own.get("orders_page_url"), on_progress=found_so_far,
-                   block_media=block_media)
-    with jobs.owned(conn, job.id, job.worker_id):  # nothing is written for a job that is no longer ours
+    with contextlib.ExitStack() as phases:
+        if fetch is not None and fetch is not sync.fetch_orders:  # the fake: sync.fetch_orders times its own open/session/fetch/parse phases
+            phases.enter_context(timing.Phase("fetch"))
+        orders = (fetch or sync.fetch_orders)(job.site, None, profile_dir=profile_dir,
+                       location=_location(conn, job.user_id),
+                       allow_learn=False, proxy_server=proxy_server,
+                       recipe_loader=lambda site: _bound_recipe(conn, site, own.get("orders_page_url")),
+                       orders_page_url=own.get("orders_page_url"), on_progress=found_so_far,
+                       block_media=block_media)
+    with timing.Phase("store"), jobs.owned(conn, job.id, job.worker_id):  # nothing is written for a job no longer ours
         n = store.upsert_orders(conn, job.user_id, db_site, orders, sub_platform=sub_platform)
         total = conn.execute(
             "SELECT coalesce(sum(total_amount), 0) FROM orders WHERE user_id=%s AND site=%s AND order_id = ANY(%s) "
@@ -278,7 +282,8 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
             (job.user_id, db_site, [o["order_id"] for o in orders], list(_NOT_COUNTED))).fetchone()[0]
         store.set_connection(conn, job.user_id, db_site, status="connected",
                              last_synced_at=datetime.now(timezone.utc))
-    jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2))
+    jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2),
+                      phase_ms=timing.current_phase_ms())
     return n, float(total)
 
 
@@ -409,7 +414,8 @@ def _on_search_drift(conn, s: Settings, job: jobs.Job, db_site: str, recipe_kind
         log.error("could not enqueue a %s re-learn for %s (%s)", kind, job.site, type(e).__name__)
 
 
-def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay, seconds: float) -> None:
+def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay, seconds: float,
+                  base_bytes: int = 0) -> None:
     """Add this job's proxy, AI and worker time to the user's usage for today (IST). Never fails the job."""
     try:
         with conn.transaction():
@@ -417,7 +423,7 @@ def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay
             if conn.execute("SELECT 1 FROM auth.users WHERE id=%s FOR KEY SHARE", (job.user_id,)).fetchone() is None:
                 return
             usage.record(conn, job.user_id, usage.today(tz=s.app_tz),
-                         proxy_mb=(relay.bytes_total if relay is not None else 0) / 1e6,
+                         proxy_mb=max(0, (relay.bytes_total if relay is not None else 0) - base_bytes) / 1e6,
                          ai_tokens=meter.ai_tokens(s.jev_tokens_per_call),
                          worker_seconds=seconds,
                          syncs=1 if job.type in ("connect", "sync") else 0)
@@ -760,7 +766,16 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     phone = (job.payload or {}).get("phone")
     auto_learn = job.type == "learn" and bool((job.payload or {}).get("auto"))
     profile_name = sites.profile_for(job.site)
-    profile_dir = _profiles_root() / job.id
+    # Warm Chrome: one per (user, profile, mode). Anything else (another user, cart vs not, idle, a login or
+    # learn job) closes the pooled one first, so a profile is never open in two browsers.
+    warm_key, warm = None, None
+    if job.type in ("sync", "search", "fill_cart") and not _fake_mode():
+        warm_key = (job.user_id, profile_name, job.type == "fill_cart")
+        browser.POOL.idle_s = s.warm_chrome_idle_s
+        warm = browser.warm_handle(warm_key)
+    if warm is None:
+        browser.close_warm()
+    profile_dir = warm.profile if warm is not None else _profiles_root() / job.id
     runs_dir = Path(tempfile.mkdtemp(prefix="ea-runs-"))
     stop_hb = threading.Event()
     max_s = s.max_learn_job_s if job.type == "learn" else s.max_job_s
@@ -771,13 +786,17 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     fake = _fake_mode()
     restored = False
     relay = None
+    relay_base = 0
     metered = contextlib.ExitStack()
     meter = metered.enter_context(metering.meter())
+    rec = timing.Recorder()
+    metered.enter_context(timing.recording(rec))
 
     def fail(error: str, status: str | None = None, touch_connection: bool = True,
              interrupted: bool = False) -> None:
         """Finish the job as failed. touch_connection=False leaves the connection row (and its "logged you out"
         notification) alone: a learn that never started on the admin's account is not about their session."""
+        browser.close_warm(save=False)  # a failed job never leaves its browser warm (needs_login, errors, throttling)
         if job.type == "search":
             return end_search("needs_login" if error == "needs_login" else "failed", error=error)
         if job.type == "fill_cart" and _fill_id(job):  # the fill row never outlives its job unfinished
@@ -817,20 +836,29 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
 
     def _expire_session() -> None:
         """The one needs_login path: flip the connection once per episode, tell the user once, then dispatch."""
+        browser.close_warm(save=False)
         try:
             session.mark_needs_login(conn, job.user_id, db_site)
         except Exception as e:
             log.error("job %s: session expiry not recorded (%s)", job.id, type(e).__name__)
+            try:  # fall back to the plain status flip so the user is still asked to log in again
+                store.set_connection(conn, job.user_id, db_site, status="needs_login")
+            except Exception as e2:
+                log.error("job %s: needs_login fallback failed (%s)", job.id, type(e2).__name__)
             return
         _dispatch(conn, s)
 
     def throttled_out(e: browser.SiteThrottled) -> None:
         """R5: the site rate-limited us. Cool the site down; a sync waits and retries, a search reports blocked,
         any other job fails site_busy."""
+        browser.close_warm(save=False)
         until = site_health.record_throttle(conn, job.site, e.kind, e.retry_after_s, s)
         if job.type == "sync":
-            if jobs.requeue(conn, job.id, job.worker_id, run_after=until, max_attempts=s.max_job_attempts):
+            outcome = jobs.requeue(conn, job.id, job.worker_id, run_after=until, max_attempts=s.max_job_attempts)
+            if outcome == "queued":
                 jobs.set_progress(conn, job.id, stage="cooling_down", until=until.isoformat())
+            elif not outcome:
+                fail("site_busy")  # not requeued and still ours (fenced by worker_id): never leave it hanging
             return
         if job.type == "search":
             return end_search("failed", "blocked")
@@ -839,6 +867,36 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     def save_profile() -> None:
         if fake:
             return
+        pooled = browser.POOL.handle
+        if warm_key is not None and pooled is not None and browser.POOL.key == warm_key:
+            # Chrome stays warm for the next job: the profile is saved once, when the pool closes (after Chrome
+            # has exited), by the saver below. Never tar a profile under a live browser.
+            pooled.saver = lambda h=pooled: deferred_save(h)
+            return
+        _save_now()
+
+    def deferred_save(h) -> None:
+        """Runs from WarmChrome.close() once Chrome has exited. Skipped when another worker saved a newer copy
+        meanwhile (never overwrite a newer login with this older session) and when the account is gone. Uses a
+        fresh connection if the job's has closed or broke."""
+        if vault.profile_version(vault_store, job.user_id, profile_name) != h.version:
+            log.info("job %s: warm profile not saved; another worker saved a newer copy", job.id)
+            return
+        def guarded_save(c) -> None:
+            with c.transaction():  # the user row is held while the blob is written: no save for a deleting account
+                if c.execute("select 1 from auth.users where id=%s for key share", (job.user_id,)).fetchone():
+                    vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
+        fresh = None
+        try:
+            try:
+                guarded_save(conn)
+            except (psycopg.OperationalError, psycopg.InterfaceError):
+                fresh = _connect(s.database_url)
+                guarded_save(fresh)
+        finally:
+            _close(fresh)
+
+    def _save_now() -> None:
         try:
             with jobs.owned(conn, job.id, job.worker_id):  # a job that is no longer ours saves nothing
                 key = vault.save_profile(vault_store, s.profile_master_key, job.user_id, profile_name, profile_dir)
@@ -866,10 +924,23 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             fill_ctx = _fill_precheck(job, conn, s, db_site)
             if fill_ctx is None:
                 return
-        shutil.rmtree(profile_dir, ignore_errors=True)
         vault_store = None if fake else vault.store_from_url(s.profile_store_url)
+        stored_version = None if fake else vault.profile_version(vault_store, job.user_id, profile_name)
+        if warm is not None and warm.version != stored_version:
+            # Another worker saved this profile since this Chrome restored it: its session is stale. Drop it
+            # without saving (that would overwrite the newer copy) and restore cold.
+            log.info("job %s: warm Chrome is stale; restoring the stored profile", job.id)
+            browser.close_warm(save=False)
+            warm = None
+            profile_dir = _profiles_root() / job.id
+        if warm is None:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        else:
+            restored = True  # the warm Chrome still holds this user's restored, stamped profile
+            relay = warm.relay  # its proxy relay lives on; this job is metered by the bytes it adds
+            relay_base = relay.bytes_total if relay is not None else 0
         try:
-            if not fake:
+            if not fake and warm is None:
                 restored = vault.restore_profile(vault_store, s.profile_master_key, job.user_id, profile_name,
                                                  profile_dir)
         except (vault.VaultKeyMismatch, vault.ProfileOwnerMismatch):
@@ -888,13 +959,13 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             # connection row is neither written nor reported as logged out.
             return fail("needs_login", touch_connection=False)
         profile_dir.mkdir(parents=True, exist_ok=True)
-        if not fake:  # restored or fresh, the directory is stamped with its owner before Chrome and the save
+        if not fake and warm is None:  # restored or fresh, the directory is stamped with its owner before Chrome
             vault.stamp(profile_dir, job.user_id, profile_name)
         session_id = _ensure_proxy_session(conn, job.user_id, db_site)
 
         with contextlib.ExitStack() as stack:
-            proxy_server = None
-            if s.proxy_url_template and not fake:
+            proxy_server = warm.proxy_server if warm is not None else None
+            if s.proxy_url_template and not fake and warm is None:
                 # Any failure here (a template that does not parse, a relay that will not start, an unreachable
                 # or refusing upstream) is "proxy_unavailable". Exception text is never used: it can quote the
                 # upstream URL, which carries the proxy credentials.
@@ -908,6 +979,17 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                     log.warning("job %s: proxy %s unavailable (%s)", job.id, _proxy_host(upstream), reason)
                     return fail("proxy_unavailable")
                 proxy_server = relay.url
+
+            if warm_key is not None and warm is None:
+                def adopt():  # a Chrome this job left warm owns the relay and the profile directory from now on
+                    h = browser.POOL.handle
+                    if h is not None and browser.POOL.key == warm_key and not h.cleanups:
+                        h.relay, h.version = relay, stored_version
+                        h.cleanups.append(stack.pop_all().close)
+                        h.cleanups.append(lambda: shutil.rmtree(profile_dir, ignore_errors=True))
+                stack.callback(adopt)
+            if warm_key is not None:  # entered last so it unwinds before adopt() moves the relay out of the stack
+                stack.enter_context(browser.warm_scope(warm_key))
 
             if job.type == "fill_cart":
                 _do_fill(job, conn, s, fill_ctx, profile_dir, proxy_server, listen, fake, save_profile)
@@ -1004,8 +1086,14 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         stop_hb.set()
         heartbeat.join(5)
         _close(listen_conn)
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        pooled = browser.POOL.handle
+        if pooled is None or pooled.profile != Path(profile_dir).resolve():  # a warm Chrome keeps its profile dir
+            shutil.rmtree(profile_dir, ignore_errors=True)
         shutil.rmtree(runs_dir, ignore_errors=True)
+        try:  # a job over budget is flagged slow in its timings; never a user-facing failure
+            jobs.set_timings(conn, job.id, rec.summary(job.site, _budget_s(job, s)))
+        except Exception as e:
+            log.warning("job %s: timings not stored (%s)", job.id, type(e).__name__)
         try:
             metered.close()
         except Exception as e:  # metering must never fail or escape a job
@@ -1015,7 +1103,17 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 cart.finalize_if_complete(conn, job.payload["request_id"], s)
             except Exception as e:
                 log.warning("job %s: check not finalized (%s)", job.id, type(e).__name__)
-        _record_usage(conn, job, s, meter, relay, time.monotonic() - started)
+        _record_usage(conn, job, s, meter, relay, time.monotonic() - started, base_bytes=relay_base)
+
+
+def _budget_s(job: jobs.Job, s: Settings) -> int:
+    """The owner's speed target for this kind of job (seconds)."""
+    if job.type == "fill_cart":
+        return s.fill_budget_s
+    if job.type == "search":
+        return s.food_compare_budget_s if (job.payload or {}).get("op") in ("restaurants", "menu") \
+            else s.compare_budget_s
+    return s.sync_budget_s
 
 
 def _connect(url: str):
@@ -1168,6 +1266,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 if conn is None:
                     conn = _connect(s.database_url)
                 _requeue_stale(conn, s)
+                browser.close_idle_warm()
                 job = jobs.claim(conn, worker_id, JOB_TYPES)
                 if job is None:
                     failures = 0
@@ -1203,6 +1302,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
     except KeyboardInterrupt:
         pass
     finally:
+        browser.close_warm()  # shutdown closes the warm Chrome
         drain.finish()
         _close(conn)
         if installed:

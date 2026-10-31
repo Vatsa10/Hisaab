@@ -68,6 +68,12 @@ class Settings:
     error_budget_min_jobs: int = 10
     error_budget_max_failure_pct: int = 30
     needs_login_remind_h: int = 72
+    # Speed budgets (owner targets, seconds): a job over its budget is flagged slow, never failed
+    sync_budget_s: int = 30
+    compare_budget_s: int = 20
+    food_compare_budget_s: int = 20
+    fill_budget_s: int = 30
+    warm_chrome_idle_s: int = 120
     # API-only: the Ask login, the PWA origins and the LLM (checked by check_hosted)
     ask_database_url: str = field(default="", repr=False)
     cors_origins: tuple[str, ...] = (DEFAULT_CORS_ORIGINS,)
@@ -182,6 +188,11 @@ def settings(for_worker: bool = False) -> Settings:
         error_budget_min_jobs=int(env("ERROR_BUDGET_MIN_JOBS", "10")),
         error_budget_max_failure_pct=int(env("ERROR_BUDGET_MAX_FAILURE_PCT", "30")),
         needs_login_remind_h=int(env("NEEDS_LOGIN_REMIND_H", "72")),
+        sync_budget_s=int(env("SYNC_BUDGET_S", "30")),
+        compare_budget_s=int(env("COMPARE_BUDGET_S", "20")),
+        food_compare_budget_s=int(env("FOOD_COMPARE_BUDGET_S", "20")),
+        fill_budget_s=int(env("FILL_BUDGET_S", "30")),
+        warm_chrome_idle_s=int(env("WARM_CHROME_IDLE_S", "120")),
         ask_database_url=env("ASK_DATABASE_URL", ""),
         cors_origins=tuple(o.strip() for o in (env("CORS_ORIGINS", "") or DEFAULT_CORS_ORIGINS).split(",")
                            if o.strip()),

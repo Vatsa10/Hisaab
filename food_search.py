@@ -27,6 +27,7 @@ import agent
 import browser
 import recipes
 import sync
+from server import timing
 from search import (SearchDrift, SearchError, SearchTransient, Unserviceable, fail, fast_attempt,  # noqa: F401
                     page_attempt, to_stock)
 
@@ -296,8 +297,9 @@ def _open(site: str, recipe: dict, profile_dir, location: dict, proxy_server, bl
 
 
 def _goto(page, url: str) -> None:
-    browser.goto(page, url)
-    sync.ensure_logged_in(page)
+    with timing.Phase("navigate"):
+        browser.goto(page, url)
+        sync.ensure_logged_in(page)
 
 
 def own_page(site: str, url: str) -> str:
@@ -335,7 +337,8 @@ def search_restaurants(site: str, query: str, location: dict, recipe: dict, prof
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         home = browser.home_url(site, location)
         _goto(page, home)
-        kind, data = fast_attempt(page, build_request(recipe, location, recipe.get("query_param"), query))
+        with timing.Phase("fetch"):
+            kind, data = fast_attempt(page, build_request(recipe, location, recipe.get("query_param"), query))
         fast = kind == "ok" and path_exists(data, rows_path)
         if not fast:
             kind = "shape" if kind == "ok" else kind
@@ -386,8 +389,9 @@ def fetch_menu(site: str, restaurant_id: str, location: dict, recipe: dict, prof
         _goto(page, browser.home_url(site, location))
         menu, data, kind = None, None, "none"
         if recipe.get("restaurant_param"):
-            kind, data = fast_attempt(page, build_request(recipe, location, recipe["restaurant_param"],
-                                                          str(restaurant_id)))
+            with timing.Phase("fetch"):
+                kind, data = fast_attempt(page, build_request(recipe, location, recipe["restaurant_param"],
+                                                              str(restaurant_id)))
             menu = menu_result(data, fm) if kind == "ok" else None
             if menu is None and kind == "ok":
                 kind = "shape"

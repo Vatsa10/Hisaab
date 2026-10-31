@@ -114,7 +114,7 @@ def test_build_request_needs_a_location():
 
 # --- the search run ----------------------------------------------------------
 
-def fake_env(monkeypatch, fetch=None, capture_on_goto=None, start_url="https://www.zepto.com/"):
+def fake_env(monkeypatch, fetch=None, capture_on_goto=None, start_url="about:blank"):
     """Patch the browser edges search uses. fetch(req) answers fetch_in_page; capture_on_goto(url) returns the
     captured items the site's own page would produce on that navigation."""
     seen = {"open_site": [], "goto": [], "fetch": [], "pauses": 0}
@@ -144,6 +144,16 @@ def fake_env(monkeypatch, fetch=None, capture_on_goto=None, start_url="https://w
     monkeypatch.setattr(browser, "open_site", fake_open)
     monkeypatch.setattr(browser, "goto", fake_goto)
     monkeypatch.setattr(browser, "fetch_in_page", fake_fetch)
+
+    def fake_many(p, reqs):  # the parallel batch: same answers, one per request, exceptions returned not raised
+        out = []
+        for r in reqs:
+            try:
+                out.append(fake_fetch(p, r))
+            except Exception as e:
+                out.append(e)
+        return out
+    monkeypatch.setattr(browser, "fetch_many_in_page", fake_many)
     monkeypatch.setattr(search, "_pause", lambda: seen.__setitem__("pauses", seen["pauses"] + 1))
     return seen
 
@@ -167,7 +177,7 @@ def test_search_products_fast_path(monkeypatch):
     assert s1["headers"]["storeid"] == "store-77" and query_of(s1["url"])["query"] == "milk"
     assert query_of(s2["url"])["query"] == "amul gold"
     assert seen["goto"] == ["https://www.zepto.com/"]  # home only: no search page navigation needed
-    assert seen["pauses"] == 1  # between the two queries
+    assert seen["pauses"] == 0  # the later queries go out together (at most 4 at once): nothing to pause between
     assert out["errors"] == {}
 
 

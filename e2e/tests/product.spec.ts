@@ -367,8 +367,13 @@ test("sign up, connect Swiggy with an OTP, and Spend, Orders and Ask fill in", a
   await test.step("consent -> phone -> otp_needed -> OTP -> first sync", async () => {
     const sheet = await startConnect(page, "Swiggy", PHONE);
     await expect(appRow(page, "Swiggy")).toContainText("Syncing…");
+    const syncStart = Date.now();
     await typeOtp(sheet, "Swiggy", FAKE_OTP);
     sync = await waitForFirstSync(sheet, "Swiggy");
+    // Speed budget (owner target): connect -> synced inside SYNC_BUDGET_S per app. Fake mode adds no page delay.
+    const syncS = (Date.now() - syncStart) / 1000;
+    console.log(`speed connect->synced Swiggy ${syncS.toFixed(1)}s`);
+    expect(syncS, "first sync is over its 30 s budget").toBeLessThan(Number(process.env.SYNC_BUDGET_S ?? 30));
     await expectNothingSensitiveStored(page, [PHONE, `+91${PHONE}`, FAKE_OTP]);
     await closeSheet(page, sheet);
     await expectSynced(page, "Swiggy");
@@ -538,4 +543,67 @@ test("connect flow updates live", async ({ page, browser }) => {
   } finally {
     await other.close();
   }
+});
+
+// ---- speed budgets: compare -> ranked and fill -> done (fake mode, FAKE_PAGE_DELAY_S=0) -------------------------
+// These drive the cart API with the signed-in user's own token. They need the fake world to have learned grocery
+// search and cart recipes, three connected grocery apps and a saved address, so they run only when
+// E2E_SPEED_FULL=1 (the owner's local run once Plan 5/6 are seeded); connect -> synced above always runs.
+const COMPARE_BUDGET_S = Number(process.env.COMPARE_BUDGET_S ?? 20);
+const FILL_BUDGET_S = Number(process.env.FILL_BUDGET_S ?? 30);
+const API_URL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
+
+async function accessToken(page: Page): Promise<string> {
+  const cookies = await page.context().cookies();
+  const raw = cookies
+    .filter((c) => /^sb-.*-auth-token/.test(c.name))
+    .map((c) => c.value)
+    .join("");
+  const text = raw.startsWith("base64-") ? Buffer.from(raw.slice(7), "base64").toString("utf8") : decodeURIComponent(raw);
+  return (JSON.parse(text) as { access_token: string }).access_token;
+}
+
+async function api(page: Page, method: "GET" | "POST", path: string, body?: unknown) {
+  const token = await accessToken(page);
+  return page.request.fetch(`${API_URL}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    data: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+test("compare -> ranked and fill -> done stay inside their speed budgets", async ({ page }) => {
+  test.skip(process.env.E2E_SPEED_FULL !== "1", "needs seeded cart recipes, connected grocery apps and an address");
+  await signUp(page, "speed");
+  const compareStart = Date.now();
+  const started = await api(page, "POST", "/cart/checks", { items: [{ text: "amul butter", qty: 1 }] });
+  expect(started.status()).toBe(202);
+  const { request_id: requestId } = (await started.json()) as { request_id: string };
+  await expect
+    .poll(async () => (await api(page, "GET", `/cart/checks/${requestId}/fill`)).status(), {
+      timeout: COMPARE_BUDGET_S * 1000,
+      intervals: [250],
+    })
+    .toBe(200);
+  const compareS = (Date.now() - compareStart) / 1000;
+  console.log(`speed compare->ranked ${compareS.toFixed(1)}s`);
+  expect(compareS, "compare is over its budget").toBeLessThan(COMPARE_BUDGET_S);
+
+  const fillStart = Date.now();
+  const filled = await api(page, "POST", `/cart/checks/${requestId}/fill`, { site: "zepto" });
+  expect(filled.status()).toBe(202);
+  await expect
+    .poll(
+      async () => {
+        const options = (await (await api(page, "GET", `/cart/checks/${requestId}/fill`)).json()) as {
+          cards?: Record<string, { state?: string }>;
+        };
+        return options.cards?.zepto?.state;
+      },
+      { timeout: FILL_BUDGET_S * 1000, intervals: [250] },
+    )
+    .toMatch(/filled|done/);
+  const fillS = (Date.now() - fillStart) / 1000;
+  console.log(`speed fill->done ${fillS.toFixed(1)}s`);
+  expect(fillS, "fill is over its budget").toBeLessThan(FILL_BUDGET_S);
 });
