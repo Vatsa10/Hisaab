@@ -267,6 +267,8 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
     block_media aborts image/media/font requests (user syncs).
     recipe_loader(site) supplies the recipe (the cloud worker reads Postgres); default is the local recipes/ file.
     orders_page_url (the user's own orders page, found at login) replaces the shared recipe's one."""
+    if allow_learn and block_media:
+        raise ValueError("allow_learn and block_media cannot both be set: learning needs images and media")
     recipe = (recipe_loader or recipes.load)(site)
     if not recipe:
         if not allow_learn:

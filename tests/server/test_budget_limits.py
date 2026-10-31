@@ -263,3 +263,34 @@ def test_cost_inr_prices_input_and_output_separately(s):
     s = replace(s, ai_inr_per_1k_input_tokens=0.01, ai_inr_per_1k_output_tokens=0.05)
     # 10k in + 2k out, plus 1k Jev token-equivalents (unsplit, priced at the output rate)
     assert budget.cost_inr(0, 13_000, 0, s, 10_000, 2_000) == pytest.approx(0.10 + 0.10 + 0.05)
+
+
+def test_month_cost_is_read_inside_the_budget_lock(pg, pg2, monkeypatch):
+    seen = []
+    real = budget.month_cost
+
+    def spy(conn, s, month):
+        try:
+            pg2.execute("select 1 from budget_state where month = %s for update nowait", (month,))
+            seen.append("unlocked")
+        except psycopg.errors.LockNotAvailable:
+            seen.append("locked")
+        pg2.rollback()
+        return real(conn, s, month)
+    monkeypatch.setattr(budget, "month_cost", spy)
+    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values ('2026-10','ok',0,5000)")
+    budget.refresh_state(pg, Settings(fixed_monthly_inr=0), datetime(2026, 10, 27, 5, 0, tzinfo=timezone.utc))
+    assert seen == ["locked"]
+
+
+def test_budget_resets_at_the_ist_month_boundary(pg):
+    s = Settings(fixed_monthly_inr=5000)   # the whole budget: October is paused
+    last = datetime(2026, 10, 31, 23, 59, tzinfo=IST)
+    first = datetime(2026, 11, 1, 0, 1, tzinfo=IST)
+    st = budget.refresh_state(pg, s, last)
+    assert (st.month, st.level) == ("2026-10", "paused")
+    assert budget.is_paused(pg, last, "Asia/Kolkata")
+    st = budget.refresh_state(pg, Settings(fixed_monthly_inr=0), first)
+    assert (st.month, st.level, st.previous_level) == ("2026-11", "ok", "ok")
+    assert not budget.is_paused(pg, first, "Asia/Kolkata")
+    assert budget.current_level(pg, last, "Asia/Kolkata") == "paused"

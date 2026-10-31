@@ -225,3 +225,10 @@ def test_fetch_orders_passes_block_media(monkeypatch):
     with pytest.raises(sync.RecipeDrift):
         sync.fetch_orders("zepto", None, allow_learn=False, recipe_loader=lambda s: recipe)
     assert [kw["block_media"] for kw in opened] == [True, False, False]
+
+
+def test_fetch_orders_refuses_allow_learn_with_block_media():
+    import pytest
+    import sync
+    with pytest.raises(ValueError):
+        sync.fetch_orders("zepto", None, allow_learn=True, block_media=True)

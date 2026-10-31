@@ -249,3 +249,17 @@ def test_unlock_failure_does_not_mask_the_original_error(pg, monkeypatch):
     import pytest
     with pytest.raises(KeyError):
         scheduler.tick(Wrap(), S(), NOW)
+
+
+def test_tick_resets_budget_at_the_ist_month_boundary(pg):
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    last = datetime(2026, 10, 31, 23, 59, tzinfo=ist)
+    first = datetime(2026, 11, 1, 0, 1, tzinfo=ist)
+    conn_row(pg)
+    pg.execute("update connections set last_synced_at = %s", (last - timedelta(hours=48),))
+    r = scheduler.tick(pg, S(fixed_monthly_inr=1000.0), last)
+    assert r["level"] == "paused" and r["enqueued"] == 0   # paused: syncs every 3 days
+    r = scheduler.tick(pg, S(fixed_monthly_inr=0.0), first)
+    assert r["level"] == "ok" and r["enqueued"] == 1
+    assert sorted(m for (m,) in pg.execute("select month from budget_state").fetchall()) == ["2026-10", "2026-11"]

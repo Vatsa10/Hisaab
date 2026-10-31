@@ -353,3 +353,19 @@ def test_decide_refuses_an_invalid_cart_recipe(pg, monkeypatch):
     good = recipe_admin.apply_learned(pg, "zepto", "cart", valid_cart_recipe(), set(), None, "learned")["approval_id"]
     assert recipe_admin.decide(pg, good, "approve", A) == "approved"
     assert store.get_recipe(pg, "zepto", kind="cart")["add"]["qty_mode"] == "set"
+
+
+def test_rejected_post_is_not_asked_again(pg, pg2, pg_listen):
+    _admin(pg, A, "owner@example.com")
+    jid = _running_job(pg)
+    approve = recipe_admin.make_approver(pg_listen, pg, jid, "zepto", "orders", timeout_s=10)
+    t, out = _decide_when_asked(pg2, jid, "reject")
+    assert approve([NEW_POST]) is False
+    t.join()
+    n = pg.execute("select count(*) from recipe_approvals").fetchone()[0]
+    again = recipe_admin.make_approver(pg_listen, pg, jid, "zepto", "orders", timeout_s=0.2)
+    assert again([NEW_POST]) is False   # remembered: no new approval row, no wait
+    assert pg.execute("select count(*) from recipe_approvals").fetchone()[0] == n
+    other = recipe_admin.make_approver(pg_listen, pg, jid, "blinkit", "orders", timeout_s=0.2)
+    other([NEW_POST])   # another site is asked
+    assert pg.execute("select count(*) from recipe_approvals").fetchone()[0] == n + 1

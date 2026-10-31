@@ -191,6 +191,10 @@ class Approver:
     def __call__(self, entries: list[dict]) -> bool:
         if not entries:
             return True
+        # An admin who already rejected a POST for this site and kind is not asked about it again.
+        entries = [e for e in entries if e.get("url_regex") not in self._rejected()]
+        if not entries:
+            return False
         proposed = {"read_post_allowlist": entries}
         approval_id = str(self.job_conn.execute(
             "INSERT INTO recipe_approvals (site, kind, reason, proposed, diff, job_id, live_request) "
@@ -223,6 +227,12 @@ class Approver:
                 self.listen_conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
             except Exception as e:
                 log.warning("UNLISTEN failed (%s)", type(e).__name__)
+
+    def _rejected(self) -> set[str]:
+        rows = self.job_conn.execute(
+            "SELECT proposed FROM recipe_approvals WHERE site=%s AND kind=%s AND reason='post_allowlist' "
+            "AND status='rejected'", (self.site, self.kind)).fetchall()
+        return {r for (p,) in rows for r in _post_regexes(p)}
 
     def _wait(self, channel: str) -> str | None:
         """The payload sent on channel within timeout_s, or None. Stray notifications for an earlier approval

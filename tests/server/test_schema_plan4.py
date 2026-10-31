@@ -11,6 +11,8 @@ ADMIN_TABLES = ("invites", "waitlist", "admins", "recipe_approvals", "notificati
                 "budget_state")
 NEW_TABLES = ("usage",) + ADMIN_TABLES
 
+NEW = "00000000-0000-0000-0000-0000000000c3"   # a user the fixture has not pre-created
+
 
 def hook(pg, email):
     return pg.execute("select before_user_created(%s)", (Jsonb({"user": {"email": email}}),)).fetchone()[0]
@@ -36,16 +38,18 @@ def test_hook_rejects_missing_email_without_waitlisting(pg):
     assert pg.execute("select count(*) from waitlist").fetchone() == (0,)
 
 
-def test_hook_allows_invited_email_and_marks_accepted(pg):
+def test_hook_allows_invited_email_but_acceptance_waits_for_the_user_row(pg):
     pg.execute("insert into invites(email) values ('friend@x.com')")
     assert hook(pg, "Friend@X.com") == {}
+    assert pg.execute("select accepted_at from invites").fetchone() == (None,)   # user not created yet
+    add_user(pg, NEW, "Friend@X.com")
     assert pg.execute("select accepted_at is not null from invites").fetchone() == (True,)
-    assert pg.execute("select count(*) from waitlist").fetchone() == (0,)
 
 
 def test_hook_keeps_first_accepted_at(pg):
     pg.execute("insert into invites(email, accepted_at) values ('friend@x.com', '2026-01-01T00:00:00Z')")
     assert hook(pg, "friend@x.com") == {}
+    add_user(pg, NEW, "friend@x.com")
     assert pg.execute("select accepted_at = '2026-01-01T00:00:00Z' from invites").fetchone() == (True,)
 
 
@@ -75,6 +79,7 @@ def test_hook_marks_admin_invite_accepted(pg):
     pg.execute("insert into invites(email) values ('boss@x.com')")
     pause_budget(pg)
     assert hook(pg, "Boss@X.com") == {}
+    add_user(pg, NEW, "boss@x.com")
     assert pg.execute("select accepted_at is not null from invites").fetchone() == (True,)
 
 
