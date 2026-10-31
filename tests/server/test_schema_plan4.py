@@ -207,4 +207,4 @@ def test_auth_users_truncated_between_tests(pg, run):
     """Both runs insert the same user; whichever runs second only succeeds if the pg fixture truncated
     auth.users in between, whatever order the tests run in."""
     add_user(pg, A, f"run{run}@x.com")
-    assert pg.execute("select email from auth.users").fetchall() == [(f"run{run}@x.com",)]
+    assert pg.execute("select email from auth.users where email is not null").fetchall() == [(f"run{run}@x.com",)]

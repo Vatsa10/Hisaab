@@ -69,6 +69,8 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
                 enqueued += 1
             except jobs.Conflict:
                 pass
+            except jobs.NoSuchUser:   # deleted between the listing and now
+                continue
         paused = [[site, kind] for site, kind in site_health.check_error_budget(conn, s, now)]
         reminders = session.remind(conn, s, now)
         sent = notify.dispatch(conn, s)

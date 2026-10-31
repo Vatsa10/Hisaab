@@ -117,6 +117,17 @@ def failure_stats(conn, now: datetime, window_h: int) -> list[dict]:
             for site, kind, total, failed in sorted(rows) if total]
 
 
+def health_fields(conn, s: Settings, site: str, now: datetime | None = None) -> dict:
+    """The admin site-health columns for one site: cooldown_until, backoff_level, failures_window, jobs_window
+    (orders-kind failure_stats over error_budget_window_h; search kinds are not counted here)."""
+    now = usage.as_utc(now)
+    row = conn.execute("SELECT coalesce(max(level), 0) FROM site_backoff WHERE site = ANY(%s)",
+                       (list(sites.same_profile(site)),)).fetchone()
+    stats = [st for st in failure_stats(conn, now, s.error_budget_window_h) if st["site"] == site]
+    return {"cooldown_until": cooldown_until(conn, site, now), "backoff_level": int(row[0]),
+            "failures_window": sum(st["failed"] for st in stats), "jobs_window": sum(st["total"] for st in stats)}
+
+
 def check_error_budget(conn, s: Settings, now: datetime) -> list[tuple[str, str]]:
     """Pause every (site, kind) whose failure rate in the window is over budget, and alert the admins once a day.
     Only sites with an unpaused recipe row are touched."""

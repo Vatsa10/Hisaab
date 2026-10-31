@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from psycopg.rows import dict_row
 
 from server import budget, cart, notify, sites
+from server import site_health as health
 from server.config import Settings
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$")
@@ -100,10 +101,13 @@ def usage_by_user(conn, month: str) -> list[dict]:
     return rows
 
 
-def site_health(conn, now: datetime, admin_user_id: str) -> list[dict]:
+def site_health(conn, now: datetime, admin_user_id: str, s: Settings | None = None) -> list[dict]:
     """One row per connectable site: its orders recipe (version, learned_at, healthy, paused, health_note; a
     site without a recipe is healthy, unpaused, version None), the outcomes of connect/sync jobs that finished
-    in the 7 days before now, and whether the calling admin's own connection for it is connected."""
+    in the 7 days before now, and whether the calling admin's own connection for it is connected. Orders rows also
+    carry the site's back-off and error-budget window (health.health_fields: cooldown_until, backoff_level,
+    failures_window, jobs_window)."""
+    s = s or Settings()
     since = now - timedelta(days=7)
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(
@@ -120,7 +124,8 @@ def site_health(conn, now: datetime, admin_user_id: str) -> list[dict]:
             "  FROM jobs WHERE site = s.site AND type = ANY(%s) AND finished_at >= %s AND finished_at <= %s) j "
             "ON true ORDER BY s.n",
             (list(CONNECTABLE_SITES), str(admin_user_id), list(SYNC_TYPES), since, now)).fetchall()
-    return [{**r, "op": None, "db_site": r["site"]} for r in rows] + _search_health(conn, since, now, admin_user_id)
+    orders = [{**r, "op": None, "db_site": r["site"], **health.health_fields(conn, s, r["site"], now)} for r in rows]
+    return orders + _search_health(conn, since, now, admin_user_id)
 
 
 def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> list[dict]:

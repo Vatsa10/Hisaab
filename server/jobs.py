@@ -19,6 +19,10 @@ class JobGone(Exception):
     """The job is no longer running under this worker (finished, requeued, re-claimed or deleted)."""
 
 
+class NoSuchUser(Exception):
+    """The user has no auth.users row (never existed, or the account is deleted or being deleted)."""
+
+
 @dataclass
 class Job:
     id: str
@@ -58,10 +62,16 @@ _COOLING_SQL = ("(j.type = 'sync' and exists (select 1 from site_backoff b where
 def enqueue(conn, user_id: str, type: str, site: str, payload: dict | None = None) -> str:
     try:
         with conn.transaction():
+            # The user row is the gate against account deletion: delete_account holds it FOR UPDATE, so this waits
+            # for a deletion in progress and then inserts nothing, and a job can never outlive its account.
             row = conn.execute(
-                "INSERT INTO jobs (user_id, type, site, profile, payload) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-                (user_id, type, site, sites.profile_for(site), Jsonb(payload or {})),
+                "INSERT INTO jobs (user_id, type, site, profile, payload) "
+                "SELECT %s::uuid, %s, %s, %s, %s WHERE EXISTS "
+                "(SELECT 1 FROM auth.users WHERE id = %s::uuid FOR KEY SHARE) RETURNING id",
+                (user_id, type, site, sites.profile_for(site), Jsonb(payload or {}), user_id),
             ).fetchone()
+            if row is None:
+                raise NoSuchUser(user_id)
     except psycopg.errors.UniqueViolation as e:
         if e.diag.constraint_name == "one_active_job":
             raise Conflict(f"{type} job for {site} already active") from e

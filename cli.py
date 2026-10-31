@@ -229,6 +229,28 @@ def reset(site: str):
         print(f"removed {p}")
 
 
+@app.command("verify-erased")
+def verify_erased(user_id: str, email: str):
+    """Admin: check that nothing of a deleted user remains in the database (DATABASE_URL) or the profile store
+    (PROFILE_STORE_URL): no row in any public or auth table mentions the id or email, no blob under <user_id>/."""
+    import psycopg
+
+    from server import erase, vault
+    from server.config import settings
+    s = settings()
+    if not s.database_url:
+        typer.secho("DATABASE_URL is not set", fg="red")
+        raise typer.Exit(1)
+    with psycopg.connect(s.database_url, autocommit=True) as conn:
+        left = erase.remaining(conn, vault.store_from_url(s.profile_store_url), user_id, email)
+    if not left:
+        typer.echo("NOTHING REMAINS")
+        return
+    for entry in left:
+        typer.echo(entry)
+    raise typer.Exit(1)
+
+
 @app.command("publish-recipe")
 def publish_recipe(site: str,
                    force: bool = typer.Option(False, "--force",

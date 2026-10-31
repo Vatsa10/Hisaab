@@ -13,7 +13,8 @@ def order(oid, total=100.0, status="delivered", items=None):
 
 def add_user(conn, user_id, email):
     """Insert a row into the auth.users stand-in (Supabase's auth table) with this email."""
-    conn.execute("insert into auth.users(id, email) values (%s, %s)", (str(user_id), email))
+    conn.execute("insert into auth.users(id, email) values (%s, %s) "
+                 "on conflict (id) do update set email = excluded.email", (str(user_id), email))
 
 
 def settings_for_tests(**_):
@@ -79,3 +80,54 @@ def destructive_db_allowed(url: str, env) -> bool:
     (localhost / 127.0.0.1 / ::1 / a local socket) unless ALLOW_DESTRUCTIVE_TEST_DB=1 is set."""
     from server.local_db import is_local_db
     return env.get("ALLOW_DESTRUCTIVE_TEST_DB") == "1" or is_local_db(url, env)
+
+
+def seed_everything(conn, user_id, email, store=None) -> None:
+    """One row of this user in every user-keyed table (plus the email-keyed and *_by rows, an auth user and a vault
+    blob), so a deletion test can prove nothing is left. Tables from branches not merged yet are seeded when they
+    exist (app_addresses)."""
+    import os
+    import uuid
+
+    from psycopg.types.json import Jsonb
+
+    from server import vault
+    u, em = str(user_id), email.lower()
+    add_user(conn, u, em)
+    conn.execute("insert into profiles(user_id, display_name, address) values (%s, 'Seed', 'Alkapuri, Vadodara')", (u,))
+    for site in ("swiggy", "zomato"):
+        conn.execute("insert into connections(user_id, site, status) values (%s, %s, 'connected')", (u, site))
+        conn.execute("insert into orders(user_id, site, order_id, total_amount) values (%s, %s, 'o1', 10)", (u, site))
+        conn.execute("insert into order_items(user_id, site, order_id, idx, name) values (%s, %s, 'o1', 0, 'x')",
+                     (u, site))
+        conn.execute("insert into consents(user_id, site, text_version) values (%s, %s, 'v1')", (u, site))
+        conn.execute("insert into jobs(user_id, type, site, profile, status) values (%s, 'sync', %s, %s, 'done')",
+                     (u, site, site))
+    conn.execute("insert into usage(user_id, day, proxy_mb, ai_tokens, worker_seconds, syncs, cart_checks, cart_fills) "
+                 "values (%s, current_date, 5, 100, 30, 1, 1, 1)", (u,))
+    conn.execute("insert into push_subscriptions(endpoint, user_id, p256dh, auth) values (%s, %s, 'k', 'a')",
+                 (f"https://push.example/{u}", u))
+    conn.execute("insert into notifications(user_id, kind, title, body, dedupe_key) "
+                 "values (%s, 'sync_done', 't', 'b', %s)", (u, f"seed:{u}"))
+    conn.execute("insert into notifications(email, kind, title, body, dedupe_key) "
+                 "values (%s, 'admin', 't', 'b', %s)", (em, f"seed-mail:{u}"))
+    rid = conn.execute("insert into cart_requests(user_id, items, sites, area, lat, lon) "
+                       "values (%s, %s, %s, 'Alkapuri', 22.3, 73.2) returning id",
+                       (u, Jsonb([{"name": "milk"}]), ["zepto"])).fetchone()[0]
+    conn.execute("insert into cart_results(request_id, user_id, site, status) values (%s, %s, 'zepto', 'ok')", (rid, u))
+    conn.execute("insert into cart_fills(user_id, request_id, site, plan, priced_location) "
+                 "values (%s, %s, 'zepto', '[]', '{}')", (u, rid))
+    conn.execute("insert into restaurant_cache(user_id, site, geo_key, query_norm, results) "
+                 "values (%s, 'swiggy', 'g', 'q', '[]')", (u,))
+    conn.execute("insert into menu_cache(user_id, site, restaurant_id, menu) values (%s, 'swiggy', 'r', '{}')", (u,))
+    if conn.execute("select to_regclass('public.app_addresses')").fetchone()[0]:
+        conn.execute("insert into app_addresses(user_id, site, address_id) values (%s, 'swiggy', 'a1')", (u,))
+    conn.execute("insert into admins(email) values (%s)", (em,))
+    conn.execute("insert into invites(email, invited_by) values (%s, %s)", (em, u))
+    conn.execute("insert into waitlist(email) values (%s)", (em,))
+    conn.execute("insert into recipe_approvals(site, kind, reason, proposed, decided_by) "
+                 "values ('zepto', 'orders', 'learned', '{}', %s)", (u,))
+    conn.execute("insert into fee_rules(site, rules, updated_by) values ('zepto', '{}', %s) "
+                 "on conflict (site) do update set updated_by = excluded.updated_by", (u,))
+    store = store or vault.store_from_url(os.environ["PROFILE_STORE_URL"])
+    store.put(vault.blob_key(u, "swiggy"), b"ciphertext-" + uuid.uuid4().bytes)

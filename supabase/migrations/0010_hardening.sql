@@ -39,7 +39,8 @@ create table if not exists usage_erased (
   ai_tokens bigint not null default 0,
   worker_seconds double precision not null default 0,
   syncs int not null default 0,
-  cart_checks int not null default 0
+  cart_checks int not null default 0,
+  cart_fills int not null default 0
 );
 alter table usage_erased enable row level security;
 revoke all on usage_erased from anon, authenticated;

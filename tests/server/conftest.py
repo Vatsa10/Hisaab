@@ -49,6 +49,10 @@ def _applied(_schema):
 def pg(_applied):
     with psycopg.connect(_applied, autocommit=True) as c:
         c.execute("truncate " + ", ".join(TABLES + ("auth.users",)) + " cascade")
+        # jobs.enqueue only inserts for a user with an auth.users row (account deletion gate): the two stock test
+        # users exist, without an email. add_user() upgrades the row.
+        from helpers import A, B
+        c.execute("insert into auth.users(id) values (%s), (%s)", (A, B))
         yield c
 
 

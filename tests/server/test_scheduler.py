@@ -18,6 +18,7 @@ def S(**kw):
 
 def conn_row(pg, site="zepto", status="connected", age_h: float | None = 25, user=U):
     last = None if age_h is None else NOW - timedelta(hours=age_h)
+    pg.execute("insert into auth.users(id) values (%s) on conflict do nothing", (user,))  # enqueue needs the user
     pg.execute("insert into connections (user_id, site, status, last_synced_at) values (%s,%s,%s,%s)",
                (user, site, status, last))
 
@@ -189,3 +190,22 @@ def test_main_checks_hosted_config(monkeypatch):
     monkeypatch.setattr(scheduler.psycopg, "connect", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
     assert scheduler.main(once=True) == 1
     assert seen == ["scheduler"]
+
+
+def test_user_deleted_between_due_and_enqueue_does_not_abort_the_tick(pg, monkeypatch):
+    """due_connections listed the user, then the account was deleted: skip them, enqueue the rest, still dispatch."""
+    gone, other = str(uuid.uuid4()), str(uuid.uuid4())
+    conn_row(pg, user=gone)
+    conn_row(pg, user=other)
+    real = scheduler.due_connections
+
+    def due_then_delete(c, now, interval):
+        rows = real(c, now, interval)
+        pg.execute("delete from auth.users where id=%s", (gone,))
+        return rows
+    monkeypatch.setattr(scheduler, "due_connections", due_then_delete)
+    sent = []
+    monkeypatch.setattr(scheduler.notify, "dispatch", lambda c, s: sent.append(1) or 0)
+    r = scheduler.tick(pg, S(), NOW)
+    assert r["enqueued"] == 1 and sent == [1]
+    assert [row[0] for row in pg.execute("select user_id::text from jobs").fetchall()] == [other]

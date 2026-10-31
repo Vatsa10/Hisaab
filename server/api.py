@@ -5,13 +5,13 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, StringConstraints, model_validator
@@ -21,9 +21,10 @@ import llm
 import metering
 import sync
 from browser import SITES
-from server import addresses_store, admin, admin_api, ask, budget, jobs, limits, notify, recipe_admin, usage
+from server import (addresses_store, admin, admin_api, ask, budget, erase, jobs, limits, notify, recipe_admin,
+                    site_health, usage, vault)
 from server.auth import Unauthorized, user_id_from_token
-from server.config import SITE_NAMES, settings
+from server.config import SITE_NAMES, check_hosted, settings
 from server.local_db import is_local_db
 
 log = logging.getLogger("server.api")
@@ -46,6 +47,7 @@ async def lifespan(_app):
     llm.model()  # the LLM cost policy: a model at or above $1 / MTok stops the API from starting
     if ask_fake_enabled():  # raises on a non-local database, so the API refuses to start
         log.warning("ASK_FAKE=1: /ask answers from a fixed query without the LLM (local end-to-end runs only)")
+    check_hosted(settings(), "api")  # a hosted database must be the session pooler over TLS, JWKS set, and so on
     conn, problem = open_ask_conn()
     if problem:  # the rest of the API still serves; /ask answers 503 until this is fixed
         log.error("Ask is disabled: %s", problem)
@@ -94,12 +96,23 @@ class CorsFromEnv:
 
 
 app = FastAPI(title="expense-agent", lifespan=lifespan)
+
+
+@app.exception_handler(jobs.NoSuchUser)
+async def _no_such_user(_request, _exc):
+    """A job could not be enqueued because the account is gone (deleted, token still valid): the same answer
+    /ask gives, never a 500."""
+    return JSONResponse({"detail": "invalid token"}, status_code=401)
 app.add_middleware(CorsFromEnv)
 _bearer = HTTPBearer(auto_error=False)
 
 
 class SiteBody(BaseModel):
     site: str
+
+
+class DeleteAccountBody(BaseModel):
+    confirm: Literal["DELETE"]
 
 
 class PhoneBody(BaseModel):
@@ -183,6 +196,15 @@ def _known_site(site: str) -> None:
         raise HTTPException(400, "unknown site")
 
 
+def raise_if_cooling(conn, site: str) -> None:
+    """503 with Retry-After while the site's host group is in back-off. Every route that enqueues connect, a manual
+    sync or fill_cart calls this after its 404/409 checks and before it consumes any limit."""
+    try:
+        site_health.raise_if_cooling(conn, site)
+    except site_health.SiteCooling as e:
+        raise site_health.to_http(e) from None
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
@@ -213,6 +235,7 @@ def connect(site: str, body: PhoneBody, user: str = Depends(current_user), conn=
     ).fetchone()
     if consented is None:
         raise HTTPException(412, "consent required")
+    raise_if_cooling(conn, site)
     try:
         job_id = jobs.enqueue(conn, user, "connect", site, {"phone": phone})
     except jobs.Conflict:
@@ -267,6 +290,7 @@ def refresh(site: str, user: str = Depends(current_user), conn=Depends(get_conn)
         raise HTTPException(409, "a connect job is active")
     if recipe_admin.is_paused(conn, site):
         raise HTTPException(503, f"{app_name} sync is paused while we fix it.")
+    raise_if_cooling(conn, site)
     s = settings()
     try:
         job_id, left = limits.enqueue_refresh(conn, user, site, None, s)
@@ -315,6 +339,31 @@ def push_subscribe(body: PushSubscribeBody, user: str = Depends(current_user), c
 def push_unsubscribe(body: PushEndpointBody, user: str = Depends(current_user), conn=Depends(get_conn)):
     notify.delete_subscription(conn, user, body.endpoint)
     return Response(status_code=204)
+
+
+BLOBS_PENDING = "Your data is deleted, but stored sessions couldn't be removed yet. Tap Delete again."
+
+
+@app.post("/connections/{site}/disconnect")
+def disconnect(site: str, user: str = Depends(current_user), conn=Depends(get_conn)):
+    _known_site(site)
+    if site == "instamart":
+        raise HTTPException(400, "Instamart is part of your Swiggy connection.")
+    try:
+        done = erase.disconnect_site(conn, vault.store_from_url(settings().profile_store_url), user, site)
+    except erase.BlobDeleteFailed:
+        raise HTTPException(503, "Your data is removed, but the stored session couldn't be deleted yet. "
+                                 "Tap Disconnect again.") from None
+    return {"site": site, "orders_deleted": done["orders_deleted"]}
+
+
+@app.delete("/account")
+def delete_account(body: DeleteAccountBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    try:
+        erase.delete_account(conn, vault.store_from_url(settings().profile_store_url), user)
+    except erase.BlobDeleteFailed:
+        raise HTTPException(503, BLOBS_PENDING) from None
+    return {"deleted": True}
 
 
 PLACE_MAX_LEN = 60
@@ -404,6 +453,9 @@ def _record_ask_tokens(db, user: str, m: metering.Meter) -> None:
 
 @app.post("/ask")
 def post_ask(body: AskBody, user: str = Depends(current_user), conn=Depends(get_ask_conn), db=Depends(get_conn)):
+    # A deleted account's token stays valid until it expires: no answer and no usage row for a user that is gone.
+    if db.execute("SELECT 1 FROM auth.users WHERE id=%s::uuid", (user,)).fetchone() is None:
+        raise HTTPException(401, "invalid token")
     if ask_fake_enabled():
         return {"answer": ask.fake_answer(conn, user)}
     with metering.meter() as m:  # a sync endpoint runs in one worker thread: only this request's calls count

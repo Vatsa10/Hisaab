@@ -360,7 +360,8 @@ FOOD = {"kind": "food", "delivery_by_km": [{"max_km": 3, "fee": 30}, {"max_km": 
 
 
 def test_put_fee_rules_validates_food_and_grocery(pg, fee_rules_snapshot):
-    pg.execute("insert into auth.users (id, email) values (%s, 'admin@x.test')", (A,))
+    pg.execute("insert into auth.users (id, email) values (%s, 'admin@x.test') "
+               "on conflict (id) do update set email = excluded.email", (A,))
     assert set(cart.fee_rules(pg)) == {"zepto", "blinkit", "instamart", "swiggy", "zomato"}
     assert cart.put_fee_rules(pg, "zepto", GROCERY, True, A) == 2
     assert cart.fee_rules(pg)["zepto"] == (GROCERY, True)

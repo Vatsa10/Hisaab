@@ -81,6 +81,13 @@ class LocalStore:
             return 1
         return 0
 
+    def list_prefix(self, prefix: str) -> list[str]:
+        root = self.root.resolve()
+        if not root.is_dir():
+            return []
+        return sorted(k for f in root.rglob("*") if f.is_file()
+                      and (k := f.relative_to(root).as_posix()).startswith(prefix))
+
     def delete_prefix(self, prefix: str) -> int:
         root = self.root.resolve()
         if not root.is_dir():
@@ -121,6 +128,9 @@ class BlobStore:
             return 1
         except ResourceNotFoundError:
             return 0
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        return sorted(b.name for b in self._container.list_blobs(name_starts_with=prefix))
 
     def delete_prefix(self, prefix: str) -> int:
         n = 0

@@ -19,11 +19,15 @@ def _month_range(month: str) -> tuple[date, date]:
 
 
 def month_cost(conn, s: Settings, month: str) -> float:
-    """All users' usage in that IST month plus the fixed monthly cost."""
+    """All users' usage in that IST month (deleted users' folded spend included) plus the fixed monthly cost."""
     first, nxt = _month_range(month)
     mb, tokens, secs = conn.execute(
         "select coalesce(sum(proxy_mb), 0), coalesce(sum(ai_tokens), 0), coalesce(sum(worker_seconds), 0) "
         "from usage where day >= %s and day < %s", (first, nxt)).fetchone()
+    emb, etokens, esecs = conn.execute(
+        "select coalesce(sum(proxy_mb), 0), coalesce(sum(ai_tokens), 0), coalesce(sum(worker_seconds), 0) "
+        "from usage_erased where day >= %s and day < %s", (first, nxt)).fetchone()
+    mb, tokens, secs = mb + emb, tokens + etokens, secs + esecs
     return cost_inr(float(mb), int(tokens), float(secs), s) + s.fixed_monthly_inr
 
 

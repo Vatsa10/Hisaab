@@ -540,8 +540,10 @@ def test_ask_fake_refused_unless_database_is_local(monkeypatch):
         pass
     monkeypatch.delenv("ASK_FAKE")
     monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:pw@db.example.com:5432/postgres")
-    with TestClient(app):  # not asked for: no check
-        pass
+    # ASK_FAKE not asked for: no fake-Ask check. A hosted URL without sslmode is now refused by check_hosted (Plan 7).
+    with pytest.raises(ValueError, match="sslmode"):
+        with TestClient(app):
+            pass
 
 
 # --- CORS ---------------------------------------------------------------------------------------------------

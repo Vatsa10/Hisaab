@@ -59,11 +59,29 @@ def get_access(mode: Literal["grocery", "food"] = "grocery", user: str = Depends
     return {"access": access}
 
 
+def _refuse_if_every_app_is_cooling(conn, user: str) -> None:
+    """503 + Retry-After when every app this check would price is in back-off (api.raise_if_cooling). While only
+    some are cooling the check still runs and those apps answer "unavailable"; this runs before any limit is used."""
+    from server import api
+    ready = [x for x, st in cart.grocery_access(conn, user).items() if st == "ok"]
+    refusal = None
+    for site in ready:
+        try:
+            api.raise_if_cooling(conn, site)
+        except HTTPException as e:
+            refusal = refusal or e
+            continue
+        return
+    if refusal is not None:
+        raise refusal
+
+
 @router.post("/checks", status_code=202)
 def post_check(body: CheckBody, user: str = Depends(current_user), conn=Depends(get_conn)):
     s = settings()
     if len(body.items) > s.cart_max_items:
         raise HTTPException(422, f"A list can have up to {s.cart_max_items} items.")
+    _refuse_if_every_app_is_cooling(conn, user)
     try:
         out = cart.start_check(conn, user, [i.model_dump() for i in body.items], None, s)
     except (cart.CartError, limits.LimitExceeded, limits.BudgetPaused) as e:
