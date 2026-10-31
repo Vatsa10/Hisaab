@@ -10,7 +10,7 @@ PWA (next start) -> API (uvicorn) -> jobs queue -> worker (fake apps) -> Postgre
 bash scripts/e2e_local.sh
 ```
 
-It ends with one line, for example `E2E OK: 14 passed in 9m12s`, or `E2E FAILED: ...` with where to look.
+It ends with one line, for example `E2E OK: 26 passed in 6m1s`, or `E2E FAILED: ...` with where to look.
 
 Prerequisites: Docker Desktop running (it also runs Mailpit; ports 1025 and 8025 free), Python 3.11+ with `requirements.txt` installed, Node 22, pnpm 10, curl.
 Git Bash on Windows 11, or any shell on Linux/macOS. The first run downloads Playwright's WebKit (on Linux also
@@ -37,12 +37,15 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    | Service | Command | Port | Switches |
    | --- | --- | --- | --- |
    | API | `python -m uvicorn server.api:app` | 8010 | `ASK_FAKE=1`, `CORS_ORIGINS=http://localhost:3110` |
-   | Worker | `python -m server.worker` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `FAKE_PAGE_DELAY_S=0.4`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5` |
+   | Worker | `python -m server.worker`, started by `e2e/.run/start-worker.sh` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `FAKE_PAGE_DELAY_S=0.4`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5`, `MATCH_JUDGE=0` |
    | PWA | `next start` | 3110 | - |
 
    The script waits for `/healthz`, the worker's `worker started` line and the PWA's `/login` before going on.
+   The worker is started through one launcher file (`e2e/.run/start-worker.sh`, with its PID in `e2e/.run/worker.pid`
+   and `E2E_RUN_DIR` exported), so a spec can stop it and start it again with extra switches: `restartWorker(env)` in
+   `e2e/helpers/stack.ts`. The cleanup trap stops a worker a spec restarted too.
 6. **Playwright** (`e2e/`, its own `package.json` with `@playwright/test` pinned, so `web/` keeps no test
-   browser dependency) runs `e2e/tests/product.spec.ts` and `e2e/tests/plan4.spec.ts` on the iPhone 14 profile
+   browser dependency) runs `e2e/tests/product.spec.ts`, `e2e/tests/plan4.spec.ts` and `e2e/tests/plan5.spec.ts` on the iPhone 14 profile
    (WebKit, 390x844, touch).
 7. **Cleanup.** A trap stops the API, the worker and the PWA (with their child processes; `taskkill /T` on
    Windows) however the run ends, removes the Mailpit container, and stops Supabase if this run started it. Set `E2E_KEEP_SUPABASE=1` to keep it.
@@ -147,6 +150,50 @@ after a job or by `python -m server.scheduler --once` (`schedulerOnce`).
    `budget_state` paused; a freshly invited address sees "Sign-ups are paused"; `schedulerOnce({})` restores `ok` and
    the same address then signs up.
 10. **No horizontal scroll on /admin**, on each of its five tabs.
+
+### `e2e/tests/plan5.spec.ts`
+
+Serial; the tests hand state to each other, and it also runs on its own (`bash scripts/e2e_local.sh tests/plan5.spec.ts`).
+The delivery place is "12 Shanti Society, Gorwa, Vadodara, Gujarat" (22.3300, 73.1500), a made-up address. The fake apps'
+own saved addresses are in Bengaluru, so `setAddress(email, address, lat, lon)` (in `stack.ts`) writes the place into
+the profile and gives every app the user has connected one saved address at that pin; call it after the connects,
+because a later sync of an app puts that app's own saved addresses back. `setConnectionStatus(email, site, status)`
+flips a connection (for example to `needs_login`).
+
+1. **Admin learns price recipes.** The admin connects fake Zepto, Blinkit, Swiggy and Zomato, then Sites -> Learn for
+   Zepto, Blinkit and Instamart grocery prices and Swiggy and Zomato restaurants and menus. Instamart's and Zomato's
+   POST search ask for the admin's Approve (`^https://fake\.instamart\.test/api/search$`,
+   `^https://fake\.zomato\.test/api/search$`). Every card ends "Recipe v<n>" and Healthy. On a database an earlier run
+   already approved, the POST is on the allowlist and no question comes: the test takes either.
+2. **Connect prompts for unconnected apps.** A user with only Zepto sees Blinkit and Instamart as "Connect" on `/cart`;
+   after a compare the Blinkit card reads "Connect Blinkit to compare." with a Connect link to `/accounts`, and Instamart
+   "Connect Swiggy to compare Instamart.". With Zepto flipped to `needs_login`, Compare is disabled with "Connect
+   Blinkit, Zepto or Instamart to compare." and the Zepto row says "Log in again".
+3. **Usual items.** All four apps connected: the Accounts address list shows the fake saved addresses, and "Start from
+   my usual" lists items with "×<N> in 90 days", N at least 3.
+4. **Cheapest cart.** The five-item list: header "5 items · priced live at Gorwa, Vadodara" and the price note; Zepto
+   "₹422" with the ring and "Cheapest"; Blinkit "₹451 +₹29"; Instamart "₹458" with "1 to pick"; "fees estimated";
+   "Fill cart on Zepto" shown and disabled (no cart recipe is learned in this run, so the server says it is not
+   available for Zepto yet).
+5. **Item table and split line.** Totals row "₹422 ₹451 ₹458" and "No item is cheaper on another app, so one order
+   on Zepto is best.".
+6. **Pick one.** Edit list -> "milk" and "Aashirvaad Atta 5kg": every card shows "1 to pick"; on Zepto "Amul Taaza
+   Toned Milk 1 L" gives "₹309", ranked first, and `/me/limits` `cart_checks_left` is unchanged.
+7. **Food compare.** "Restaurants you order from" -> Meghana Foods -> a pair card with both app dots; one Chicken
+   Biryani (Half) x2 and a Paneer Biryani; Swiggy "₹836" Cheapest with the fee line, Zomato "₹878 +₹42", the offers
+   note, "Fill cart on Swiggy" disabled, Paneer Biryani highlighted on Zomato, no split line, and exactly one check used.
+8. **Restaurant pairing.** Behrouz (a Gorwa pair and a separate Alkapuri card "Only on Zomato"), Truffles ("Check this is
+   the same restaurant" -> both listings -> "Yes, same restaurant"), Burger Singh ("Closed on Zomato right now."),
+   Theobroma ("Only on Swiggy"). The test waits for each menu before searching again: the server takes one lookup at a time.
+9. **Logged out at compare time.** `restartWorker({FAKE_LOGGED_OUT_SITES: "blinkit"})`: the Blinkit card reads
+   "Blinkit logged you out. Log in again to compare.", Mailpit gets "Blinkit logged you out", Accounts shows Blinkit
+   "Needs login"; the worker is then restarted without the switch.
+10. **Daily limit.** Checks through the API until the 429 "You can check 10 carts a day. Try again tomorrow."; `/cart`
+    shows "0 checks left today" and Compare is disabled.
+11. **Budget pause.** A third user (Swiggy, so Instamart and food both have an app) with `schedulerOnce({MONTHLY_BUDGET_INR:
+    "0.01"})`: Compare and a restaurant search both show "Cart checks are paused until 1 <month>."; `schedulerOnce({})`
+    restores it.
+12. **No horizontal scroll** on `/cart` (both modes) and `/cart/[id]` (both modes, item table open).
 
 Nothing sleeps: every wait is for text that the API or Realtime puts on screen (Playwright's auto-waiting
 `expect`, 30 s default, 90 s for a sync).

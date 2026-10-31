@@ -2,7 +2,8 @@
 // API as a signed-in user. Local only: DATABASE_URL points at the throwaway Supabase on this machine.
 // Nothing here prints a password, token, phone number or OTP.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 const ROOT = path.resolve(__dirname, "..", "..");
@@ -146,4 +147,95 @@ const LOCK_AUTH_USERS = [
 /** Lock one auth.users row FOR KEY SHARE and FOR UPDATE as the role the API uses locally; returns that role. */
 export function lockAuthUser(id: string): string {
   return python(["-c", LOCK_AUTH_USERS], { E2E_UID: id }).trim();
+}
+
+// ---- addresses, connection status and the worker (Plan 5) -----------------------------------------------
+
+/** The sites an address is saved on (Instamart uses Swiggy's). */
+const ADDRESS_SITES = ["zepto", "blinkit", "swiggy", "zomato"];
+
+/**
+ * Put the user's delivery place in the profile (address text and pin, no saved-address choice) and give every app
+ * the user has connected one saved address at that pin, a few metres off like real apps. The fake worker's own
+ * saved addresses are in Bengaluru, so a compare at Gorwa needs these. Call it after the connects: a later sync
+ * of an app re-reads that app's saved addresses and replaces these.
+ */
+export function setAddress(email: string, address: string, lat: number, lon: number): void {
+  const uid = userId(email);
+  if (!uid) throw new Error("setAddress: no such user");
+  sql(
+    "insert into profiles (user_id, address, lat, lon, chosen) values (%s::uuid, %s, %s, %s, null) " +
+      "on conflict (user_id) do update set address = excluded.address, lat = excluded.lat, lon = excluded.lon, chosen = null",
+    [uid, address, lat, lon],
+  );
+  const parts = address.split(",").map((p) => p.trim());
+  const connected = sql<[string]>(
+    "select site from connections where user_id = %s::uuid and site = any(%s) and status <> 'disconnected'",
+    [uid, ADDRESS_SITES],
+  ).map((r) => r[0]);
+  connected.forEach((site, i) => {
+    sql("delete from app_addresses where user_id = %s::uuid and site = %s", [uid, site]);
+    sql(
+      "insert into app_addresses (user_id, site, address_id, label, line, area, city, lat, lon, is_default) " +
+        "values (%s::uuid, %s, %s, 'Home', %s, %s, %s, %s, %s, true)",
+      [uid, site, `e2e-${site}-home`, parts[0] ?? address, parts[1] ?? null, parts[2] ?? null, lat + i * 0.0001, lon],
+    );
+  });
+}
+
+/** Set one connection's status directly (what a logout the apps noticed does), e.g. "needs_login". */
+export function setConnectionStatus(email: string, site: string, status: string): void {
+  const uid = userId(email);
+  if (!uid) throw new Error("setConnectionStatus: no such user");
+  sql("update connections set status = %s where user_id = %s::uuid and site = %s", [status, uid, site]);
+}
+
+function killTree(pid: number): void {
+  if (process.platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+    } catch {
+      // already gone
+    }
+    return;
+  }
+  for (const target of [-pid, pid]) {
+    try {
+      process.kill(target, "SIGTERM");
+    } catch {
+      // already gone
+    }
+  }
+}
+
+function startedLines(log: string): number {
+  try {
+    return (fs.readFileSync(log, "utf-8").match(/worker started/g) ?? []).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Stop the fake worker scripts/e2e_local.sh started and start it again with `env` added (for example
+ * `{ FAKE_LOGGED_OUT_SITES: "blinkit" }`; `{}` starts it as the script did). Waits for its "worker started" line.
+ */
+export async function restartWorker(env: Record<string, string> = {}): Promise<void> {
+  const runDir = need("E2E_RUN_DIR");
+  const pidFile = path.join(runDir, "worker.pid");
+  const log = path.join(runDir, "logs", "worker.log");
+  const before = startedLines(log);
+  const old = Number.parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+  if (Number.isFinite(old)) killTree(old);
+  const fd = fs.openSync(log, "a");
+  const child = spawn("bash", [path.join(runDir, "start-worker.sh")], {
+    cwd: ROOT,
+    env: { ...process.env, ...env },
+    detached: true,
+    stdio: ["ignore", fd, fd],
+  });
+  child.unref();
+  fs.closeSync(fd);
+  fs.writeFileSync(pidFile, String(child.pid));
+  await until("the worker to start again", () => startedLines(log) > before, 60_000);
 }

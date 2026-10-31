@@ -8,7 +8,7 @@
 #    .env.server.local, and the PWA
 # 4. starts Mailpit (every email of the run lands there), makes admin@e2e.test an admin, and sends the API and the
 #    worker's mail and links to it (SMTP_HOST, SMTP_PORT, APP_URL)
-# 5. runs Playwright (e2e/: product.spec.ts and plan4.spec.ts), then stops everything it started, including Mailpit
+# 5. runs Playwright (e2e/: product.spec.ts, plan4.spec.ts and plan5.spec.ts), then stops everything it started, including Mailpit
 #    and Supabase if it started it
 #
 # Usage: bash scripts/e2e_local.sh [playwright args, e.g. -g "updates live"]
@@ -85,6 +85,11 @@ cleanup() {
   trap - EXIT INT TERM
   local pid
   for pid in "${PIDS[@]+"${PIDS[@]}"}"; do stop_pid "$pid"; done
+  # A worker a spec restarted (restartWorker) is not one of ours: stop it by the PID the spec wrote.
+  if [ -r "$RUN_DIR/worker.pid" ]; then
+    if command -v taskkill >/dev/null 2>&1; then taskkill //F //T //PID "$(cat "$RUN_DIR/worker.pid")" >/dev/null 2>&1 || true
+    else kill -TERM -- "-$(cat "$RUN_DIR/worker.pid")" 2>/dev/null || true; fi
+  fi
   if [ "$STARTED_MAILPIT" = 1 ]; then docker rm -f "$MAILPIT_NAME" >/dev/null 2>&1 || true; fi
   if [ "$STARTED_SUPABASE" = 1 ] && [ "${E2E_KEEP_SUPABASE:-0}" != 1 ]; then
     log "stopping the Supabase this run started"
@@ -262,14 +267,26 @@ PIDS+=("$API_PID")
 wait_for "API" 60 "$API_PID" "$LOGS/api.log" http_ok "$API_URL/healthz"
 
 PHASE="starting the worker"
-(
-  server_env
-  # FAKE_PAGE_DELAY_S: the fake fetch pauses between its pages, so the live "Found so far" count is on screen.
-  export WORKER_FAKE=1 CATEGORIZE=0 FAKE_PAGE_DELAY_S=0.4 PROFILE_ROOT="$RUN_DIR/profiles" DRAIN_S=5
-  exec "$PY" -m server.worker
-) >"$LOGS/worker.log" 2>&1 &
+# One launcher for the worker, so a spec can stop it and start it again with other switches (restartWorker in
+# e2e/helpers/stack.ts, which reads worker.pid and runs this file). FAKE_PAGE_DELAY_S: the fake fetch pauses between
+# its pages, so the live "Found so far" count is on screen. MATCH_JUDGE=0: no small-model call for product matching.
+cat >"$RUN_DIR/start-worker.sh" <<LAUNCH
+#!/usr/bin/env bash
+cd "$ROOT"
+set -a
+. "$ROOT/.env.server.local"
+set +a
+unset SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
+export WORKER_FAKE=1 CATEGORIZE=0 FAKE_PAGE_DELAY_S=0.4 PROFILE_ROOT="$RUN_DIR/profiles" DRAIN_S=5 MATCH_JUDGE=0
+exec "$PY" -m server.worker
+LAUNCH
+export E2E_RUN_DIR="$RUN_DIR"
+rm -f "$RUN_DIR/worker.pid"
+bash "$RUN_DIR/start-worker.sh" >"$LOGS/worker.log" 2>&1 &
 WORKER_PID=$!
 PIDS+=("$WORKER_PID")
+# The Windows PID when there is one (what taskkill and restartWorker need), else the process group leader.
+if [ -r "/proc/$WORKER_PID/winpid" ]; then cat "/proc/$WORKER_PID/winpid" >"$RUN_DIR/worker.pid"; else echo "$WORKER_PID" >"$RUN_DIR/worker.pid"; fi
 wait_for "worker" 60 "$WORKER_PID" "$LOGS/worker.log" grep -q "worker started" "$LOGS/worker.log"
 
 PHASE="starting the PWA"
