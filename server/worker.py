@@ -453,6 +453,7 @@ def _record_usage(conn, job: jobs.Job, s: Settings, meter: metering.Meter, relay
             usage.record(conn, job.user_id, usage.today(tz=s.app_tz),
                          proxy_mb=max(0, (relay.bytes_total if relay is not None else 0) - base_bytes) / 1e6,
                          ai_tokens=meter.ai_tokens(s.jev_tokens_per_call),
+                         ai_input_tokens=meter.input_tokens, ai_output_tokens=meter.output_tokens,
                          worker_seconds=seconds,
                          syncs=1 if job.type in ("connect", "sync") else 0)
     except Exception as e:

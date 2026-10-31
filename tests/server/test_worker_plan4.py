@@ -88,6 +88,9 @@ def test_sync_job_records_usage(pg, monkeypatch):
     proxy_mb, tokens, seconds, syncs = _usage(pg)
     assert (float(proxy_mb), tokens, syncs) == (0.0, 2234, 1)
     assert float(seconds) > 0
+    # Input and output tokens are kept apart so each is priced at its own rate.
+    assert pg.execute("select ai_input_tokens, ai_output_tokens from usage where user_id=%s",
+                      (A,)).fetchone() == (1000, 234)
 
 
 def test_sync_passes_block_media(pg, monkeypatch):
