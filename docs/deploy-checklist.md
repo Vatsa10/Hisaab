@@ -49,13 +49,17 @@ and `plan7` specs). That proves the code, not your accounts: sections 7 to 9 are
 
 - [ ] **Proxy vendor** with sticky Indian residential sessions; set `PROXY_URL_TEMPLATE` (with the session-id
   placeholder). Verify: a connect from the worker shows an Indian IP at the vendor's dashboard.
-- [ ] **VAPID keys** (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT=mailto:you@...`).
+- [ ] **VAPID keys** (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT=mailto:admin@gethisaab.online`) in `deploy/azure/.env.deploy`;
+  `deploy.sh` forwards them (the private key via the params file only).
   Verify: enabling notifications in the PWA subscribes without an error.
-- [ ] **SMTP sender and port.** Set `SMTP_HOST`, `SMTP_PORT`, user and password. Many clouds (Azure included) block
+- [ ] **SMTP sender and port.** Set `SMTP_HOST`, `SMTP_PORT` (`deploy.sh` refuses `SMTP_HOST` without it), user and password in `.env.deploy`. Many clouds (Azure included) block
   outbound port 25: use 587 (STARTTLS) or 465 from a provider that allows it. Verify: from the deployed worker
   container (or a Container Apps job with the same settings) send one mail to yourself; it arrives. Without this,
   invites, logged-out and error-budget mails never leave.
-- [ ] **`APP_URL`** = the PWA's public address (links in mails). Verify: the invite mail's link opens the PWA.
+- [ ] **Domains.** The marketing site goes at the apex domain (`gethisaab.online`) and the app at `app.gethisaab.online`.
+- [ ] **DNS for mail.** Set SPF, DKIM and DMARC records for the sending domain (`gethisaab.online`) so invites don't land in
+  spam. Use `SMTP_FROM="Hisaab <no-reply@gethisaab.online>"`.
+- [ ] **`APP_URL`** = the PWA's public address (`https://app.gethisaab.online`; links in mails); `deploy.sh` refuses localhost or non-https. Verify: the invite mail's link opens the PWA.
 - [ ] **`CORS_ORIGINS`** = exactly the PWA's origin (scheme and host, no trailing slash; comma-separated for more).
   The default is `http://localhost:3000`, which blocks the deployed PWA. Verify:
   `curl -s -D- -o /dev/null -H "Origin: https://<pwa>" "$API/healthz"` shows `access-control-allow-origin` for it, and
@@ -63,7 +67,13 @@ and `plan7` specs). That proves the code, not your accounts: sections 7 to 9 are
 
 ## 4. Money and prices
 
-- [ ] **Budget unit costs from real prices:** `PROXY_INR_PER_GB`, `AI_INR_PER_1K_TOKENS`, `WORKER_INR_PER_MINUTE`,
+- [ ] **Confirm email ON in production (Supabase dashboard).** Authentication > Providers > Email > turn ON
+  "Confirm email". `supabase/config.toml` keeps it off for local runs only. Without it anyone who knows an invited
+  address (including an admin address) can sign up first with a password; `is_admin` also requires a confirmed email,
+  but invite ownership is only proven by confirmation. Verify: a new sign-up gets a confirmation mail and cannot
+  sign in until the link is opened.
+- [ ] **Budget unit costs from real prices:** `PROXY_INR_PER_GB`, `AI_INR_PER_1K_INPUT_TOKENS` and `AI_INR_PER_1K_OUTPUT_TOKENS` (Claude Haiku 5.5 is
+  $0.10 / $0.50 per million tokens in/out; multiply by your INR rate and divide by 1000), `WORKER_INR_PER_MINUTE`,
   `FIXED_MONTHLY_INR`, `MONTHLY_BUDGET_INR`. The defaults are guesses. Verify: the admin Cost view shows the numbers
   you expect after the first sync.
 - [ ] **Fee rules verified.** Plan 5's seeded delivery, handling and small-cart fees are placeholders. Compare each app
