@@ -38,7 +38,8 @@ describe("service worker push", () => {
     await waitUntil.mock.calls[0]![0];
     expect(showNotification).toHaveBeenCalledWith("Zepto synced", {
       body: "12 new orders",
-      icon: "/icons/192.png",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/badge-96.png",
       data: { url: "/orders" },
     });
   });

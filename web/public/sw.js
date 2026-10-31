@@ -11,7 +11,7 @@
  * intercepted or cached, and non-GET requests and the /auth/ callback are never touched.
  */
 
-const VERSION = "v2";
+const VERSION = "v3";
 const PAGES = `pages-${VERSION}`;
 const STATIC = `static-${VERSION}`;
 
@@ -125,7 +125,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(title, {
       body: typeof payload.body === "string" ? payload.body : "",
-      icon: "/icons/192.png",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/badge-96.png",
       data: { url: safePath(payload.url) },
     }),
   );

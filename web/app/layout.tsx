@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 import { STARTUP_SCREENS, startupImageFile, startupImageMedia } from "@/lib/startup-images.mjs";
+import { display, text } from "./fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,6 +21,7 @@ export const metadata: Metadata = {
   },
   formatDetection: { telephone: false, email: false, address: false },
   icons: {
+    // app/icon.svg and app/favicon.ico are picked up by file convention; the PNG is for browsers that want one.
     icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
     apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
   },
@@ -37,7 +39,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en-IN">
+    <html lang="en-IN" className={`${display.variable} ${text.variable}`}>
       <body>
         {children}
         <ServiceWorkerRegistrar />

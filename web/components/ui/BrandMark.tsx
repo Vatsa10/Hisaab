@@ -10,7 +10,7 @@ export interface BrandMarkProps {
 const GLYPH_PATH = brandGlyphPathData(100);
 
 /**
- * The app mark: a green tile with the white rupee glyph, drawn from the same geometry as the
+ * The Hisaab mark: a green tile with the white tally-H, drawn from the same geometry as the
  * home-screen icon (lib/brand-glyph.mjs), so the login screen and the icon always match.
  * Decorative: the page title names the app.
  */

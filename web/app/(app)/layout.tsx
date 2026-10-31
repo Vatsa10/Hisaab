@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { ReloginBanner } from "@/components/account/ReloginBanner";
+import { BrandMark } from "@/components/ui/BrandMark";
 import { TabBar } from "@/components/ui/TabBar";
 
 /**
@@ -14,6 +15,10 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         id="main"
         className="px-safe mx-auto w-full max-w-[480px] pb-[calc(theme(spacing.tabbar)+env(safe-area-inset-bottom)+1.5rem)] pt-[calc(env(safe-area-inset-top)+1rem)]"
       >
+        <div className="mb-3 flex items-center gap-2">
+          <BrandMark size={28} className="rounded-lg shadow-none" />
+          <span className="text-label font-semibold text-accent">Hisaab</span>
+        </div>
         <ReloginBanner />
         {children}
       </main>

@@ -4,7 +4,7 @@ import { useRef, useState, type KeyboardEvent } from "react";
 import { CheckIcon, Spinner } from "@/components/connect/icons";
 import { ApiError } from "@/lib/api";
 import { APPS } from "@/lib/apps";
-import { chooseAddress, isChosen, type AddressOption, type Choice, type ChoiceResponse } from "@/lib/addresses";
+import { chooseAddress, isChosen, refreshAddresses, normLine, type AddressOption, type Choice, type ChoiceResponse } from "@/lib/addresses";
 import { cn } from "@/lib/cn";
 
 export interface AddressPickerProps {
@@ -26,6 +26,16 @@ function chooseProblem(e: unknown): string {
   return "Couldn't use that address. Try again.";
 }
 
+function refreshProblem(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 429) return "Just refreshed. Try again in a couple of minutes.";
+    if (e.status === 409) return "Connect an app first.";
+    if (e.status === 401) return "Please sign in again.";
+    if (e.status === 0) return e.detail;
+  }
+  return "Couldn't refresh. Try again.";
+}
+
 const appOf = (site: string) => APPS.find((a) => a.id === site);
 
 function placeOf(o: AddressOption): string | null {
@@ -41,6 +51,8 @@ function placeOf(o: AddressOption): string | null {
 export function AddressPicker({ options, chosen, onChosen, onTypeInstead }: AddressPickerProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const radios = useRef<Array<HTMLButtonElement | null>>([]);
   // Roving tab stop: the checked option, else the first.
   const checkedIndex = options.findIndex((o) => isChosen(o, chosen));
@@ -70,8 +82,38 @@ export function AddressPicker({ options, chosen, onChosen, onTypeInstead }: Addr
     }
   }
 
+  async function refresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setError(null);
+    setRefreshNote(null);
+    try {
+      await refreshAddresses();
+      setRefreshNote("Checking your apps. New addresses appear here in a moment.");
+    } catch (e) {
+      setError(refreshProblem(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   return (
     <div>
+      <button
+        type="button"
+        onClick={() => void refresh()}
+        disabled={refreshing || busy !== null}
+        aria-busy={refreshing || undefined}
+        className="mb-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-control text-body font-semibold text-accent transition-colors duration-150 hover:bg-accent/5 active:bg-accent/10 disabled:opacity-50"
+      >
+        {refreshing ? <Spinner className="motion-safe:animate-spin" /> : null}
+        Refresh addresses
+      </button>
+      {refreshNote ? (
+        <p role="status" className="mb-3 text-center text-label text-ink-muted">
+          {refreshNote}
+        </p>
+      ) : null}
       <div role="radiogroup" aria-label="Your saved addresses" className="flex flex-col gap-2.5">
         {options.map((o, i) => {
           const checked = isChosen(o, chosen);
@@ -114,6 +156,13 @@ export function AddressPicker({ options, chosen, onChosen, onTypeInstead }: Addr
                     </span>
                     <span>{apps.map((a) => a.name).join(", ")}</span>
                   </span>
+                  {o.appLines
+                    .filter((l) => l.line && normLine(l.line) !== normLine(o.line))
+                    .map((l) => (
+                      <span key={l.site} className="mt-1 block break-words text-label text-ink-muted">
+                        {appOf(l.site)?.name ?? l.site}: {l.line}
+                      </span>
+                    ))}
                 </span>
                 <span
                   aria-hidden="true"
@@ -145,7 +194,7 @@ export function AddressPicker({ options, chosen, onChosen, onTypeInstead }: Addr
         disabled={busy !== null}
         className="mt-3 min-h-11 w-full rounded-control text-body font-semibold text-accent transition-colors duration-150 hover:bg-accent/5 active:bg-accent/10 disabled:opacity-50"
       >
-        Type an address instead
+        Enter an area instead
       </button>
     </div>
   );

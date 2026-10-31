@@ -22,6 +22,7 @@ vi.mock("@/lib/addresses", async (importOriginal) => {
   };
 });
 
+import { ApiError } from "@/lib/api";
 import { AddressPicker } from "@/components/account/AddressPicker";
 import { AddressRow } from "@/components/connect/AddressRow";
 import { groupOptions, type AppAddress } from "@/lib/addresses";
@@ -134,7 +135,7 @@ describe("AddressPicker", () => {
     // the current choice is checked, wherever it came from
     expect(options[0]).toHaveAttribute("aria-checked", "false");
     expect(options[1]).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("button", { name: "Type an address instead" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enter an area instead" })).toBeInTheDocument();
   });
 
   it("choice calls PUT /profile", async () => {
@@ -157,12 +158,36 @@ describe("AddressPicker", () => {
   });
 
   it("says so when a choice cannot be saved, and keeps the list", async () => {
-    const { ApiError } = await import("@/lib/api");
     api.apiFetch.mockRejectedValueOnce(new ApiError(404, "not one of your saved addresses"));
     render(<AddressPicker options={groupOptions(ROWS)} chosen={null} onChosen={vi.fn()} onTypeInstead={vi.fn()} />);
     await userEvent.click(screen.getAllByRole("radio")[1]!);
     expect(await screen.findByRole("alert")).toHaveTextContent("That address changed in the app");
     expect(screen.getAllByRole("radio")).toHaveLength(2);
+  });
+});
+
+describe("AddressPicker refresh and lines", () => {
+  it("has Refresh addresses on top that POSTs /addresses/refresh", async () => {
+    api.apiFetch.mockResolvedValueOnce({ sites: ["zepto"] });
+    render(<AddressPicker options={groupOptions(ROWS)} chosen={null} onChosen={vi.fn()} onTypeInstead={vi.fn()} />);
+    const btn = screen.getByRole("button", { name: "Refresh addresses" });
+    expect(btn.compareDocumentPosition(screen.getByRole("radiogroup")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(btn);
+    expect(api.apiFetch).toHaveBeenCalledWith("/addresses/refresh", { method: "POST" });
+    expect(await screen.findByRole("status")).toBeInTheDocument();
+  });
+
+  it("explains the rate limit", async () => {
+    api.apiFetch.mockRejectedValueOnce(new ApiError(429, "slow down"));
+    render(<AddressPicker options={groupOptions(ROWS)} chosen={null} onChosen={vi.fn()} onTypeInstead={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh addresses" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Just refreshed");
+  });
+
+  it("shows an app's own line when it differs", () => {
+    const rows = [addr({}), addr({ site: "swiggy", address_id: "s1", line: "12, Lakeview Apts", lat: 12.912, lon: 77.6478 })];
+    render(<AddressPicker options={groupOptions(rows)} chosen={null} onChosen={vi.fn()} onTypeInstead={vi.fn()} />);
+    expect(screen.getByText("Swiggy: 12, Lakeview Apts")).toBeInTheDocument();
   });
 });
 
@@ -196,7 +221,7 @@ describe("AddressRow with saved addresses", () => {
     render(<AddressRow profile={profile} onSaved={vi.fn()} initialAddresses={[]} />);
     await userEvent.click(screen.getByRole("button", { name: /Delivery address/ }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Connect an app to use its saved addresses")).toBeInTheDocument();
+    expect(within(dialog).getByText("Connect an app and we'll show its saved addresses here")).toBeInTheDocument();
     expect(within(dialog).queryByRole("radio")).toBeNull();
 
     pushRows(ROWS.slice(0, 2)); // a connect just finished and its addresses arrived
@@ -232,7 +257,7 @@ describe("AddressRow with saved addresses", () => {
     const onSaved = vi.fn();
     render(<AddressRow profile={profile} onSaved={onSaved} initialAddresses={ROWS} />);
     await userEvent.click(screen.getByRole("button", { name: /Delivery address/ }));
-    await userEvent.click(await screen.findByRole("button", { name: "Type an address instead" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Enter an area instead" }));
     const field = await screen.findByLabelText("Address");
     await userEvent.clear(field);
     await userEvent.type(field, "Indiranagar, Bengaluru");

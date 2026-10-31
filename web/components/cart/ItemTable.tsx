@@ -31,7 +31,7 @@ function Cell({ cell, highlight, onPick }: { cell: CartCell | undefined; highlig
         <button
           type="button"
           onClick={onPick}
-          className="-mr-1 min-h-11 rounded-tile px-1 font-semibold text-accent hover:bg-accent/5 active:bg-accent/10"
+          className="-mr-1 min-h-11 min-w-11 rounded-tile px-1 font-semibold text-accent hover:bg-accent/5 active:bg-accent/10"
         >
           Pick
         </button>

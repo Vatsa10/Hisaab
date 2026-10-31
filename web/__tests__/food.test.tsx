@@ -283,7 +283,7 @@ describe("food mode", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Bhatt Sweets/ }));
     const again = await screen.findByRole("dialog");
     fireEvent.click(within(again).getByRole("button", { name: /Zomato listing/ }));
-    fireEvent.click(within(again).getByRole("button", { name: "No, different — use Zomato" }));
+    fireEvent.click(within(again).getByRole("button", { name: "No, different. Use Zomato" }));
     await waitFor(() => expect(calls("/cart/food/menus")).toHaveLength(2));
     expect(body(calls("/cart/food/menus")[1]!)).toEqual({ name: "Bhatt Sweets & Snacks", zomato_id: "z2" });
   });

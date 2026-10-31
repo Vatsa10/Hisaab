@@ -15,8 +15,9 @@ export default function manifest(): MetadataRoute.Manifest {
     icons: [
       { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
       { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
-      // Full-bleed artwork with the glyph inside the safe zone, so it also works masked.
-      { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+      // Full-bleed artwork with the mark at 80% size, inside every launcher mask's safe zone.
+      { src: "/icons/icon-512-maskable.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+      { src: "/icons/badge-96.png", sizes: "96x96", type: "image/png", purpose: "monochrome" },
     ],
   };
 }

@@ -33,7 +33,8 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ["-apple-system", '"SF Pro Text"', '"Segoe UI"', "sans-serif"],
+        sans: ["var(--font-text)", "-apple-system", '"SF Pro Text"', '"Segoe UI"', "sans-serif"],
+        display: ["var(--font-display)", "var(--font-text)", "-apple-system", '"Segoe UI"', "sans-serif"],
       },
       fontSize: {
         // [size, line-height]; tuned for an iPhone at 1x text size

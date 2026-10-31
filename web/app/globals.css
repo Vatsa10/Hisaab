@@ -42,6 +42,15 @@
     overflow-x: hidden;
   }
 
+  /* The display face carries headings and the big rupee figures; digits stay tabular so totals line up. */
+  h1,
+  h2,
+  .text-title,
+  .text-figure {
+    font-family: var(--font-display), var(--font-text), sans-serif;
+    font-feature-settings: "tnum" 1;
+  }
+
   /* One visible focus style everywhere, only for keyboard focus. */
   :focus-visible {
     outline: 2px solid rgb(var(--accent));

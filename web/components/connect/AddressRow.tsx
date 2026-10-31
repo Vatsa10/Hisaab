@@ -171,7 +171,7 @@ export function AddressRow({ profile, onSaved, initialAddresses, userId }: Addre
         title="Delivery address"
         description={
           picking
-            ? "Pick an address saved in your apps. Each app is priced at its own saved address."
+            ? "We price each app at its own saved address."
             : "We price carts for this area. Your apps keep their own saved addresses."
         }
         className="mb-[var(--kb-inset,0px)] !max-h-[calc(90dvh-var(--kb-inset,0px))]"
@@ -196,7 +196,7 @@ export function AddressRow({ profile, onSaved, initialAddresses, userId }: Addre
             <p className="mb-4 flex items-start gap-2.5 rounded-field bg-canvas px-3.5 py-3 text-label text-ink-muted">
               <PinIcon size={16} className="mt-px shrink-0 text-accent" />
               <span>
-                <span className="block font-semibold text-ink">Connect an app to use its saved addresses</span>
+                <span className="block font-semibold text-ink">Connect an app and we&apos;ll show its saved addresses here</span>
                 Or type the address you order to.
               </span>
             </p>

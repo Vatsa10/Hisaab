@@ -1,0 +1,8 @@
+Fonts self-hosted for Hisaab (latin subsets, woff2, from the Fontsource packages).
+
+Bricolage Grotesque (600, 700): display face for titles and rupee totals.
+  (c) 2022 The Bricolage Grotesque Project Authors. SIL Open Font License 1.1. See LICENSE-BricolageGrotesque.txt.
+Geist (400, 500, 600): text face.
+  (c) 2023 Vercel, in collaboration with basement.studio. SIL Open Font License 1.1. See LICENSE-Geist.txt.
+
+Both licences allow commercial use, embedding and redistribution with the app. They may not be sold on their own.

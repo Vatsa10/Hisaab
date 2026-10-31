@@ -249,7 +249,7 @@ function FeeCard({ row, onSaved, onForbidden }: { row: FeeRow; onSaved: () => vo
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {row.verified ? <Badge tone="ok">Verified</Badge> : <Badge tone="warn">{`Unverified — check ${name}'s fee page`}</Badge>}
+        {row.verified ? <Badge tone="ok">Verified</Badge> : <Badge tone="warn">{`Unverified: check ${name}'s fee page`}</Badge>}
       </div>
       <p className="mt-2 text-label tabular-nums text-ink-muted">{summary(rules, row.kind)}</p>
 

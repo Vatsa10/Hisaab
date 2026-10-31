@@ -61,7 +61,7 @@ function Body({ pair, onAnswer }: { pair: RestaurantPair; onAnswer: SameRestaura
           Yes, same restaurant
         </Button>
         <Button variant="secondary" size="lg" fullWidth onClick={() => onAnswer(pair, { same: false, keep })}>
-          {`No, different — use ${siteName(keep)}`}
+          {`No, different. Use ${siteName(keep)}`}
         </Button>
       </div>
     </>

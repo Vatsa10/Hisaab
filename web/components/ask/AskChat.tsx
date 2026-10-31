@@ -31,7 +31,7 @@ export function askErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
     switch (err.status) {
       case 502:
-        return "The analyst is busy — try again";
+        return "The analyst is busy. Try again";
       case 503:
         return "Ask isn't set up yet";
       case 0:

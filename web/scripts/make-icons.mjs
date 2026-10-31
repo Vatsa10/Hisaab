@@ -1,5 +1,6 @@
-// Generates the PWA icons (public/icons/) and the iOS launch images (public/splash/) from the
-// shared rupee glyph in lib/brand-glyph.mjs, the same geometry <BrandMark> draws as SVG.
+// Generates the app icon set from the shared tally-H mark in lib/brand-glyph.mjs (the geometry <BrandMark> draws
+// as SVG): app/icon.svg, app/favicon.ico, the PWA icons incl. a maskable one and the monochrome push badge
+// (public/icons/), and the iOS launch images (public/splash/).
 // No dependencies and no fonts, so the output is identical on every machine.
 //
 //   node scripts/make-icons.mjs
@@ -12,10 +13,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
-import { insideBrandGlyph } from "../lib/brand-glyph.mjs";
+import { brandGlyphPathData, insideBrandGlyph, STROKE } from "../lib/brand-glyph.mjs";
 import { STARTUP_SCREENS, startupImageFile } from "../lib/startup-images.mjs";
 
-const PUBLIC = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PUBLIC = join(WEB, "public");
+const APP = join(WEB, "app");
 const ACCENT = [0x0a, 0x7c, 0x55];
 const WHITE = [0xff, 0xff, 0xff];
 const CANVAS = [0xf6, 0xf7, 0xf9];
@@ -45,7 +48,7 @@ function insideRoundedSquare(x, y, r) {
  * Draw the brand tile (accent square with the white glyph) into `img` at (left, top), `size`
  * pixels square, with corner radius `radius` as a fraction of the size (0 = full bleed).
  */
-function drawMark(img, left, top, size, radius, background) {
+function drawMark(img, left, top, size, radius, background, zoom = 1) {
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
       let tile = 0;
@@ -56,7 +59,7 @@ function drawMark(img, left, top, size, radius, background) {
           const v = (py + (sy + 0.5) / SS) / size;
           if (!insideRoundedSquare(u, v, radius)) continue;
           tile++;
-          if (insideBrandGlyph(u, v)) glyph++;
+          if (insideBrandGlyph(u, v, zoom)) glyph++;
         }
       }
       const n = SS * SS;
@@ -109,16 +112,83 @@ function write(rel, data) {
   console.log(`wrote public/${rel.replace(/\\/g, "/")}`);
 }
 
-// Home-screen and manifest icons: full bleed.
-for (const [name, size] of [
-  ["icon-192.png", 192],
-  ["icon-512.png", 512],
-  ["apple-touch-icon.png", 180],
+// Home-screen and manifest icons: full bleed. The maskable one draws the mark at 80% so that every launcher
+// mask (circle, squircle) keeps it inside the safe zone.
+for (const [name, size, zoom] of [
+  ["icon-192.png", 192, 1],
+  ["icon-512.png", 512, 1],
+  ["icon-512-maskable.png", 512, 0.8],
+  ["apple-touch-icon.png", 180, 1],
 ]) {
   const img = canvas(size, size, ACCENT);
-  drawMark(img, 0, 0, size, 0, ACCENT);
+  drawMark(img, 0, 0, size, 0, ACCENT, zoom);
   write(join("icons", name), png(size, size, img.raw));
 }
+
+/** RGBA PNG of the white mark on a transparent background: the monochrome push-notification badge. */
+function badgePng(size) {
+  const rowLen = size * 4 + 1;
+  const raw = Buffer.alloc(rowLen * size);
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let hit = 0;
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          if (insideBrandGlyph((px + (sx + 0.5) / SS) / size, (py + (sy + 0.5) / SS) / size, 1.15)) hit++;
+        }
+      }
+      raw.set([255, 255, 255, Math.round((hit / (SS * SS)) * 255)], py * rowLen + 1 + px * 4);
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6; // RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+write(join("icons", "badge-96.png"), badgePng(96));
+
+/** The mark as SVG: an accent tile with the white strokes (the favicon and the vector source of the icons). */
+function iconSvg({ radius, mono }) {
+  const d = brandGlyphPathData(100);
+  const tile = mono ? "" : `<rect width="100" height="100" rx="${radius}" fill="#0a7c55"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">${tile}<path d="${d}" fill="none" stroke="${mono ? "#000" : "#fff"}" stroke-width="${Math.round(STROKE * 1000) / 10}" stroke-linecap="round" stroke-linejoin="round"/></svg>
+`;
+}
+mkdirSync(APP, { recursive: true });
+writeFileSync(join(APP, "icon.svg"), iconSvg({ radius: 22 }));
+console.log("wrote app/icon.svg");
+write(join("icons", "badge.svg"), iconSvg({ mono: true }));
+
+// favicon.ico: PNG-compressed 16, 32 and 48 pixel images (rounded tile, like icon.svg).
+const ico = [16, 32, 48].map((size) => {
+  const img = canvas(size, size, WHITE);
+  drawMark(img, 0, 0, size, 0.22, WHITE);
+  return { size, data: png(size, size, img.raw) };
+});
+const header = Buffer.alloc(6);
+header.writeUInt16LE(1, 2);
+header.writeUInt16LE(ico.length, 4);
+let offset = 6 + 16 * ico.length;
+const entries = ico.map(({ size, data }) => {
+  const e = Buffer.alloc(16);
+  e[0] = size;
+  e[1] = size;
+  e.writeUInt16LE(1, 4);
+  e.writeUInt16LE(32, 6);
+  e.writeUInt32LE(data.length, 8);
+  e.writeUInt32LE(offset, 12);
+  offset += data.length;
+  return e;
+});
+writeFileSync(join(APP, "favicon.ico"), Buffer.concat([header, ...entries, ...ico.map((i) => i.data)]));
+console.log("wrote app/favicon.ico");
 
 // Launch images: the 56pt login mark scaled to 96pt, centred on the brand background.
 const MARK_PT = 96;

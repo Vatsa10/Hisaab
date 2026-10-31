@@ -1,0 +1,902 @@
+{
+ "shots": {
+  "auth-01-login-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "auth-01-login-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "auth-02-login-error-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "auth-03-signup-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "auth-04-invite-only-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "auth-04-invite-only-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "privacy-01-public-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "privacy-01-public-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "error-01-not-found-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-sites-02-learn-asking-approval-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-sites-03-cart-learn-asking-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-approvals-01-cart-permissions-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-approvals-01-cart-permissions-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "empty-01-spend-no-apps-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "empty-01-spend-no-apps-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "empty-02-orders-no-apps-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "ask-01-empty-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "ask-01-empty-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "empty-03-cart-no-apps-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-01-none-connected-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-01-none-connected-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "accounts-connect-zepto-wrong-1-consent-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-2-phone-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-2b-phone-filled-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-3-otp-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-4-wrong-otp-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-4-syncing-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zepto-wrong-5-connected-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-1-consent-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-2-phone-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-2b-phone-filled-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-3-question-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-3-otp-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-4-syncing-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-zomato-question-5-connected-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-1-consent-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-2-phone-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-2b-phone-filled-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-3-otp-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-4-syncing-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-connect-swiggy-5-connected-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-02-connected-all-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "accounts-02-connected-all-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-address-01-picker-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-address-02-type-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-03-refresh-3-left-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-04-refresh-none-left-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "spend-01-month-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "spend-01-month-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "orders-01-list-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "orders-02-detail-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "ask-02-question-typed-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-01-groceries-empty-list-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-02-groceries-list-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-02-groceries-list-narrow-reload-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "cart-03-usual-sheet-390.png": {
+   "small": [
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20"
+   ],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-04-compare-in-progress-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-05-results-ranked-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-05-results-ranked-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "cart-06-item-table-and-split-line-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-06-item-table-and-split-line-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "cart-07-results-with-to-pick-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-08-pick-sheet-390.png": {
+   "small": [
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20"
+   ],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-08-pick-sheet-narrow-results-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "cart-09-pick-sheet-chosen-390.png": {
+   "small": [
+    "input\"\" 20x20",
+    "input\"\" 20x20",
+    "input\"\" 20x20"
+   ],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-10-results-after-pick-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-01-search-usual-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-01-search-usual-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "food-02-search-results-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-03-menu-with-dishes-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-03-menu-narrow-fresh-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "food-04-results-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-05-results-item-table-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-04-results-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "food-06-pair-sheet-same-restaurant-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-07-search-only-on-one-app-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-08-search-burger-singh-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-11-groceries-after-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-01-result-with-fill-button-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-02-confirm-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-02-confirm-narrow-results-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "fill-03-progress-390.png": {
+   "small": [
+    "input\"\" 16x16",
+    "input\"\" 16x16",
+    "input\"\" 16x16",
+    "input\"\" 16x16"
+   ],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-04-question-390.png": {
+   "small": [
+    "input\"\" 16x16",
+    "input\"\" 16x16",
+    "input\"\" 16x16",
+    "input\"\" 16x16"
+   ],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-05-result-partial-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-06-result-card-filled-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-07-interrupted-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-08-reprice-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "fill-08-reprice-narrow-results-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "cart-12-fill-paused-budget-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "food-09-result-reload-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-05-needs-login-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-13-needs-login-app-row-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "spend-02-needs-login-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-06-relogin-banner-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-06-relogin-banner-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "spend-03-relogin-banner-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "ask-05-relogin-banner-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-14-relogin-banner-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-07-reconnect-sheet-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "accounts-08-site-cooling-down-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-01-accounts-full-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "privacy-02-signed-in-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-05-disconnect-sheet-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-05-disconnect-sheet-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "settings-06-disconnected-confirmation-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-07-delete-sheet-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-07-delete-sheet-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "settings-08-delete-sheet-armed-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "settings-09-delete-nothing-remains-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "auth-05-login-after-delete-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-costs-01-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-costs-01-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "admin-sites-01-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-sites-01-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "admin-fees-01-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-fees-01-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "admin-approvals-empty-01-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-approvals-empty-01-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "admin-invites-01-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-invites-01-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "admin-sites-04-cooldown-and-auto-paused-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-sites-05-cart-filling-group-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "admin-invites-02-form-filled-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  }
+ },
+ "missed": [
+  "ask answer: TimeoutError: locator.click: Timeout 20000ms exceeded.",
+  "ask error: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed",
+  "fill reprice: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed",
+  "worker logged out compare: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed"
+ ]
+}

@@ -38,6 +38,8 @@ export interface AddressOption {
   sites: string[];
   /** Each app's own saved address for this place; the lead (shown) first. */
   members: Choice[];
+  /** Each app's own address line for this place, in the Accounts screen's order (shown when they differ). */
+  appLines: Array<{ site: string; line: string | null }>;
   /** What a tap saves: the lead if it has a pin, else the first member with one, else the lead. */
   send: Choice;
 }
@@ -129,6 +131,7 @@ export function groupOptions(rows: readonly AppAddress[]): AddressOption[] {
       is_default: lead.is_default,
       sites: SITE_ORDER.filter((s) => g.some((m) => m.site === s)),
       members: g.map((m) => ({ site: m.site, address_id: m.address_id })),
+      appLines: SITE_ORDER.flatMap((s) => g.filter((m) => m.site === s).map((m) => ({ site: s, line: m.line }))),
       send: { site: send.site, address_id: send.address_id },
     };
   });
@@ -152,6 +155,11 @@ export function chooseAddress(option: AddressOption): Promise<ChoiceResponse> {
     method: "PUT",
     body: JSON.stringify({ choice: { site: option.send.site, address_id: option.send.address_id } }),
   });
+}
+
+/** Ask the server to re-read the saved addresses on the user's connected apps (read-only; once per 2 minutes). */
+export function refreshAddresses(): Promise<{ sites: string[] }> {
+  return apiFetch<{ sites: string[] }>("/addresses/refresh", { method: "POST" });
 }
 
 let channelSeq = 0;

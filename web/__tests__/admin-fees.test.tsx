@@ -144,7 +144,7 @@ describe("fees panel", () => {
   it("unverified badge shows", async () => {
     routes({ "GET /admin/fees": () => [ZEPTO, SWIGGY] });
     render(<FeesPanel onForbidden={vi.fn()} />);
-    expect(await screen.findByText("Unverified — check Zepto's fee page")).toBeInTheDocument();
+    expect(await screen.findByText("Unverified: check Zepto's fee page")).toBeInTheDocument();
     expect(screen.getByText("Verified")).toBeInTheDocument();
   });
 

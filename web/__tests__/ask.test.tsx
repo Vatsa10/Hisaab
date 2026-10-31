@@ -147,7 +147,7 @@ describe("AskChat", () => {
     api.apiFetch.mockRejectedValueOnce(new ApiError(502, "x")).mockReturnValueOnce(new Promise(() => {}));
     render(<AskChat />);
     await userEvent.click(screen.getByRole("button", { name: "Top restaurants" }));
-    await screen.findByText("The analyst is busy — try again");
+    await screen.findByText("The analyst is busy. Try again");
     expect(screen.queryByRole("alert")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
@@ -331,7 +331,7 @@ describe("AskChat", () => {
     render(<AskChat />);
     await userEvent.click(screen.getByRole("button", { name: "Food vs groceries" }));
 
-    const message = await screen.findByText("The analyst is busy — try again");
+    const message = await screen.findByText("The analyst is busy. Try again");
     const error = message.closest<HTMLElement>("[data-ask-error]")!;
     expect(error).not.toHaveTextContent("llm failed");
 
@@ -339,7 +339,7 @@ describe("AskChat", () => {
     expect(api.apiFetch).toHaveBeenCalledTimes(2);
     expect(api.apiFetch.mock.calls[1]![1].body).toBe(api.apiFetch.mock.calls[0]![1].body);
     expect(await screen.findByText("Groceries ₹3,120, food ₹4,293.")).toBeInTheDocument();
-    expect(screen.queryByText("The analyst is busy — try again")).toBeNull();
+    expect(screen.queryByText("The analyst is busy. Try again")).toBeNull();
     // The question is asked once in the conversation, not repeated by the retry.
     expect(screen.getAllByText("Food vs groceries")).toHaveLength(1);
   });
