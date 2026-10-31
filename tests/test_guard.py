@@ -131,3 +131,25 @@ def test_leaving_login_mode_starts_blocking_media():
     g = Guard(login_mode=True, block_media=True)
     g.login_mode = False
     assert _run(g, _Request("image")) == ("abort", "blockedbyclient")
+
+
+def test_redact_path_hides_user_slug_everywhere():
+    from guard import redact_path
+    err = "Timeout 30000ms exceeded at https://www.zomato.com/users/some-slug-123/ordering?x=1"
+    out = redact_path(err)
+    assert "some-slug-123" not in out
+    assert "https://www.zomato.com/users/<account>/ordering?x=1" in out
+    assert redact_path("/users/fake-name") == "/users/<account>"
+
+
+def test_redact_path_leaves_other_urls_alone():
+    from guard import redact_path
+    s = "https://www.swiggy.com/my-account/orders and /user/settings, https://x.com/api/users"
+    assert redact_path(s) == s
+
+
+def test_worker_clean_error_redacts_slug():
+    from server.worker import _clean_error
+    e = RuntimeError("Page.goto: boom at https://www.zomato.com/users/some-slug-123/ordering")
+    out = _clean_error(e, None)
+    assert "some-slug-123" not in out and "/users/<account>/ordering" in out

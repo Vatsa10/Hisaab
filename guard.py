@@ -23,6 +23,14 @@ def redact_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}{p.path}"
 
 
+_USER_PATH = re.compile(r"/users/[^/\s?#'\"<>]+")
+
+
+def redact_path(text: str) -> str:
+    """Rewrite /users/<segment> (a Zomato user slug) to /users/<account>, also inside full URLs."""
+    return _USER_PATH.sub("/users/<account>", text)
+
+
 def allowlisted(url: str, body: str | None, allowlist: list[dict]) -> bool:
     if body and MUTATION.search(body):
         return False

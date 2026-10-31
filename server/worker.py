@@ -35,6 +35,7 @@ import search_learn
 import sync
 from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
                     session, site_health, sites, store, timing, usage, vault)
+from guard import redact_path
 from server import fill as fills
 from server import fill_summary
 from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, check_hosted, settings
@@ -170,7 +171,7 @@ def _clean_error(e: Exception, phone: str | None) -> str:
     line = (str(e).splitlines() or [""])[0]
     if phone:
         line = line.replace(phone, "***")
-    line = re.sub(r"\d{4,}", "***", line)
+    line = re.sub(r"\d{4,}", "***", redact_path(line))
     return f"{type(e).__name__}: {line}"[:MAX_ERROR_LEN]
 
 

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 from cart_guard import CartGuard
-from guard import Guard
+from guard import Guard, redact_path
 
 log = logging.getLogger("browser")
 
@@ -171,7 +171,7 @@ def goto(page, url: str, tries: int = 3) -> None:
             if not r or r.status not in RETRY_STATUS:
                 break
             _raise_if_throttled_response(r)
-            log.warning("HTTP %s on %s, retrying", r.status, urlsplit(url).path)
+            log.warning("HTTP %s on %s, retrying", r.status, redact_path(urlsplit(url).path))
         except SiteThrottled:
             raise
         except Exception as e:
@@ -182,7 +182,7 @@ def goto(page, url: str, tries: int = 3) -> None:
                     break
             if "ERR_HTTP_RESPONSE_CODE_FAILURE" not in str(e) and "ERR_ABORTED" not in str(e) or i == tries - 1:
                 raise
-            log.warning("navigation to %s failed (%s), retrying", urlsplit(url).path, str(e).split(" at ")[0][-40:])
+            log.warning("navigation to %s failed (%s), retrying", redact_path(urlsplit(url).path), redact_path(str(e).split(" at ")[0])[-40:])
         page.wait_for_timeout(4000 * (i + 1))
     _settle(page)
 

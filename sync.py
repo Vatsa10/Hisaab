@@ -10,6 +10,7 @@ import agent
 import db
 import recipes
 import browser
+from guard import redact_path
 from server import timing
 from browser import LOGIN_URL, SITES, SessionExpired, SiteThrottled, fetch_in_page, open_site, raise_if_blocked
 
@@ -96,7 +97,7 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
         try:
             browser.goto(page, home)
         except Exception as e:  # e.g. a bot-filter 403; the agent backs off and retries from the error page
-            log.warning("%s home page failed to load: %s", site, str(e).splitlines()[0])
+            log.warning("%s home page failed to load: %s", site, redact_path(str(e).splitlines()[0]))
         done = None
         if phone:
             address = browser.effective_location(location).get("query") or ""
@@ -288,14 +289,14 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
             except (SessionExpired, SiteThrottled):
                 raise
             except Exception as e:
-                log.warning("%s fast path failed: %s", site, e)
+                log.warning("%s fast path failed: %s", site, redact_path(str(e)))
         if not orders:
             try:
                 orders = replay(page, capture, recipe, since, on_progress)
             except (SessionExpired, SiteThrottled):
                 raise
             except Exception as e:
-                log.warning("%s nav_trace replay failed: %s", site, e)
+                log.warning("%s nav_trace replay failed: %s", site, redact_path(str(e)))
         if not orders and not allow_learn:
             raise RecipeDrift(f"recipe drift for {site}: fast path and replay both failed; an admin must re-learn it")
         if not orders:
