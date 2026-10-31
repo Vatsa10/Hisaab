@@ -10,9 +10,9 @@ PWA (next start) -> API (uvicorn) -> jobs queue -> worker (fake apps) -> Postgre
 bash scripts/e2e_local.sh
 ```
 
-It ends with one line, for example `E2E OK: 4 passed in 4m12s`, or `E2E FAILED: ...` with where to look.
+It ends with one line, for example `E2E OK: 14 passed in 9m12s`, or `E2E FAILED: ...` with where to look.
 
-Prerequisites: Docker Desktop running, Python 3.11+ with `requirements.txt` installed, Node 22, pnpm 10, curl.
+Prerequisites: Docker Desktop running (it also runs Mailpit; ports 1025 and 8025 free), Python 3.11+ with `requirements.txt` installed, Node 22, pnpm 10, curl.
 Git Bash on Windows 11, or any shell on Linux/macOS. The first run downloads Playwright's WebKit (on Linux also
 run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its system libraries).
 
@@ -26,7 +26,13 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    runs created. The CLI's reset sometimes fails while "Initialising schema" (`DbSetupError`: the realtime
    container races its own `schema_migrations` insert), so the script tries up to three times. Then
    `dev_supabase.sh` runs again to give the `ask_reader` login a fresh password.
-4. **Services**, each with `.env.server.local` plus its own switches:
+4. **Mailpit and the admin.** `docker run axllent/mailpit:v1.21` (SMTP 127.0.0.1:1025, API and UI 127.0.0.1:8025)
+   catches every email of the run; `SMTP_HOST`, `SMTP_PORT` and `APP_URL` are exported to the API, the worker and
+   the specs. Sign-up is invite-only, so `python cli.py add-admin admin@e2e.test` runs right after the reset, and
+   `E2E_ADMIN_EMAIL`, `E2E_PY`, `DATABASE_URL`, `E2E_SUPABASE_URL`, `E2E_ANON_KEY` and `E2E_API_URL` are exported
+   to Playwright (`e2e/helpers/stack.ts` uses them to invite, run `server.scheduler --once`, query the database
+   and call the API as a user; `e2e/helpers/mailpit.ts` reads the mailbox).
+5. **Services**, each with `.env.server.local` plus its own switches:
 
    | Service | Command | Port | Switches |
    | --- | --- | --- | --- |
@@ -35,12 +41,19 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    | PWA | `next start` | 3110 | - |
 
    The script waits for `/healthz`, the worker's `worker started` line and the PWA's `/login` before going on.
-5. **Playwright** (`e2e/`, its own `package.json` with `@playwright/test` pinned, so `web/` keeps no test
-   browser dependency) runs `e2e/tests/product.spec.ts` on the iPhone 14 profile (WebKit, 390x844, touch).
-6. **Cleanup.** A trap stops the API, the worker and the PWA (with their child processes; `taskkill /T` on
-   Windows) however the run ends, and stops Supabase if this run started it. Set `E2E_KEEP_SUPABASE=1` to keep it.
+6. **Playwright** (`e2e/`, its own `package.json` with `@playwright/test` pinned, so `web/` keeps no test
+   browser dependency) runs `e2e/tests/product.spec.ts` and `e2e/tests/plan4.spec.ts` on the iPhone 14 profile
+   (WebKit, 390x844, touch).
+7. **Cleanup.** A trap stops the API, the worker and the PWA (with their child processes; `taskkill /T` on
+   Windows) however the run ends, removes the Mailpit container, and stops Supabase if this run started it. Set `E2E_KEEP_SUPABASE=1` to keep it.
 
-Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`.
+Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`, or `bash scripts/e2e_local.sh tests/plan4.spec.ts`.
+`E2E_SKIP_BUILD=1` reuses an earlier `web/.next` from this script instead of building again.
+
+**Known gap, worked around by the script.** The Supabase CLI skips `supabase/migrations/0008b_app_addresses.sql`
+(its name does not match `<timestamp>_name.sql`), so after `db reset` the `app_addresses` table is missing. The script
+detects that, applies the file by hand, and restarts the Realtime container (it does not see a table added to its
+publication while running). Rename the migration and this step becomes a no-op.
 
 ### Host names
 
@@ -68,9 +81,11 @@ is `wslrelay.exe`.
 
 Both fakes refuse to start unless `DATABASE_URL` points at this machine.
 
-## What the spec covers
+## What the specs cover
 
-`e2e/tests/product.spec.ts`. Each test signs up its own user (local Supabase has email confirmation off).
+### `e2e/tests/product.spec.ts`
+
+Each test invites its own address (`cli.py invite`) and signs it up (local Supabase has email confirmation off).
 
 1. **Sign up, connect Swiggy, Spend, Orders and Ask fill in**
    - Spend before any app is connected is mockup A at zero: the month eyebrow, "This month so far ₹0", four apps
@@ -78,7 +93,7 @@ Both fakes refuse to start unless `DATABASE_URL` points at this machine.
    - Accounts lists Zepto, Blinkit, Swiggy and Zomato; there is no Instamart row, only the note that it comes
      with Swiggy.
    - Consent ("I understand"), phone, "Send OTP"; the row shows "Syncing…"; the job reaches `otp_needed` and the
-     OTP field appears. The field has `inputmode="numeric"`, `autocomplete="one-time-code"`, `maxlength="6"`.
+     OTP field appears. The field has `inputmode="numeric"`, `autocomplete="one-time-code"`, `maxlength="8"`.
    - The OTP `123456` is typed digit by digit, and the field sends itself.
    - The first sync is pushed over Realtime. A live "Found so far" count must appear, never decrease, and stay
      within the final count. The final "Found" card shows 28 orders, an amount, and the first month. The phone number and OTP are in no
@@ -104,6 +119,35 @@ than the screen, and a sideways scroll must not move it. The 375 px checks run i
 that shares the signed-in session. They never resize the page: resizing a mobile WebKit page in place leaves its
 layout viewport at the old height, and the fixed tab bar becomes unclickable.
 
+### `e2e/tests/plan4.spec.ts`
+
+Serial; the tests hand state to each other. Emails are read from Mailpit; the queued ones are sent by the worker
+after a job or by `python -m server.scheduler --once` (`schedulerOnce`).
+
+1. **Invite-only sign-up joins the waitlist.** An uninvited address gets the invite-only message, no account, and a
+   waitlist row.
+2. **Admin invites from the waitlist.** The admin (`admin@e2e.test`) signs up, `/admin` -> Invites -> Invite on the
+   waitlist row; the mail "You're invited to Hisaab" arrives; that address then signs up.
+3. **First sync sends an email.** Connect fake Zepto with `123456`; the mail "Zepto is connected" arrives.
+4. **Refresh limit.** "Refresh now · 3 left today", three refreshes each waited to done, then "No refreshes left
+   today"; a direct fourth `POST /connections/zepto/refresh` answers 429 with the exact detail.
+5. **Admin sees cost per user.** The member's row has worker minutes above zero, a rupee amount and four syncs.
+6. **Admin learn with approval.** The admin connects fake Zepto; Sites -> Learn shows the approval card with
+   `^https://fake\.zepto\.test/api/orders$`; Approve; Sites shows "Recipe v1" and Healthy. The grocery-price recipe
+   is then learned through the API so the next test can compare.
+7. **A second sync and a compare ask for no login.** After one connect (the only OTP), Refresh now and a cart
+   compare both finish with no OTP or question stage, no second connect job and the connection still connected.
+   `fake_sites` jobs bypass the vault, so the vault itself is exercised by a save and restore round trip of the same
+   `vault.save_profile` / `restore_profile` on a throwaway file vault (encrypted blob, owner-checked restore).
+8. **Deleting the account.** Accounts -> Delete account -> DELETE: the page leaves for `/login?deleted=1`, the
+   `auth.users` row is gone, signing in at Auth and in the app fails, every row of the user is gone, and, as the
+   role of `DATABASE_URL` (the API's local role), `SELECT ... FOR KEY SHARE` and `FOR UPDATE` on an `auth.users`
+   row both work.
+9. **Budget pause.** `schedulerOnce({MONTHLY_BUDGET_INR: "0.01"})` -> "Budget reached" mail to the admin and
+   `budget_state` paused; a freshly invited address sees "Sign-ups are paused"; `schedulerOnce({})` restores `ok` and
+   the same address then signs up.
+10. **No horizontal scroll on /admin**, on each of its five tabs.
+
 Nothing sleeps: every wait is for text that the API or Realtime puts on screen (Playwright's auto-waiting
 `expect`, 30 s default, 90 s for a sync).
 
@@ -113,7 +157,7 @@ Nothing sleeps: every wait is for text that the API or Realtime puts on screen (
 | --- | --- |
 | `e2e/playwright-report/` | HTML report (`pnpm --dir e2e exec playwright show-report playwright-report`) |
 | `e2e/test-results/` | Traces and screenshots of failed tests |
-| `e2e/.run/logs/` | `api.log`, `worker.log`, `web.log`, `web-build.log`, `supabase.log`, `playwright.log` |
+| `e2e/.run/logs/` | `api.log`, `worker.log`, `web.log`, `web-build.log`, `supabase.log`, `mailpit.log`, `add-admin.log`, `playwright.log` |
 
 All are gitignored. The script never prints a secret:
 - `dev_supabase.sh`'s stdout, which names the anon key, goes to `/dev/null`.
@@ -127,6 +171,8 @@ All are gitignored. The script never prints a secret:
   build bakes the API URL in and the API's CORS allows only `http://localhost:3110`.
 - **A job never leaves "Opening …"**: another worker is connected to the same local database and claimed it.
   Stop it. Only the script's fake worker may run during the test.
+- **Mailpit does not start**: ports 1025 or 8025 are taken (another Mailpit, a local mail catcher). The script removes
+  a leftover `ea-e2e-mailpit` container itself.
 - **`next build` collides with `pnpm dev`**: stop the dev server first. Both use `web/.next`.
 - **Run the spec against a stack you started yourself**:
   `E2E_BASE_URL=http://localhost:3110 pnpm --dir e2e exec playwright test`.

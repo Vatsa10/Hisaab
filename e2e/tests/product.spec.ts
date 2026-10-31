@@ -2,7 +2,7 @@
 //   PWA -> FastAPI -> jobs queue -> fake worker (WORKER_FAKE=1) -> Postgres -> Realtime -> PWA
 // plus Ask answering from the user's own rows (ASK_FAKE=1: a fixed scoped_sql query, no LLM).
 //
-// Every test signs up its own user (local Supabase has email confirmations off); the
+// Every test invites and then signs up its own user (sign-up is invite-only; local Supabase has email confirmations off); the
 // `supabase db reset` at the start of scripts/e2e_local.sh removes them. Nothing here sleeps:
 // every step waits for the text that Realtime or the API puts on screen.
 //
@@ -11,6 +11,7 @@
 // 11th cancelled; Swiggy's every 3rd order is an Instamart grocery order.
 
 import { devices, expect, test, type Browser, type BrowserContextOptions, type Locator, type Page } from "@playwright/test";
+import { invite } from "../helpers/stack";
 
 const PASSWORD = "e2e-Passw0rd!";
 const FAKE_OTP = "123456";
@@ -27,7 +28,7 @@ type AppName = (typeof APP_NAMES)[number];
 const TABS = {
   Spend: { path: "/spend", heading: "Spending" },
   Orders: { path: "/orders", heading: "Orders" },
-  Cart: { path: "/cart", heading: "Cheapest cart" },
+  Cart: { path: "/cart", heading: "Cart" },
   Ask: { path: "/ask", heading: "Ask" },
   Accounts: { path: "/accounts", heading: "Your apps" },
 } as const;
@@ -131,6 +132,7 @@ async function expectNothingSensitiveStored(page: Page, secrets: string[]): Prom
 
 async function signUp(page: Page, tag: string): Promise<string> {
   const email = uniqueEmail(tag);
+  invite(email); // sign-up is invite-only (Plan 4): the address is invited first
   await page.goto("/login");
   await page.getByRole("tab", { name: "Create account" }).click();
   await page.getByLabel("Email", { exact: true }).fill(email);
@@ -196,12 +198,12 @@ async function startConnect(page: Page, app: AppName, phone: string): Promise<Lo
 /** The job reached otp_needed (seen live): the OTP field, with the attributes iOS needs for "From Messages". */
 async function otpField(sheet: Locator, app: AppName): Promise<Locator> {
   await expect(sheet.getByRole("heading", { name: `Enter ${app}'s OTP` })).toBeVisible();
-  const field = sheet.getByLabel("6-digit code");
+  const field = sheet.getByLabel("Verification code");
   await expect(field).toBeVisible();
   await expect(field).toHaveAttribute("inputmode", "numeric");
   await expect(field).toHaveAttribute("autocomplete", "one-time-code");
-  await expect(field).toHaveAttribute("maxlength", "6");
-  await expect(field).toHaveAttribute("pattern", "\\d{6}");
+  await expect(field).toHaveAttribute("maxlength", "8");
+  await expect(field).toHaveAttribute("pattern", "\\d{4,8}");
   return field;
 }
 
@@ -260,7 +262,8 @@ async function closeSheet(page: Page, sheet: Locator): Promise<void> {
 
 async function expectSynced(page: Page, app: AppName): Promise<void> {
   await expect(appRow(page, app)).toContainText("✓ Synced");
-  await expect(page.getByRole("button", { name: `Refresh ${app} now` })).toBeVisible();
+  // "Refresh now · 3 left today" once the limits are in (Plan 4), "Refresh <app> now" until then.
+  await expect(appRow(page, app).getByRole("button", { name: /^Refresh/ })).toBeVisible();
 }
 
 // ---- Ask ---------------------------------------------------------------------------------------------

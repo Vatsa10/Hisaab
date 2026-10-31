@@ -6,7 +6,10 @@
 # 2. `supabase db reset` (every migration, a clean database), then dev_supabase.sh again for the ask_reader login
 # 3. starts the API (ASK_FAKE=1) and the worker (WORKER_FAKE=1, CATEGORIZE=0, FAKE_PAGE_DELAY_S=0.4) with
 #    .env.server.local, and the PWA
-# 4. runs Playwright (e2e/), then stops everything it started, including Supabase if it started it
+# 4. starts Mailpit (every email of the run lands there), makes admin@e2e.test an admin, and sends the API and the
+#    worker's mail and links to it (SMTP_HOST, SMTP_PORT, APP_URL)
+# 5. runs Playwright (e2e/: product.spec.ts and plan4.spec.ts), then stops everything it started, including Mailpit
+#    and Supabase if it started it
 #
 # Usage: bash scripts/e2e_local.sh [playwright args, e.g. -g "updates live"]
 # Env:   E2E_KEEP_SUPABASE=1 leaves a Supabase this script started running.
@@ -27,8 +30,11 @@ WEB_URL="http://$HOST:$WEB_PORT"
 RUN_DIR="$ROOT/e2e/.run"
 LOGS="$RUN_DIR/logs"
 
+MAILPIT_NAME="ea-e2e-mailpit"
+ADMIN_EMAIL="admin@e2e.test"
 PHASE="setup"
 STARTED_SUPABASE=0
+STARTED_MAILPIT=0
 PIDS=()
 RESULT=""
 
@@ -79,6 +85,7 @@ cleanup() {
   trap - EXIT INT TERM
   local pid
   for pid in "${PIDS[@]+"${PIDS[@]}"}"; do stop_pid "$pid"; done
+  if [ "$STARTED_MAILPIT" = 1 ]; then docker rm -f "$MAILPIT_NAME" >/dev/null 2>&1 || true; fi
   if [ "$STARTED_SUPABASE" = 1 ] && [ "${E2E_KEEP_SUPABASE:-0}" != 1 ]; then
     log "stopping the Supabase this run started"
     supabase_logged stop || true
@@ -128,6 +135,13 @@ for port in "$API_PORT" "$WEB_PORT"; do
   if listening "$port"; then fail "port $port is already in use; stop whatever is on it"; fi
 done
 
+PHASE="starting Mailpit"
+docker rm -f "$MAILPIT_NAME" >/dev/null 2>&1 || true   # a leftover from an interrupted run
+docker run -d --rm --name "$MAILPIT_NAME" -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 axllent/mailpit:v1.21   >"$LOGS/mailpit.log" 2>&1 || { show_log "$LOGS/mailpit.log"; fail "could not start Mailpit (are ports 1025 and 8025 free?)"; }
+STARTED_MAILPIT=1
+# Every service and the CLI send mail here, and the links in it point at the PWA of this run.
+export SMTP_HOST=127.0.0.1 SMTP_PORT=1025 APP_URL="$WEB_URL"
+
 # wait_for <what> <seconds> <pid or ""> <log> <command...>: poll until the command succeeds.
 wait_for() {
   local what="$1" limit="$2" pid="$3" logfile="$4"
@@ -148,6 +162,7 @@ wait_for() {
 }
 
 http_ok() { curl -sf -o /dev/null --max-time 5 "$@"; }
+wait_for "Mailpit" 60 "" "$LOGS/mailpit.log" http_ok "http://127.0.0.1:8025/api/v1/info"
 
 # ---- Supabase and the PWA build -----------------------------------------------------------------------
 
@@ -174,9 +189,13 @@ if [ ! -d web/node_modules ]; then
   log "installing web dependencies"
   pnpm --dir web install --frozen-lockfile >"$LOGS/web-install.log" 2>&1 || { show_log "$LOGS/web-install.log"; fail "pnpm install (web) failed"; }
 fi
-log "building the PWA for $WEB_URL (API $API_URL)"
-NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" NEXT_PUBLIC_SUPABASE_ANON_KEY="$ANON_KEY" NEXT_PUBLIC_API_URL="$API_URL" \
-  pnpm --dir web build >"$LOGS/web-build.log" 2>&1 || { show_log "$LOGS/web-build.log"; fail "next build failed"; }
+if [ "${E2E_SKIP_BUILD:-0}" = 1 ] && [ -f web/.next/BUILD_ID ]; then
+  log "reusing the PWA build in web/.next (E2E_SKIP_BUILD=1); it must come from this script, with the same URLs"
+else
+  log "building the PWA for $WEB_URL (API $API_URL)"
+  NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" NEXT_PUBLIC_SUPABASE_ANON_KEY="$ANON_KEY" NEXT_PUBLIC_API_URL="$API_URL" \
+    pnpm --dir web build >"$LOGS/web-build.log" 2>&1 || { show_log "$LOGS/web-build.log"; fail "next build failed"; }
+fi
 
 PHASE="preparing Playwright"
 if [ ! -d e2e/node_modules ]; then
@@ -196,6 +215,24 @@ for attempt in 1 2 3; do
 done
 # The reset recreates ask_reader without a login: give it a fresh password (written to .env.server.local only).
 dev_supabase || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed after the reset"; }
+# KNOWN GAP: the Supabase CLI skips supabase/migrations/0008b_app_addresses.sql ("file name must match pattern
+# <timestamp>_name.sql"), so the app_addresses table is missing after `supabase db reset` and the PWA's Realtime
+# channel, which listens to it, never delivers job progress. Until that file is renamed, apply it here so the run is
+# meaningful, and say so.
+if [ "$("$PY" -c "import os,psycopg,sys
+print(psycopg.connect(sys.argv[1]).execute(\"select to_regclass('public.app_addresses') is not null\").fetchone()[0])"   "$(env_value .env.server.local DATABASE_URL)")" = False ]; then
+  log "WARNING: app_addresses is missing after the reset (the CLI skipped 0008b_app_addresses.sql); applying it by hand"
+  "$PY" -c "import psycopg,sys
+c=psycopg.connect(sys.argv[1],autocommit=True)
+c.execute(open('supabase/migrations/0008b_app_addresses.sql',encoding='utf-8').read())
+c.execute(\"notify pgrst, 'reload schema'\")" "$(env_value .env.server.local DATABASE_URL)"     || fail "could not apply 0008b_app_addresses.sql"
+  # Realtime does not see a table added to its publication after it started: restart it, and wait until it is healthy.
+  docker restart supabase_realtime_expense-agent >/dev/null 2>&1 || fail "could not restart Realtime"
+  for _ in $(seq 1 60); do
+    [ "$(docker inspect -f '{{.State.Health.Status}}' supabase_realtime_expense-agent 2>/dev/null)" = healthy ] && break
+    sleep 1
+  done
+fi
 wait_for "Supabase auth" 120 "" "$LOGS/supabase.log" http_ok -H "apikey: $ANON_KEY" "$SUPABASE_URL/auth/v1/health"
 wait_for "Supabase REST" 120 "" "$LOGS/supabase.log" http_ok -H "apikey: $ANON_KEY" "$SUPABASE_URL/rest/v1/"
 
@@ -209,6 +246,13 @@ server_env() {
   set +a
   unset SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
 }
+
+PHASE="making the e2e admin"
+# Sign-up is invite-only: the admin account of the Plan 4 spec is invited and made an admin before anyone signs up.
+DATABASE_URL="$(env_value .env.server.local DATABASE_URL)"
+[ -n "$DATABASE_URL" ] || fail ".env.server.local has no DATABASE_URL"
+export DATABASE_URL
+"$PY" cli.py add-admin "$ADMIN_EMAIL" >"$LOGS/add-admin.log" 2>&1 || { show_log "$LOGS/add-admin.log"; fail "cli.py add-admin failed"; }
 
 PHASE="starting the API"
 (
@@ -245,7 +289,8 @@ wait_for "PWA" 90 "$WEB_PID" "$LOGS/web.log" http_ok "$WEB_URL/login"
 PHASE="playwright"
 log "running Playwright (iPhone 14, WebKit) against $WEB_URL"
 set +e
-E2E_BASE_URL="$WEB_URL" pnpm --dir e2e exec playwright test "$@" 2>&1 | tee "$LOGS/playwright.log"
+# The specs reach the stack directly too: the CLI and the scheduler (E2E_PY), the database, Auth and the API.
+E2E_BASE_URL="$WEB_URL" E2E_ADMIN_EMAIL="$ADMIN_EMAIL" E2E_PY="$PY" E2E_SUPABASE_URL="$SUPABASE_URL"   E2E_ANON_KEY="$ANON_KEY" E2E_API_URL="$API_URL" pnpm --dir e2e exec playwright test "$@" 2>&1 | tee "$LOGS/playwright.log"
 PW_STATUS=${PIPESTATUS[0]}
 set -e
 RESULT="$(grep -E '^[[:space:]]+[0-9]+ (passed|failed|flaky|skipped|did not run)' "$LOGS/playwright.log" \
