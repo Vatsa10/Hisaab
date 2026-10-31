@@ -79,7 +79,7 @@ def test_tokens_keep_hindi_combining_marks():
 
 
 def test_tokens_drop_sizes_stopwords_and_single_characters():
-    assert match.tokens("Lay's Classic Salted Chips 52 g") == frozenset({"lay", "classic", "salted", "chips"})
+    assert match.tokens("Lay's Classic Salted Chips 52 g") == frozenset({"lays", "classic", "salted", "chips"})
     assert match.tokens("Pack of 2 Fresh Eggs 6 pcs each") == frozenset({"eggs"})
     assert match.tokens("Amul Taaza 1L") == frozenset({"amul", "taaza"})
     assert match.tokens("Atta 5kg x 2") == frozenset({"atta"})
@@ -460,3 +460,23 @@ def test_half_and_full_before_the_name():
 
 def test_leading_extra_is_not_an_addon():
     assert match.dish_traits("Extra Long Hot Dog") == ("Extra Long Hot Dog", None, None, frozenset())
+
+
+def test_domino_apostrophe_variants_normalise_the_same():
+    assert match.tokens("Domino's Pizza") == match.tokens("Dominos Pizza") == match.tokens("Domino’s Pizza")
+
+
+def test_free_unit_offer_is_a_note_not_a_price_change():
+    p = P("Amul Butter 100 g +1 free", price=58)
+    q = match.parse_query(0, "amul butter 100 g", 1)
+    r = match.match_item(q, [p])
+    assert r["product"]["price"] == 58 and r["product"]["line_total"] == 58
+    assert r["product"]["offer"] == "+1 free"
+    b = P("Lays Chips 50 g Buy 1 Get 1", price=20)
+    assert match.match_item(match.parse_query(0, "lays chips 50 g", 1), [b])["product"]["offer"] == "Buy 1 Get 1"
+
+
+def test_dish_with_unknown_veg_is_capped_at_ask_for_a_veg_query():
+    q = match.parse_dish_query(0, "paneer tikka", 1, veg=True)
+    r = match.match_dish(q, [D("Paneer Tikka", 200, veg=None)])
+    assert r["status"] == "pick"

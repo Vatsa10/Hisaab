@@ -373,3 +373,11 @@ def test_stale_learn_is_failed_not_requeued(pg):
     assert pg.execute("select status, error, finished_at is not null from jobs where id=%s", (learn,)).fetchone() == \
         ("failed", "worker_lost", True)
     assert jobs.claim(pg, "w2", ("learn",)) is None
+
+
+def test_claim_takes_an_aged_job_before_a_newer_interactive_one(pg):
+    old = jobs.enqueue(pg, A, "sync", "zepto")
+    pg.execute("update jobs set created_at = now() - interval '30 minutes' where id=%s", (old,))
+    jobs.enqueue(pg, B, "search", "zepto", {"q": "milk"})
+    got = jobs.claim(pg, "w1", ("sync", "search"))
+    assert got is not None and got.id == old

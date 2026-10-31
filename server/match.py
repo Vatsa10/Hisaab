@@ -105,7 +105,7 @@ def _norm(text: str | None) -> str:
     """`db.norm_name`, except combining marks (Unicode Mn/Mc) stay inside words, so Hindi names do not split.
     `db.norm_name` itself is unchanged: the SQL views must keep matching it."""
     out = []
-    for c in (text or "").lower():
+    for c in (text or "").lower().replace("'", "").replace("’", "").replace("ʼ", ""):
         keep = c.isalnum() or c == "_" or c.isspace() or unicodedata.category(c) in ("Mn", "Mc")
         out.append(c if keep else " ")
     return re.sub(r"\s+", " ", "".join(out)).strip()
@@ -163,6 +163,10 @@ class Product:
     price: float
     mrp: float | None
     in_stock: bool
+    offer: str | None = None
+
+
+_OFFER = re.compile(r"\+\s*1\s*free|buy\s*1\s*get\s*1(?:\s*free)?|b1g1", re.I)
 
 
 def _num(v) -> float | None:
@@ -198,7 +202,8 @@ def from_raw(d: dict) -> Product | None:
     mrp = _num(d.get("mrp"))
     brand = str(d.get("brand") or "").strip() or None
     return Product(str(pid), name, brand, size, pack or (size.label() if size else None), price,
-                   mrp if mrp and mrp > 0 else None, _stock(d.get("in_stock")))
+                   mrp if mrp and mrp > 0 else None, _stock(d.get("in_stock")),
+                   m.group(0) if (m := _OFFER.search(name)) else None)
 
 
 def _ratio(a: Size, b: Size) -> float:
@@ -244,7 +249,7 @@ def _packs(q: Query, p: Product) -> int:
 def _row(p: Product, packs: int | None, s: float) -> dict:
     return {"product_id": p.product_id, "name": p.name, "brand": p.brand, "size_label": p.size_label,
             "price": p.price, "mrp": p.mrp, "in_stock": p.in_stock, "packs": packs,
-            "line_total": round(packs * p.price, 2) if packs is not None else None, "score": round(s, 4)}
+            "line_total": round(packs * p.price, 2) if packs is not None else None, "score": round(s, 4), **({"offer": p.offer} if p.offer else {})}
 
 
 def _result(idx, status, confidence=None, product=None, packs=None, swap_from=None, candidates=()) -> dict:
@@ -470,6 +475,8 @@ def _dish_score(q: DishQuery, d: Dish) -> float:
     if (not q.tokens <= dt or (dt - q.tokens) & HEAD_NOUNS
             or (q.variant is not None and d.variant is None) or q.addons != d.addons):
         s = min(s, SURE - 0.01)
+    if q.veg is not None and d.veg is None:
+        s = min(s, SURE - 0.01)   # veg flag unknown: ask, never sure
     return s
 
 

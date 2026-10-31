@@ -243,7 +243,7 @@ def _free_delivery_hint(rules: dict, subtotal: float, delivery: float) -> str | 
     if delivery <= 0:
         return None
     free = [t["min_subtotal"] for t in rules.get("delivery") or [] if t.get("fee") == 0 and t["min_subtotal"] > subtotal]
-    return f"Free delivery above {inr(min(free))}" if free else None
+    return f"Free delivery on {inr(min(free))} or more" if free else None
 
 
 class _Entry:

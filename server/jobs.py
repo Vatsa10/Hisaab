@@ -98,7 +98,9 @@ def claim(conn, worker_id: str, types: tuple[str, ...]) -> Job | None:
                 f"AND {_DUE_SQL} AND NOT {_COOLING_SQL} "
                 "AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.status='running' AND r.user_id=j.user_id "
                 "AND r.profile=j.profile) "
-                "ORDER BY CASE j.type WHEN 'connect' THEN 0 WHEN 'search' THEN 0 ELSE 1 END, j.created_at "
+                "ORDER BY CASE WHEN j.type IN ('connect','search') OR j.created_at < now() - interval '10 minutes' "
+                "THEN 0 ELSE 1 END, j.created_at "
+                ""
                 "LIMIT 1 FOR UPDATE OF j SKIP LOCKED",
                 (list(types), skipped),
             ).fetchone()

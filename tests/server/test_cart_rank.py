@@ -182,7 +182,7 @@ def test_swap_note_member_note_and_stock_line():
     assert z["fee_line"] == "Items ₹80 + delivery ₹0 + handling ₹15"
     assert z["stock_line"] == "all 3 in stock"
     assert b["member_note"] is None
-    assert b["fee_hint"] == "Free delivery above ₹199"
+    assert b["fee_hint"] == "Free delivery on ₹199 or more"
     assert b["fee_line"] == "Items ₹150 + delivery ₹25 + handling ₹9"
     assert z["fee_hint"] is None                                # delivery already waived
     assert i["swaps"] == ["Lay's Classic Salted Chips 52 g swapped for Lay's Magic Masala Chips 52 g"]
