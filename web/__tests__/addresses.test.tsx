@@ -272,6 +272,7 @@ describe("watchAddresses (the real module, with a fake Supabase client)", () => 
     const selects: string[] = [];
     const client = {
       channel: vi.fn(() => channel),
+      auth: { getSession: async () => ({ data: { session: null } }) },
       removeChannel: vi.fn(async () => "ok"),
       from: vi.fn((table: string) => ({
         select: (cols: string) => {
@@ -282,6 +283,7 @@ describe("watchAddresses (the real module, with a fake Supabase client)", () => 
     };
     const seen: AppAddress[][] = [];
     const stop = real.watchAddresses((rows) => seen.push(rows), client as never, "u1");
+    await waitFor(() => expect(client.channel).toHaveBeenCalled());
     // Own inserts and updates only, filtered to the user. Never DELETE (or "*"): Supabase delivers
     // DELETE events to every subscriber, unfiltered.
     expect(channel.on.mock.calls.map((c) => [c[0], c[1]])).toEqual([

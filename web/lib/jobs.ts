@@ -228,13 +228,24 @@ export function forUser(
   userId: string | undefined,
   start: (userId: string) => () => void,
 ): () => void {
-  if (userId) return start(userId);
   let stop: (() => void) | null = null;
   let active = true;
+  // Read the session first, even when the id is known: the Realtime socket must hold the user's JWT
+  // before the channel joins. Joined with only the anon key, Supabase says SUBSCRIBED but RLS then
+  // hides every row, so no event ever arrives.
   void Promise.resolve(client.auth.getSession()).then(
-    ({ data }) => {
-      const uid = data.session?.user?.id;
-      if (active && uid) stop = start(uid);
+    async ({ data }) => {
+      const session = data.session;
+      const uid = userId ?? session?.user?.id;
+      if (!uid) return;
+      if (session?.access_token) {
+        try {
+          await client.realtime?.setAuth(session.access_token);
+        } catch {
+          // The client sets the token itself on the next auth event; carry on.
+        }
+      }
+      if (active) stop = start(uid);
     },
     () => {},
   );

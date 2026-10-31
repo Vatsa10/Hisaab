@@ -790,9 +790,11 @@ describe("lib/jobs watchJob / watchConnections", () => {
   it("watchConnections re-reads the user's connections on every change and on (re)connect", async () => {
     const real = await vi.importActual<typeof import("@/lib/jobs")>("@/lib/jobs");
     const rows = [{ site: "zepto", status: "connected", last_synced_at: "2026-10-27T10:00:00Z" }];
-    const { client, channels } = fakeClient({ connections: rows });
+    const { client: base, channels } = fakeClient({ connections: rows });
+    const client = { ...base, auth: { getSession: async () => ({ data: { session: null } }) } };
     const onChange = vi.fn();
     const stop = real.watchConnections(onChange, client as never, "u1");
+    await waitFor(() => expect(channels).toHaveLength(1));
     // Own inserts and updates only, filtered to the user. Never DELETE (or "*"): Supabase delivers
     // DELETE events to every subscriber, unfiltered.
     expect(channels[0]!.on.mock.calls.map((c) => [c[0], c[1]])).toEqual([
@@ -805,6 +807,26 @@ describe("lib/jobs watchJob / watchConnections", () => {
     await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
     stop();
     expect(client.removeChannel).toHaveBeenCalledWith(channels[0]);
+  });
+
+  it("watchConnections puts the session's token on the Realtime socket before it subscribes", async () => {
+    const real = await vi.importActual<typeof import("@/lib/jobs")>("@/lib/jobs");
+    const { client, channels } = fakeClient({ connections: [] });
+    const order: string[] = [];
+    const setAuth = vi.fn(async (token?: string) => void order.push(`auth:${token}`));
+    const withSession = {
+      ...client,
+      channel: (name: string) => {
+        order.push("channel");
+        return client.channel(name);
+      },
+      auth: { getSession: async () => ({ data: { session: { access_token: "tok", user: { id: "u1" } } } }) },
+      realtime: { setAuth },
+    };
+    const stop = real.watchConnections(vi.fn(), withSession as never, "u1");
+    await waitFor(() => expect(channels).toHaveLength(1));
+    expect(order).toEqual(["auth:tok", "channel"]);
+    stop();
   });
 
   it("watchConnections without a user id filters by the session's user, and starts nothing signed out", async () => {
