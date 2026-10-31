@@ -287,7 +287,7 @@ def test_check_requires_location_read():
 
 
 def test_check_location_select_on_location_allowlist():
-    msg = "location select is not on the location allowlist"
+    msg = "location select is not a POST on the location allowlist"
     assert cart_recipe.check_cart_recipe(recipe(location_allowlist=[]), "zepto") == msg
     # a cart entry does not stand in for a location entry
     assert cart_recipe.check_cart_recipe(recipe(location_allowlist=[],
@@ -579,3 +579,32 @@ def test_round_5_policy_keeps_each_entry_qty_path():
     p = cart_recipe.policy_for(recipe(cart_allowlist=[ADD_ENTRY, bulk]))
     assert [e["qty_path"] for e in p.cart] == ["item.quantity", "n"]
     assert cart_recipe.check_cart_recipe(recipe(cart_allowlist=[ADD_ENTRY, bulk]), "zepto") is None
+
+
+# --- M3: merged search read POSTs get the cart guard's own entry checks ---------------------------
+
+def test_policy_for_drops_search_read_posts_failing_cart_checks():
+    good = {"url_regex": r"^https://www\.zepto\.com/api/v1/search$", "why": "search"}
+    bad = [
+        {"url_regex": r"^https://evil\.example\.com/api/v1/search$", "why": "foreign host"},
+        {"url_regex": r"^https://www\.zepto\.com/.*$", "why": "too broad"},
+        {"url_regex": r"^https://[a-z.]+/api/v1/search$", "why": "non-literal host"},
+        {"url_regex": r"^https://www\.zepto\.com/api/[^/]{1,80}/search$", "why": "segment over 40"},
+        {"url_regex": r"^https://www\.zepto\.com/api/v1/checkout/search$", "why": "checkout"},
+        {"url_regex": r"^https://www\.zepto\.com/api/v1/payment/options$", "why": "payment"},
+        {"url_regex": r"^https://www\.zepto\.com/api/v1/address/update$", "why": "address write"},
+        {"url_regex": "", "why": "empty"},
+    ]
+    p = cart_recipe.policy_for(RECIPE, {"kind": "search", "read_post_allowlist": [good, *bad]})
+    assert p.read == (READ_ENTRY, good)
+
+
+# --- M4: a location select must be a POST -------------------------------------------------------
+
+def test_check_cart_recipe_refuses_get_location_select():
+    r = recipe()
+    r["location"] = dict(r["location"])
+    r["location"]["select"] = dict(r["location"]["select"], method="GET",
+                                   url="https://www.zepto.com/api/v1/location/select?lat=1&lon=2")
+    assert cart_recipe.check_cart_recipe(r, "zepto") == "location select is not a POST on the location allowlist"
+    assert cart_recipe.check_cart_recipe(recipe(), "zepto") is None

@@ -197,7 +197,28 @@ def policy_for(recipe: dict, search_recipe: dict | None = None) -> CartPolicy:
     return CartPolicy(cart=cart,
                       location=entries(recipe.get("location_allowlist")),
                       read=entries(recipe.get("read_post_allowlist"))
-                      + entries((search_recipe or {}).get("read_post_allowlist")))
+                      + tuple(e for e in entries((search_recipe or {}).get("read_post_allowlist"))
+                              if _entry_error(e, recipe) is None))
+
+
+def _entry_error(entry: dict, recipe: dict) -> str | None:
+    """The cart guard's own checks on one allowlist entry: narrow (literal host, one non-literal segment of at
+    most 40 chars), this recipe's site and host, confined, and no forbidden category in its literal URL."""
+    regex = entry.get("url_regex") or ""
+    if not regex:
+        return "allowlist entry has no url_regex"
+    hosts = {h for h in (urlsplit(recipe.get("home_url") or "").hostname,
+                         urlsplit((recipe.get("add") or {}).get("url") or "").hostname) if h}
+    try:
+        err = broad_error(regex, hosts) or site_error(regex, recipe.get("site") or "", _known_urls(recipe))
+    except Exception:  # an unknown site or unparsable regex fails closed
+        return "allowlist entry can't be checked"
+    if err:
+        return err
+    literal = re.sub(r"\\(.)", r"\1", regex.lstrip("^").rstrip("$"))
+    if cat := forbidden_category(literal, None, False, write=True):
+        return f"allowlist entry is {cat}"
+    return None
 
 
 def _whole_cart(body) -> bool:
@@ -285,10 +306,12 @@ def check_cart_recipe(recipe: dict, site: str) -> str | None:
 
     select = recipe["location"].get("select")
     if select:
-        ok = decide_cart(select.get("method") or "POST", select.get("url") or "", False, _body_text(select.get("body")),
+        # A select is a write: it must be a POST the location allowlist admits, never a "safe method" GET.
+        method = (select.get("method") or "POST").upper()
+        ok = decide_cart(method, select.get("url") or "", False, _body_text(select.get("body")),
                          CartPolicy(location=tuple(recipe["location_allowlist"])))
-        if ok not in ((True, "location select"), (True, "safe method")):
-            return "location select is not on the location allowlist"
+        if method != "POST" or ok != (True, "location select"):
+            return "location select is not a POST on the location allowlist"
     # Every cart write names where its quantity sits, so the guard can hold it to 1-99 (add-only).
     if any(not (isinstance(e.get("qty_path"), str) and e["qty_path"].strip()) for e in recipe["cart_allowlist"]):
         return "cart allowlist entry has no qty_path"
