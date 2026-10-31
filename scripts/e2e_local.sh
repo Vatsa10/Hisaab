@@ -215,10 +215,7 @@ for attempt in 1 2 3; do
 done
 # The reset recreates ask_reader without a login: give it a fresh password (written to .env.server.local only).
 dev_supabase || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed after the reset"; }
-# Safety net: app_addresses must exist after the reset (it lives at the end of 0008_cheapest_cart.sql). If it is
-# <timestamp>_name.sql"), so the app_addresses table is missing after `supabase db reset` and the PWA's Realtime
-# channel, which listens to it, never delivers job progress. Until that file is renamed, apply it here so the run is
-# meaningful, and say so.
+# Safety net: app_addresses must exist after the reset (it lives at the end of 0008_cheapest_cart.sql). If it is missing, apply 0008 again and restart Realtime.
 if [ "$("$PY" -c "import os,psycopg,sys
 print(psycopg.connect(sys.argv[1]).execute(\"select to_regclass('public.app_addresses') is not null\").fetchone()[0])"   "$(env_value .env.server.local DATABASE_URL)")" = False ]; then
   log "WARNING: app_addresses is missing after the reset (0008 did not apply fully); applying it by hand"
