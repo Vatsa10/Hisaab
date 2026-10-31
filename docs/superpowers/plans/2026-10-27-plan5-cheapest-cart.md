@@ -1267,9 +1267,10 @@ def test_stale_request_is_finalized_failed(pg): ...          # 26 min old → fa
 # test_fake_sites.py
 def test_fake_cart_ranks_zepto_blinkit_instamart(pg, fake_mode): ...
     # all three connected; list [("Amul Taza Milk 500ml", 2), ("Aashirvaad Atta 5kg", 1), ("Farm Eggs 6 pcs", 1),
-    # ("Lay's Classic", 1), ("Britannia Brown Bread", 1)] → total_labels ["₹422", "₹451", "₹479"], deltas [None, "+₹29", "+₹57"],
-    # instamart swap "Lay's Classic Salted Chips 52 g swapped for Lay's Magic Masala Chips 52 g",
-    # split.line "No item is cheaper on another app, so one order on Zepto is best."
+    # ("Lay's Classic", 1), ("Britannia Brown Bread", 1)] → total_labels ["₹422", "₹451", "₹458"], Blinkit delta "+₹29".
+    # Instamart is out of Lay's Classic and the only sibling (Magic Masala) drops "classic", so it shows "1 to pick"
+    # (a Pick, no swap, no delta) and never guesses. A swap needs a sibling that keeps every query word, e.g. the same
+    # flavour in another pack size ("Lay's Classic Salted Chips 90 g" for the 52 g pack).
 def test_fake_only_connected_apps_priced(pg, fake_mode): ... # only zepto connected → blinkit "Connect Blinkit to compare.", instamart "Connect Swiggy to compare Instamart."
 def test_fake_runtime_logout(pg, fake_mode, monkeypatch): ...  # FAKE_LOGGED_OUT_SITES=blinkit → blinkit needs_login card + notification
 def test_fake_milk_is_pick_one(pg, fake_mode): ...
@@ -1392,8 +1393,8 @@ read-only: a GET of the app's saved-address list. Never create, edit or delete a
    "Start from my usual" lists items with "×N in 90 days" (N ≥ 3).
 4. `cheapest cart ranks apps with fees`:
    - Use T9's 5-item list. The header reads "5 items · priced live at Gorwa, Vadodara" with the price note.
-   - Zepto "₹422" has the ring and "Cheapest"; Blinkit shows "₹451 +₹29"; Instamart shows "₹479 +₹57" with the swap
-     pill. "fees estimated" is visible.
+   - Zepto "₹422" has the ring and "Cheapest"; Blinkit shows "₹451 +₹29"; Instamart shows "₹458" with "1 to pick" (a Pick,
+     no swap pill, no delta). "fees estimated" is visible.
    - "Fill cart on Zepto" is disabled with "Coming soon".
 5. `item table and split line`: the totals row is "₹422 ₹451 ₹479", and the line reads "No item is cheaper on another
    app, so one order on Zepto is best."

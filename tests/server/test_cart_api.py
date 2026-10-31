@@ -79,6 +79,22 @@ def test_second_check_while_running_is_409_and_not_counted(client, token_a, pg):
     assert _checks(pg) == 1
 
 
+def test_simultaneous_posts_consume_one_check(client, token_a, pg):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    grocery_user(pg)
+    gate = Barrier(2)
+
+    def fire(_):
+        gate.wait(timeout=10)
+        return _post(client, token_a)
+
+    with ThreadPoolExecutor(2) as pool:
+        codes = sorted(r.status_code for r in pool.map(fire, range(2)))
+    assert codes == [202, 409]
+    assert _checks(pg) == 1 and pg.execute("select count(*) from cart_requests").fetchone()[0] == 1
+
+
 def test_eleventh_check_is_429(client, token_a, pg):
     grocery_user(pg)
     usage.record(pg, A, usage.today(None, "Asia/Kolkata"), cart_checks=10)

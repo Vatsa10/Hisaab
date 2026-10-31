@@ -13,17 +13,13 @@ from datetime import datetime, timedelta
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from food_search import FOOD_SITES
+from search import SEARCH_SITES
 from server import addresses_store, cart_rank, fees, jobs, limits, store, usage
 from server.config import SITE_NAMES, Settings
 
-try:  # the engine's grocery search module (Plan 5 T4) owns the list; the fallback keeps the API importable
-    from search import SEARCH_SITES
-except ImportError:  # pragma: no cover - before T4 is merged
-    SEARCH_SITES = ("zepto", "blinkit", "instamart")
-
 log = logging.getLogger("server.cart")
 
-FOOD_SITES = ("swiggy", "zomato")
 GROCERY_KINDS = ("search",)
 FOOD_KINDS = ("restaurants", "menu")
 CONNECTED = ("connected", "syncing")
@@ -174,7 +170,7 @@ def normalize_items(items, max_items: int) -> list[dict]:
     if not out:
         raise ValueError("the list is empty")
     if len(out) > max_items:
-        raise ValueError(f"the list has more than {max_items} items")
+        raise ValueError(f"Keep the list to {max_items} items or fewer.")
     return out
 
 

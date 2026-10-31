@@ -7,13 +7,10 @@ from datetime import datetime, timedelta
 from psycopg.types.json import Jsonb
 
 import db
+from food_search import FOOD_SITES
 from server import budget, cart, cart_rank, jobs, limits, match, restaurant_match, usage
 from server.config import Settings
 
-try:
-    from food_search import FOOD_SITES   # engine module, Plan 5 T11
-except ImportError:                       # not merged yet: same value as food_search.FOOD_SITES
-    FOOD_SITES = ("swiggy", "zomato")
 
 NOT_FOOD_PLATFORM = "coalesce(o.sub_platform, '') <> 'instamart'"
 LIVE_ORDER = "coalesce(o.status, '') not in ('cancelled', 'refunded', 'failed')"

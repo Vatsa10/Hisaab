@@ -108,7 +108,7 @@ def test_normalize_merges_duplicate_lines():
                                 {"text": "Bread", "qty": 1}, {"text": "  ", "qty": 3}], 30)
     assert got == [{"text": "Amul Milk", "qty": 20}, {"text": "Bread", "qty": 1}]
     assert cart.normalize_items([{"text": "a", "qty": 1}, {"text": "A", "qty": 1}], 1) == [{"text": "a", "qty": 2}]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"^Keep the list to 30 items or fewer\.$"):
         cart.normalize_items([{"text": f"item {i}", "qty": 1} for i in range(31)], 30)
 
 

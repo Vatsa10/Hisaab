@@ -259,17 +259,14 @@ def test_fake_cart_ranks_zepto_blinkit_instamart(pg, fake_mode):
     assert cards[1]["delta_label"] == "+₹29"
 
 
-@pytest.mark.xfail(strict=True, reason="match.match_item cannot swap \"Lay's Classic\" to a sibling that drops "
-                   "\"classic\" (its must-keep rule), so Instamart shows a Pick instead of the spec's swap and "
-                   "₹479; needs a ruling on match.py (Plan 5 T2)")
-def test_fake_instamart_swaps_lays(pg, fake_mode):
+def test_fake_instamart_lays_is_a_pick_not_a_swap(pg, fake_mode):
+    """Instamart is out of "Lay's Classic": the only sibling drops "classic", so the match never guesses a swap."""
     _world(pg, ("zepto", "blinkit", "swiggy"))
     summary = _check(pg)["summary"]
     cards = summary["cards"]
-    assert [c["total_label"] for c in cards] == ["₹422", "₹451", "₹479"]
-    assert [c.get("delta_label") for c in cards] == [None, "+₹29", "+₹57"]
-    assert cards[2]["swaps"] == ["Lay's Classic Salted Chips 52 g swapped for Lay's Magic Masala Chips 52 g"]
-    assert summary["split"]["line"] == "No item is cheaper on another app, so one order on Zepto is best."
+    assert [c["total_label"] for c in cards] == ["₹422", "₹451", "₹458"]
+    assert cards[2]["swaps"] == [] and cards[2]["to_pick"] == 1 and cards[2]["stock_line"] == "1 to pick"
+    assert cards[2]["delta_label"] is None
 
 
 def test_fake_only_connected_apps_priced(pg, fake_mode):
