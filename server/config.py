@@ -28,6 +28,10 @@ class Settings:
     monthly_budget_inr: float = 5000.0
     proxy_inr_per_gb: float = 400.0
     ai_inr_per_1k_tokens: float = 0.05
+    # Claude Haiku 5.5 is $0.10 / $0.50 per MTok in/out: the input rate is a fifth of the output rate.
+    # Defaults are derived from AI_INR_PER_1K_TOKENS (taken as the output rate); set both to override.
+    ai_inr_per_1k_input_tokens: float = 0.01
+    ai_inr_per_1k_output_tokens: float = 0.05
     worker_inr_per_minute: float = 0.20
     fixed_monthly_inr: float = 0.0
     budget_alert_pct: int = 80
@@ -152,6 +156,8 @@ def settings(for_worker: bool = False) -> Settings:
         monthly_budget_inr=float(env("MONTHLY_BUDGET_INR", "5000")),
         proxy_inr_per_gb=float(env("PROXY_INR_PER_GB", "400")),
         ai_inr_per_1k_tokens=float(env("AI_INR_PER_1K_TOKENS", "0.05")),
+        ai_inr_per_1k_input_tokens=float(env("AI_INR_PER_1K_INPUT_TOKENS", "0.01")),
+        ai_inr_per_1k_output_tokens=float(env("AI_INR_PER_1K_OUTPUT_TOKENS", "0.05")),
         worker_inr_per_minute=float(env("WORKER_INR_PER_MINUTE", "0.20")),
         fixed_monthly_inr=float(env("FIXED_MONTHLY_INR", "0")),
         budget_alert_pct=int(env("BUDGET_ALERT_PCT", "80")),

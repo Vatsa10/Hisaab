@@ -82,12 +82,14 @@ def delete_account(conn, store, user_id: str) -> dict:
         # write that starts later finds no job row and is dropped.
         conn.execute("select id from jobs where user_id = %s::uuid for update", (user_id,)).fetchall()
         conn.execute(
-            "insert into usage_erased (day, proxy_mb, ai_tokens, worker_seconds, syncs, cart_checks, cart_fills) "
-            "select day, sum(proxy_mb), sum(ai_tokens), sum(worker_seconds), sum(syncs), sum(cart_checks), "
+            "insert into usage_erased (day, proxy_mb, ai_tokens, ai_input_tokens, ai_output_tokens, worker_seconds, syncs, cart_checks, cart_fills) "
+            "select day, sum(proxy_mb), sum(ai_tokens), sum(ai_input_tokens), sum(ai_output_tokens), sum(worker_seconds), sum(syncs), sum(cart_checks), "
             "sum(cart_fills) "
             "from usage where user_id = %s::uuid group by day "
             "on conflict (day) do update set proxy_mb = usage_erased.proxy_mb + excluded.proxy_mb, "
             "ai_tokens = usage_erased.ai_tokens + excluded.ai_tokens, "
+            "ai_input_tokens = usage_erased.ai_input_tokens + excluded.ai_input_tokens, "
+            "ai_output_tokens = usage_erased.ai_output_tokens + excluded.ai_output_tokens, "
             "worker_seconds = usage_erased.worker_seconds + excluded.worker_seconds, "
             "syncs = usage_erased.syncs + excluded.syncs, "
             "cart_checks = usage_erased.cart_checks + excluded.cart_checks, "

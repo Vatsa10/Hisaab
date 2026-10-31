@@ -14,8 +14,13 @@ import llm
 
 @dataclass
 class Meter:
-    tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     jev_calls: int = 0
+
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
 
     def ai_tokens(self, jev_tokens_per_call: int) -> int:
         """Claude tokens plus each Jev call as jev_tokens_per_call token-equivalents."""
@@ -47,7 +52,8 @@ def count_jev(n: int = 1) -> None:
 
 def _on_usage(usage: llm.CallUsage) -> None:
     if (m := _current.get()) is not None:
-        m.tokens += (usage.input_tokens or 0) + (usage.output_tokens or 0)
+        m.input_tokens += usage.input_tokens or 0
+        m.output_tokens += usage.output_tokens or 0
 
 
 llm.on_usage(_on_usage)

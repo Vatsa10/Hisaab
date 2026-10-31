@@ -191,9 +191,45 @@ def test_subscription_requires_https(pg):
     assert pg.execute("select count(*) from push_subscriptions").fetchone()[0] == 0
 
 
-def test_format_inr_and_mask():
+def test_format_inr():
     assert notify.format_inr(123456) == "₹1,23,456"
     assert notify.format_inr(1234567.0) == "₹12,34,567"
     assert notify.format_inr(99.5) == "₹99.50"
     assert notify.format_inr(100) == "₹100"
-    assert notify.mask_email("asha@example.com") == "a***@example.com"
+
+
+def test_gone_push_endpoint_stays_deleted_when_email_fallback_fails(pg):
+    user(pg)
+    sub(pg)
+    notify.enqueue(pg, kind="k", title="T", body="B", user_id=U, dedupe_key="d")
+    notify.dispatch(pg, S(), Rec(notify.PushGone()), Rec(ConnectionError("down")))
+    assert pg.execute("select count(*) from push_subscriptions").fetchone()[0] == 0
+    assert row(pg)[0] == "pending"
+
+
+def test_empty_smtp_host_fails_email_at_once_without_retries(pg, caplog):
+    pg.execute("insert into admins (email) values ('a@example.com'), ('b@example.com')")
+    notify.alert_admins(pg, kind="k", title="T", body="B", dedupe_key="x")
+    assert notify.dispatch(pg, S(smtp_host="")) == 0
+    rows = pg.execute("select status, attempts, error from notifications").fetchall()
+    assert rows == [("failed", 1, "SmtpNotConfigured")] * 2
+    assert caplog.text.count("SMTP_HOST is not set") == 1
+
+
+def test_rows_are_claimed_before_sending_and_a_stale_claim_is_retaken(pg):
+    pg.execute("insert into admins (email) values ('a@example.com')")
+    notify.alert_admins(pg, kind="k", title="T", body="B", dedupe_key="x")
+    seen = []
+
+    def mail(*a):
+        seen.append(pg.execute("select status from notifications").fetchone()[0])
+
+    assert notify.dispatch(pg, S(), Rec(), mail) == 1 and seen == ["sending"]
+    pg.execute("update notifications set status='sending', claimed_at = now() - interval '1 hour'")
+    assert notify.dispatch(pg, S(), Rec(), Rec()) == 1
+    pg.execute("update notifications set status='sending', claimed_at = now()")
+    assert notify.dispatch(pg, S(), Rec(), Rec()) == 0  # a fresh claim belongs to another dispatcher
+
+
+def test_mask_email_removed():
+    assert not hasattr(notify, "mask_email")

@@ -605,7 +605,7 @@ def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server
         location = _location(conn, job.user_id)
     if not location:
         raise _SearchEnd("unserviceable", cart.NO_SAVED_ADDRESS)
-    block_media = s.sync_block_media
+    block_media = s.sync_block_media  # ruling #11: compare/search jobs block media too, for speed
     jobs.set_progress(conn, job.id, stage="searching")
 
     if op == "products":

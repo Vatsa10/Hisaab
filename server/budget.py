@@ -6,10 +6,14 @@ from server import usage
 from server.config import Settings
 
 
-def cost_inr(proxy_mb: float, ai_tokens: int, worker_seconds: float, s: Settings) -> float:
-    """Rupees for the metered usage (no fixed monthly part)."""
+def cost_inr(proxy_mb: float, ai_tokens: int, worker_seconds: float, s: Settings,
+             ai_input_tokens: int = 0, ai_output_tokens: int = 0) -> float:
+    """Rupees for the metered usage (no fixed monthly part). `ai_tokens` is the total; the input/output split is
+    priced at its own rates and the rest (Jev token-equivalents, rows recorded before the split) at the output rate."""
+    rest = max(0, ai_tokens - ai_input_tokens - ai_output_tokens)
     return (proxy_mb / 1000 * s.proxy_inr_per_gb
-            + ai_tokens / 1000 * s.ai_inr_per_1k_tokens
+            + ai_input_tokens / 1000 * s.ai_inr_per_1k_input_tokens
+            + (ai_output_tokens + rest) / 1000 * s.ai_inr_per_1k_output_tokens
             + worker_seconds / 60 * s.worker_inr_per_minute)
 
 
@@ -21,14 +25,13 @@ def _month_range(month: str) -> tuple[date, date]:
 def month_cost(conn, s: Settings, month: str) -> float:
     """All users' usage in that IST month (deleted users' folded spend included) plus the fixed monthly cost."""
     first, nxt = _month_range(month)
-    mb, tokens, secs = conn.execute(
-        "select coalesce(sum(proxy_mb), 0), coalesce(sum(ai_tokens), 0), coalesce(sum(worker_seconds), 0) "
-        "from usage where day >= %s and day < %s", (first, nxt)).fetchone()
-    emb, etokens, esecs = conn.execute(
-        "select coalesce(sum(proxy_mb), 0), coalesce(sum(ai_tokens), 0), coalesce(sum(worker_seconds), 0) "
-        "from usage_erased where day >= %s and day < %s", (first, nxt)).fetchone()
-    mb, tokens, secs = mb + emb, tokens + etokens, secs + esecs
-    return cost_inr(float(mb), int(tokens), float(secs), s) + s.fixed_monthly_inr
+    q = ("select coalesce(sum(proxy_mb), 0), coalesce(sum(ai_tokens), 0), coalesce(sum(worker_seconds), 0), "
+         "coalesce(sum(ai_input_tokens), 0), coalesce(sum(ai_output_tokens), 0) "
+         "from %s where day >= %%s and day < %%s")
+    live = conn.execute(q % "usage", (first, nxt)).fetchone()
+    erased = conn.execute(q % "usage_erased", (first, nxt)).fetchone()
+    mb, tokens, secs, tin, tout = (a + b for a, b in zip(live, erased))
+    return cost_inr(float(mb), int(tokens), float(secs), s, int(tin), int(tout)) + s.fixed_monthly_inr
 
 
 def level_for(spent: float, s: Settings) -> str:

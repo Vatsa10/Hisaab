@@ -85,13 +85,24 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
             food_cart.purge_cache(conn, now=now)
         except Exception as e:
             log.error("food cache purge failed (%s)", type(e).__name__)
-        paused = [[site, kind] for site, kind in site_health.check_error_budget(conn, s, now)]
-        reminders = session.remind(conn, s, now)
-        sent = notify.dispatch(conn, s)
+        paused = []
+        try:
+            paused = [[site, kind] for site, kind in site_health.check_error_budget(conn, s, now)]
+        except Exception as e:
+            log.error("error budget check failed (%s)", type(e).__name__)
+        reminders = 0
+        try:
+            reminders = session.remind(conn, s, now)
+        except Exception as e:
+            log.error("session reminders failed (%s)", type(e).__name__)
+        sent = notify.dispatch(conn, s)  # always runs: budget alerts, invites and drift emails must not stall
         return {"skipped": False, "level": state.level, "enqueued": enqueued, "sent": sent,
                 "paused_sites": paused, "reminders": reminders, "carts_finalized": finalized, "fills_finalized": fills_finalized}
     finally:
-        conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+        except Exception as e:  # never mask the original error; the lock dies with the session
+            log.error("scheduler unlock failed (%s)", type(e).__name__)
 
 
 def main(once: bool = False, max_loops: int | None = None) -> int:

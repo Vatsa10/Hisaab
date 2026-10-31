@@ -18,9 +18,8 @@ class PushGone(Exception):
     """The push service says the subscription no longer exists (HTTP 404/410)."""
 
 
-def mask_email(e: str) -> str:
-    local, _, domain = (e or "").partition("@")
-    return f"{local[:1]}***@{domain}" if domain else "***"
+class SmtpNotConfigured(Exception):
+    """No SMTP_HOST: email cannot be sent, so retrying is pointless."""
 
 
 def format_inr(amount: float) -> str:
@@ -81,6 +80,8 @@ def push_send(sub: dict, payload: dict, s) -> None:
 
 
 def mail_send(to: str, subject: str, text: str, s) -> None:
+    if not s.smtp_host:
+        raise SmtpNotConfigured()
     msg = EmailMessage()
     msg["From"], msg["To"], msg["Subject"] = s.smtp_from, to, subject
     msg.set_content(text)
@@ -92,7 +93,7 @@ def mail_send(to: str, subject: str, text: str, s) -> None:
         smtp.send_message(msg)
 
 
-def _send_user_row(conn, s, r, push, mail) -> str:
+def _send_user_row(conn, s, r, push, mail, gone: list) -> str:
     """Returns the channel used. Push to every subscription; any success wins, else email."""
     if s.vapid_private_key:
         payload = {"title": r["title"], "body": r["body"], "url": r["url"]}
@@ -103,7 +104,7 @@ def _send_user_row(conn, s, r, push, mail) -> str:
             try:
                 push({"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}, payload, s)
             except PushGone:
-                conn.execute("DELETE FROM push_subscriptions WHERE endpoint = %s", (endpoint,))
+                gone.append(endpoint)  # deleted by dispatch outside the row's savepoint, so a later failure keeps it
             except Exception as e:
                 log.warning("push failed (%s)", type(e).__name__)
             else:
@@ -118,31 +119,59 @@ def _send_user_row(conn, s, r, push, mail) -> str:
     return "email"
 
 
+# A row claimed ('sending') by a dispatcher that died is picked up again after this many minutes.
+CLAIM_TIMEOUT_MIN = 10
+
+
 def dispatch(conn, s, push_send=None, mail_send=None, limit: int = 50) -> int:
+    """Claim up to `limit` rows in a short transaction, then send each outside it (at-least-once delivery)."""
     push = push_send or globals()["push_send"]
     mail = mail_send or globals()["mail_send"]
     sent = 0
     with conn.transaction():
         rows = conn.execute(
-            "SELECT id, user_id, email, title, body, url FROM notifications WHERE status = 'pending' "
-            "ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED", (limit,)).fetchall()
-        for id_, user_id, email, title, body, url in rows:
-            r = {"user_id": user_id, "title": title, "body": body, "url": url}
-            try:
-                with conn.transaction():  # savepoint: a half-done send never leaves partial changes behind
-                    if user_id:
-                        channel = _send_user_row(conn, s, r, push, mail)
-                    else:
-                        mail(email, title, f"{body}\n\n{s.app_url}{url}", s)
-                        channel = "email"
-            except Exception as e:
-                log.warning("notification %s failed (%s)", id_, type(e).__name__)
-                conn.execute(
-                    "UPDATE notifications SET attempts = attempts + 1, error = %s, "
-                    "status = CASE WHEN attempts + 1 >= %s THEN 'failed' ELSE 'pending' END WHERE id = %s",
-                    (type(e).__name__, MAX_ATTEMPTS, id_))
+            "UPDATE notifications SET status = 'sending', claimed_at = now() WHERE id IN ("
+            "  SELECT id FROM notifications WHERE status = 'pending' "
+            "  OR (status = 'sending' AND claimed_at < now() - make_interval(mins => %s)) "
+            "  ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED) "
+            "RETURNING id, user_id, email, title, body, url, created_at",
+            (CLAIM_TIMEOUT_MIN, limit)).fetchall()
+    rows.sort(key=lambda r: r[6])
+    smtp_logged = False
+    for id_, user_id, email, title, body, url, _created in rows:
+        r = {"user_id": user_id, "title": title, "body": body, "url": url}
+        gone: list = []
+        immediate = False
+        try:
+            with conn.transaction():  # savepoint: a half-done send never leaves partial changes behind
+                if user_id:
+                    channel = _send_user_row(conn, s, r, push, mail, gone)
+                else:
+                    mail(email, title, f"{body}\n\n{s.app_url}{url}", s)
+                    channel = "email"
+        except Exception as e:
+            if isinstance(e, SmtpNotConfigured):
+                immediate = True
+                if not smtp_logged:
+                    log.warning("SMTP_HOST is not set: email notifications are marked failed")
+                    smtp_logged = True
             else:
+                log.warning("notification %s failed (%s)", id_, type(e).__name__)
+            channel = None
+            error = type(e).__name__
+        else:
+            error = None
+        if gone:  # own transaction: stays deleted even when the email fallback failed
+            with conn.transaction():
+                conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ANY(%s)", (gone,))
+        with conn.transaction():
+            if error is None:
                 conn.execute("UPDATE notifications SET status = 'sent', channel = %s, sent_at = now(), "
                              "error = NULL WHERE id = %s", (channel, id_))
                 sent += 1
+            else:
+                conn.execute(
+                    "UPDATE notifications SET attempts = attempts + 1, error = %s, "
+                    "status = CASE WHEN %s OR attempts + 1 >= %s THEN 'failed' ELSE 'pending' END WHERE id = %s",
+                    (error, immediate, MAX_ATTEMPTS, id_))
     return sent

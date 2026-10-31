@@ -331,6 +331,13 @@ def test_put_recipe_clears_pause(pg):
     assert _recipe_row(pg) == (2, True, False, None)
 
 
+def test_unconfirmed_admin_email_is_not_admin(pg):
+    _admin(pg, A, "owner@example.com")
+    assert recipe_admin.is_admin(pg, A) is True
+    pg.execute("update auth.users set email_confirmed_at = null where id = %s", (A,))
+    assert recipe_admin.is_admin(pg, A) is False
+
+
 def test_decide_refuses_an_invalid_cart_recipe(pg, monkeypatch):
     """I4: approving a cart recipe re-runs check_cart_recipe on what would be published."""
     monkeypatch.delenv("WORKER_FAKE", raising=False)

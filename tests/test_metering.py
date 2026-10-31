@@ -31,7 +31,7 @@ def test_claude_usage_and_jev_calls_are_counted():
 
 
 def test_ai_tokens_counts_each_jev_call_as_the_given_token_equivalent():
-    m = metering.Meter(tokens=500, jev_calls=3)
+    m = metering.Meter(input_tokens=400, output_tokens=100, jev_calls=3)
     assert m.ai_tokens(1000) == 3500
 
 
@@ -115,3 +115,10 @@ def test_no_jev_client_counts_nothing(monkeypatch):
     with metering.meter() as m:
         assert _discovery().verify("orders?") is None
     assert m.jev_calls == 0
+
+
+def test_meter_splits_input_and_output_tokens():
+    import llm
+    with metering.meter() as m:
+        metering._on_usage(llm.CallUsage("t", "m", 100, 7, None))
+    assert (m.input_tokens, m.output_tokens, m.tokens) == (100, 7, 107)

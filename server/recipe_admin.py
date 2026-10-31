@@ -60,9 +60,11 @@ def _cart_recipe_error(recipe, site: str) -> str | None:
 # ---------------------------------------------------------------- admins
 
 def is_admin(conn, user_id: str) -> bool:
-    """Whether this auth user's email (any case) is in admins. Never trusts a client claim, only auth.users."""
+    """Whether this auth user's email (any case) is in admins and confirmed. Never trusts a client claim, only
+    auth.users; an unconfirmed address could be claimed by anyone who knows it."""
     return conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM auth.users u JOIN admins a ON a.email = lower(u.email) WHERE u.id = %s)",
+        "SELECT EXISTS (SELECT 1 FROM auth.users u JOIN admins a ON a.email = lower(u.email) "
+        "WHERE u.id = %s AND u.email_confirmed_at IS NOT NULL)",
         (str(user_id),),
     ).fetchone()[0]
 

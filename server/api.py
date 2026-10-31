@@ -478,7 +478,8 @@ def _record_ask_tokens(db, user: str, m: metering.Meter) -> None:
     if tokens <= 0:
         return
     try:
-        usage.record(db, user, usage.today(tz=s.app_tz), ai_tokens=tokens)
+        usage.record(db, user, usage.today(tz=s.app_tz), ai_tokens=tokens,
+                     ai_input_tokens=m.input_tokens, ai_output_tokens=m.output_tokens)
     except Exception as e:
         log.warning("ask usage not recorded (%s)", type(e).__name__)
 

@@ -227,6 +227,7 @@ def test_admin_costs_converts_usage_to_inr(client, pg):
     body = client.get(f"/admin/costs?month={month}", headers=h).json()
     assert body["month"] == month and body["budget_inr"] == 5000 and body["fixed_inr"] == 0
     assert body["unit_costs"] == {"proxy_inr_per_gb": 400, "ai_inr_per_1k_tokens": 0.05,
+                                  "ai_inr_per_1k_input_tokens": 0.01, "ai_inr_per_1k_output_tokens": 0.05,
                                   "worker_inr_per_minute": 0.2}
     first = body["users"][0]
     assert first == {"user_id": B, "email": "user@example.com", "proxy_gb": 1.0, "ai_tokens": 10_000,

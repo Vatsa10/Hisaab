@@ -256,3 +256,10 @@ def test_refund_cart_fill_never_below_zero(pg):
     limits.refund_cart_fill(pg, A, d)
     limits.refund_cart_fill(pg, B, d)               # no row: nothing happens
     assert pg.execute("select user_id::text, cart_fills from usage").fetchall() == [(A, 0)]
+
+
+def test_cost_inr_prices_input_and_output_separately(s):
+    from dataclasses import replace
+    s = replace(s, ai_inr_per_1k_input_tokens=0.01, ai_inr_per_1k_output_tokens=0.05)
+    # 10k in + 2k out, plus 1k Jev token-equivalents (unsplit, priced at the output rate)
+    assert budget.cost_inr(0, 13_000, 0, s, 10_000, 2_000) == pytest.approx(0.10 + 0.10 + 0.05)

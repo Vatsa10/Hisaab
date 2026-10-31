@@ -92,7 +92,8 @@ def usage_by_user(conn, month: str) -> list[dict]:
     with conn.cursor(row_factory=dict_row) as cur:
         rows = cur.execute(
             "SELECT u.user_id::text AS user_id, lower(a.email) AS email, "
-            "sum(u.proxy_mb)::float8 AS proxy_mb, sum(u.ai_tokens)::bigint AS ai_tokens, "
+            "sum(u.proxy_mb)::float8 AS proxy_mb, sum(u.ai_tokens)::bigint AS ai_tokens, sum(u.ai_input_tokens)::bigint AS ai_input_tokens, "
+            "sum(u.ai_output_tokens)::bigint AS ai_output_tokens, "
             "sum(u.worker_seconds)::float8 AS worker_seconds, sum(u.syncs)::int AS syncs, "
             "sum(u.cart_checks)::int AS cart_checks, sum(u.cart_fills)::int AS cart_fills "
             "FROM usage u LEFT JOIN auth.users a ON a.id = u.user_id "

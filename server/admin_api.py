@@ -74,7 +74,8 @@ def build_router(current_user, get_conn) -> APIRouter:
                   "ai_tokens": int(u["ai_tokens"]), "worker_minutes": round(u["worker_seconds"] / 60, 2),
                   "syncs": u["syncs"], "cart_checks": u["cart_checks"],
                   "cart_fills": u["cart_fills"],
-                  "inr": round(budget.cost_inr(u["proxy_mb"], u["ai_tokens"], u["worker_seconds"], s), 2)}
+                  "inr": round(budget.cost_inr(u["proxy_mb"], u["ai_tokens"], u["worker_seconds"], s,
+                                                u["ai_input_tokens"], u["ai_output_tokens"]), 2)}
                  for u in admin.usage_by_user(conn, month)]
         users.sort(key=lambda u: (-u["inr"], u["user_id"]))
         spent = budget.month_cost(conn, s, month)
@@ -83,6 +84,8 @@ def build_router(current_user, get_conn) -> APIRouter:
                 "fixed_inr": s.fixed_monthly_inr, "pct": pct, "level": budget.level_for(spent, s),
                 "unit_costs": {"proxy_inr_per_gb": s.proxy_inr_per_gb,
                                "ai_inr_per_1k_tokens": s.ai_inr_per_1k_tokens,
+                               "ai_inr_per_1k_input_tokens": s.ai_inr_per_1k_input_tokens,
+                               "ai_inr_per_1k_output_tokens": s.ai_inr_per_1k_output_tokens,
                                "worker_inr_per_minute": s.worker_inr_per_minute},
                 "users": users}
 

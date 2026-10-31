@@ -221,3 +221,31 @@ def test_tick_finalizes_stale_carts_and_purges_food_cache(pg):
     assert r["carts_finalized"] == 0
     assert pg.execute("select query_norm from restaurant_cache").fetchall() == [("dosa",)]
     assert food_cart.PURGE_AFTER_S == 86400
+
+
+def test_tick_dispatches_even_when_remind_or_error_budget_raises(pg, monkeypatch):
+    pg.execute("insert into admins (email) values ('a@x.com')")
+    sent = []
+    monkeypatch.setattr("server.notify.mail_send", lambda to, subj, text, s: sent.append(to))
+    monkeypatch.setattr("server.session.remind", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr("server.site_health.check_error_budget", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    r = scheduler.tick(pg, S(fixed_monthly_inr=850.0), NOW)
+    assert r["sent"] == 1 and sent == ["a@x.com"] and r["reminders"] == 0 and r["paused_sites"] == []
+
+
+def test_unlock_failure_does_not_mask_the_original_error(pg, monkeypatch):
+    monkeypatch.setattr("server.notify.dispatch", lambda *a, **k: (_ for _ in ()).throw(KeyError("orig")))
+    real = pg.execute
+
+    class Wrap:
+        def __getattr__(self, n):
+            return getattr(pg, n)
+
+        def execute(self, q, *a, **k):
+            if "pg_advisory_unlock" in q:
+                raise RuntimeError("unlock failed")
+            return real(q, *a, **k)
+
+    import pytest
+    with pytest.raises(KeyError):
+        scheduler.tick(Wrap(), S(), NOW)

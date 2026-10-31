@@ -43,6 +43,8 @@ param appTz string = 'Asia/Kolkata'
 param monthlyBudgetInr string = '5000'
 param proxyInrPerGb string = '400'
 param aiInrPer1kTokens string = '0.05'
+param aiInrPer1kInputTokens string = '0.01'
+param aiInrPer1kOutputTokens string = '0.05'
 param workerInrPerMinute string = '0.20'
 param fixedMonthlyInr string = '0'
 param budgetAlertPct string = '80'
@@ -107,6 +109,8 @@ var budgetEnv = [
   { name: 'MONTHLY_BUDGET_INR', value: monthlyBudgetInr }
   { name: 'PROXY_INR_PER_GB', value: proxyInrPerGb }
   { name: 'AI_INR_PER_1K_TOKENS', value: aiInrPer1kTokens }
+  { name: 'AI_INR_PER_1K_INPUT_TOKENS', value: aiInrPer1kInputTokens }
+  { name: 'AI_INR_PER_1K_OUTPUT_TOKENS', value: aiInrPer1kOutputTokens }
   { name: 'WORKER_INR_PER_MINUTE', value: workerInrPerMinute }
   { name: 'FIXED_MONTHLY_INR', value: fixedMonthlyInr }
   { name: 'BUDGET_ALERT_PCT', value: budgetAlertPct }
