@@ -50,7 +50,7 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
 Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`, or `bash scripts/e2e_local.sh tests/plan4.spec.ts`.
 `E2E_SKIP_BUILD=1` reuses an earlier `web/.next` from this script instead of building again.
 
-**Known gap, worked around by the script.** The Supabase CLI skips `supabase/migrations/0008b_app_addresses.sql`
+**Known gap, worked around by the script.** The Supabase CLI skips `supabase/migrations/0008_cheapest_cart.sql (end of file)`
 (its name does not match `<timestamp>_name.sql`), so after `db reset` the `app_addresses` table is missing. The script
 detects that, applies the file by hand, and restarts the Realtime container (it does not see a table added to its
 publication while running). Rename the migration and this step becomes a no-op.

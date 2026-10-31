@@ -215,17 +215,17 @@ for attempt in 1 2 3; do
 done
 # The reset recreates ask_reader without a login: give it a fresh password (written to .env.server.local only).
 dev_supabase || { show_log "$LOGS/supabase.log"; fail "scripts/dev_supabase.sh failed after the reset"; }
-# KNOWN GAP: the Supabase CLI skips supabase/migrations/0008b_app_addresses.sql ("file name must match pattern
+# Safety net: app_addresses must exist after the reset (it lives at the end of 0008_cheapest_cart.sql). If it is
 # <timestamp>_name.sql"), so the app_addresses table is missing after `supabase db reset` and the PWA's Realtime
 # channel, which listens to it, never delivers job progress. Until that file is renamed, apply it here so the run is
 # meaningful, and say so.
 if [ "$("$PY" -c "import os,psycopg,sys
 print(psycopg.connect(sys.argv[1]).execute(\"select to_regclass('public.app_addresses') is not null\").fetchone()[0])"   "$(env_value .env.server.local DATABASE_URL)")" = False ]; then
-  log "WARNING: app_addresses is missing after the reset (the CLI skipped 0008b_app_addresses.sql); applying it by hand"
+  log "WARNING: app_addresses is missing after the reset (0008 did not apply fully); applying it by hand"
   "$PY" -c "import psycopg,sys
 c=psycopg.connect(sys.argv[1],autocommit=True)
-c.execute(open('supabase/migrations/0008b_app_addresses.sql',encoding='utf-8').read())
-c.execute(\"notify pgrst, 'reload schema'\")" "$(env_value .env.server.local DATABASE_URL)"     || fail "could not apply 0008b_app_addresses.sql"
+c.execute(open('supabase/migrations/0008_cheapest_cart.sql',encoding='utf-8').read())
+c.execute(\"notify pgrst, 'reload schema'\")" "$(env_value .env.server.local DATABASE_URL)"     || fail "could not apply 0008_cheapest_cart.sql"
   # Realtime does not see a table added to its publication after it started: restart it, and wait until it is healthy.
   docker restart supabase_realtime_expense-agent >/dev/null 2>&1 || fail "could not restart Realtime"
   for _ in $(seq 1 60); do
