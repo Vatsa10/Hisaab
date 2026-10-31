@@ -259,6 +259,21 @@ describe("reconnect", () => {
     await act(async () => {});
   });
 
+  it("a reconnect that arrives while Accounts is open opens the phone step", async () => {
+    const props = {
+      initialConnections: [{ site: "zepto", status: "needs_login", last_synced_at: null }],
+      initialConsents: [{ site: "zepto", text_version: CONSENT_VERSION }],
+      initialProfile: null,
+      initialJobs: [],
+    } as unknown as React.ComponentProps<typeof AccountsScreen>;
+    const { rerender } = render(<AccountsScreen {...props} />);
+    expect(screen.queryByRole("dialog", { name: "Connect Zepto" })).toBeNull();
+    rerender(<AccountsScreen {...props} reconnect="zepto" />);
+    const dialog = await screen.findByRole("dialog", { name: "Connect Zepto" });
+    expect(within(dialog).getByLabelText("Phone number")).toBeInTheDocument();
+    await act(async () => {});
+  });
+
   it("reconnect without stored consent opens the consent sheet", async () => {
     render(
       <AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} reconnect="zepto" />,

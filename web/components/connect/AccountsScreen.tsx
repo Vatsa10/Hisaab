@@ -73,6 +73,11 @@ export function AccountsScreen({
     const app = reconnect ? byId(reconnect) : undefined;
     return app ? { site: app.id } : null;
   });
+  // A later ?reconnect= (the banner tapped while already here) opens that app's flow too.
+  useEffect(() => {
+    const app = reconnect ? byId(reconnect) : undefined;
+    if (app) setFlow({ site: app.id });
+  }, [reconnect]);
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
