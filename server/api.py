@@ -1,6 +1,7 @@
 """HTTP API: consent, connect, OTP and answer relay, limited refresh, delivery profile, Ask (metered), /me,
 push subscriptions, and the /admin routes (server/admin_api.py).
 Never logs or stores request bodies that carry OTPs or answers; the delivery address is stored, never logged."""
+import json
 import logging
 import os
 import uuid
@@ -125,6 +126,8 @@ class OtpBody(BaseModel):
 
 class AnswerBody(BaseModel):
     answer: str = Field(min_length=1, max_length=500)
+    # The fill question this answers (the job's progress.question_index); an answer to an earlier one is a 409.
+    question_index: int | None = Field(default=None, ge=0)
 
 
 class ChoiceBody(BaseModel):
@@ -268,9 +271,35 @@ def post_otp(job_id: str, body: OtpBody, user: str = Depends(current_user), conn
     return _relay_to_running_connect(conn, job_id, user, body.otp)
 
 
+def _stale_fill_answer(conn, job_id: str, user: str, body: AnswerBody) -> bool:
+    """A fill job's answer that isn't for its open question: an earlier question_index, or a choice the open
+    question doesn't offer ("skip" is always one)."""
+    try:
+        jid = str(uuid.UUID(job_id))
+    except ValueError:
+        return False
+    row = conn.execute("SELECT progress FROM jobs WHERE id=%s AND user_id=%s AND type='fill_cart' AND status='running'",
+                       (jid, user)).fetchone()
+    if row is None or not isinstance(row[0], dict):
+        return False
+    progress = row[0]
+    if body.question_index is not None and progress.get("question_index") != body.question_index:
+        return True
+    choices = progress.get("choices")
+    if isinstance(choices, list) and choices and body.answer != "skip":
+        ids = {str(c.get("id")) for c in choices if isinstance(c, dict) and c.get("id") is not None}
+        return body.answer not in ids
+    return False
+
+
 @app.post("/jobs/{job_id}/answer", status_code=204)
 def post_answer(job_id: str, body: AnswerBody, user: str = Depends(current_user), conn=Depends(get_conn)):
-    return _relay_to_running_connect(conn, job_id, user, body.answer, stage="question_needed")
+    if _stale_fill_answer(conn, job_id, user, body):
+        raise HTTPException(409, "That question has already moved on.")
+    text = body.answer
+    if body.question_index is not None:  # the worker checks the index again, against the question it is waiting on
+        text = json.dumps({"question_index": body.question_index, "answer": body.answer})
+    return _relay_to_running_connect(conn, job_id, user, text, stage="question_needed")
 
 
 @app.post("/connections/{site}/refresh", status_code=202)

@@ -39,6 +39,24 @@ class RecipeChanged(Exception):
         self.approval_id, self.base_version, self.current_version = approval_id, base_version, current_version
 
 
+class InvalidRecipe(Exception):
+    """A held cart recipe fails check_cart_recipe at approval time: it is not published and the row is expired."""
+
+    def __init__(self, approval_id: str, reason: str):
+        super().__init__(f"approval {approval_id}: invalid cart recipe ({reason})")
+        self.approval_id, self.reason = approval_id, reason
+
+
+def _cart_recipe_error(recipe, site: str) -> str | None:
+    import cart_recipe  # lazy: the cart guard pulls in the browser modules
+    if not isinstance(recipe, dict):
+        return "not a recipe"
+    try:
+        return cart_recipe.check_cart_recipe(recipe, site)
+    except Exception as e:  # a malformed recipe is refused, never published
+        return f"unreadable ({type(e).__name__})"
+
+
 # ---------------------------------------------------------------- admins
 
 def is_admin(conn, user_id: str) -> bool:
@@ -299,6 +317,10 @@ def decide(conn, approval_id: str, decision: str, admin_user_id: str) -> str:
                 log.warning("approval %s refused: %s/%s recipe moved from version %s to %s", row["id"],
                             row["site"], row["kind"], row["base_version"], current_version)
                 failure = RecipeChanged(str(approval_id), row["base_version"], current_version)
+            elif row["kind"] == "cart" and (err := _cart_recipe_error(row["proposed"], row["site"])):
+                # The sanitized recipe that would be published is checked again: an invalid one never goes live.
+                log.warning("approval %s refused: %s cart recipe is invalid (%s)", row["id"], row["site"], err)
+                failure = InvalidRecipe(str(approval_id), err)
             else:
                 store.put_recipe(conn, row["site"], row["proposed"], kind=row["kind"])
         if failure is not None:

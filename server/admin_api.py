@@ -206,6 +206,9 @@ def build_router(current_user, get_conn) -> APIRouter:
         except recipe_admin.RecipeChanged as e:
             raise HTTPException(409, f"The recipe changed since this was proposed (version {e.base_version} → "
                                      f"{e.current_version}). Run a new learn to propose it again.") from None
+        except recipe_admin.InvalidRecipe as e:
+            raise HTTPException(409, f"This cart recipe failed its safety check ({e.reason}), so it was not "
+                                     "published. Run a new learn.") from None
         return {"status": status}
 
     return router

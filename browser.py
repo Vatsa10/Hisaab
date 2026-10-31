@@ -132,10 +132,20 @@ def raise_if_blocked(page) -> None:
         raise SiteThrottled("challenge")
 
 
+# Writes (any method but GET/HEAD) never follow a redirect: redirect 'manual' hands back an opaque redirect, which
+# fetch_in_page raises as RedirectedWrite before the redirected request could be sent anywhere.
 _FETCH_JS = """async ({url, method, headers, body}) => {
-  const r = await fetch(url, {method, headers, body, credentials: 'include', signal: AbortSignal.timeout(60000)});
+  const m = (method || 'GET').toUpperCase();
+  const redirect = (m === 'GET' || m === 'HEAD') ? 'follow' : 'manual';
+  const r = await fetch(url, {method, headers, body, credentials: 'include', redirect, signal: AbortSignal.timeout(60000)});
+  if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400))
+    return {status: r.status, url: r.url, text: '', retryAfter: null, redirected: true};
   return {status: r.status, url: r.url, text: await r.text(), retryAfter: r.headers.get('retry-after')};
 }"""
+
+
+class RedirectedWrite(RuntimeError):
+    """A write we sent was answered with a redirect; it was not followed (stop: redirected_write)."""
 
 
 RETRY_STATUS = {403, 429, 500, 502, 503, 504}
@@ -197,7 +207,11 @@ def on_origin(page, url: str) -> bool:
 MAX_PARALLEL_FETCH = 4
 _FETCH_MANY_JS = """async ({reqs}) => Promise.all(reqs.map(async ({url, method, headers, body}) => {
   try {
-    const r = await fetch(url, {method, headers, body, credentials: 'include', signal: AbortSignal.timeout(60000)});
+    const m = (method || 'GET').toUpperCase();
+    const redirect = (m === 'GET' || m === 'HEAD') ? 'follow' : 'manual';
+    const r = await fetch(url, {method, headers, body, credentials: 'include', redirect, signal: AbortSignal.timeout(60000)});
+    if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400))
+      return {status: r.status, url: r.url, text: '', retryAfter: null, redirected: true};
     return {status: r.status, url: r.url, text: await r.text(), retryAfter: r.headers.get('retry-after')};
   } catch (e) { return {status: 0, url, text: String(e), retryAfter: null, error: true}; }
 }))"""
@@ -216,6 +230,8 @@ def _prepare(req: dict) -> dict:
 def _parse_fetch(r: dict) -> dict:
     if r.get("error"):
         raise RuntimeError("fetch failed")
+    if r.get("redirected"):
+        raise RedirectedWrite("redirected_write")
     if kind := classify_block(r["status"], r["text"]):
         raise SiteThrottled(kind, parse_retry_after(r.get("retryAfter")))
     if r["status"] in (401, 403) or LOGIN_URL.search(r["url"]):
@@ -270,6 +286,8 @@ class ChromePool:
 def fetch_in_page(page, req: dict) -> dict:
     """Run a request from inside the page so the site's own cookies apply. Returns parsed JSON."""
     r = page.evaluate(_FETCH_JS, _prepare(req))
+    if r.get("redirected"):
+        raise RedirectedWrite("redirected_write")
     if kind := classify_block(r["status"], r["text"]):
         raise SiteThrottled(kind, parse_retry_after(r.get("retryAfter")))
     if r["status"] in (401, 403) or LOGIN_URL.search(r["url"]):
@@ -407,14 +425,49 @@ def _wait_for_cdp(port: int, proc: subprocess.Popen, timeout: float = 20) -> Non
     raise RuntimeError("Chrome did not open its debugging port in time")
 
 
-def _bypass_service_workers(context, page, done: set[int]) -> None:
+class _BypassRecord:
+    """The pages already set to bypass service workers, held by identity. It keeps the page objects themselves
+    (never id(page), which a closed page can hand on to a new one); it lives for one cart-mode open only."""
+
+    def __init__(self):
+        self._pages: list = []
+
+    def __contains__(self, page) -> bool:
+        return any(p is page for p in self._pages)
+
+    def add(self, page) -> None:
+        if page not in self:
+            self._pages.append(page)
+
+
+def _bypass_service_workers(context, page, done: _BypassRecord) -> None:
     """Cart mode: make the page's requests bypass service workers, so every fetch goes through context.route."""
-    if id(page) in done:
+    if page in done:
         return
     session = context.new_cdp_session(page)
     session.send("Network.enable")
     session.send("Network.setBypassServiceWorker", {"bypass": True})
-    done.add(id(page))
+    done.add(page)
+
+
+_UNREGISTER_SW_JS = """async () => {
+  if (!('serviceWorker' in navigator)) return 0;
+  const regs = await navigator.serviceWorker.getRegistrations();
+  const done = await Promise.all(regs.map((r) => r.unregister()));
+  return done.filter(Boolean).length;
+}"""
+
+
+def unregister_service_workers(page) -> int:
+    """Cart mode: unregister the page origin's service workers, so none can send a background fetch that skips
+    context.route (background or periodic sync). Returns how many were removed; raises when it cannot run."""
+    return int(page.evaluate(_UNREGISTER_SW_JS) or 0)
+
+
+def _block_all(route, request=None) -> None:
+    """The idle route of a parked warm Chrome: nothing leaves it until the next job's guard is in place."""
+    with contextlib.suppress(Exception):
+        route.abort()
 
 
 POOL = ChromePool()
@@ -429,7 +482,7 @@ class WarmChrome:
         self.key, self.proc, self.pw, self.browser, self.cdp = key, proc, pw, browser, cdp
         self.context, self.profile, self.proxy_server = context, profile, proxy_server
         self.cleanups: list = []
-        self.bypassed: set[int] = set()
+        self.idle_route = None  # the block-all route while parked between jobs (None while a job uses it)
         self.relay = None  # the proxy relay this Chrome was launched through (metered by delta per job)
         self.version = None  # the vault object version this profile was restored from
         self.saver = None  # saves the profile to the vault; runs once, after Chrome has exited
@@ -522,64 +575,70 @@ def _launch_warm(key, profile: Path, proxy_server: str | None) -> WarmChrome:
         raise
 
 
+def _park(context, h: "WarmChrome", guard, capture) -> None:
+    """Hand a read-mode warm Chrome back for idle: every page on about:blank, the extra pages closed, the job's
+    geolocation grant cleared, and a block-all route installed before the job's guard is removed, so the idle
+    browser sends nothing and there is never a moment without a route."""
+    pages = list(context.pages)
+    for p in pages[1:]:
+        p.close()
+    if pages:
+        pages[0].goto("about:blank")
+    context.clear_permissions()
+    context.remove_listener("response", capture._on_response)
+    context.route("**/*", _block_all)
+    h.idle_route = _block_all
+    context.unroute("**/*", guard._handle)
+
+
 @contextlib.contextmanager
-def _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media, cart_policy):
+def _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media):
+    """Read mode only: a cart-mode Chrome is never kept warm (open_site opens it cold)."""
     h = warm_handle(key)
     if h is None:
         close_warm()
         h = _launch_warm(key, (profile_dir or PROFILES / SITES[site]["profile"]).resolve(), proxy_server)
         POOL.key, POOL.handle = key, h
     POOL.last_used = POOL.clock()
-    context, cart_mode = h.context, cart_policy is not None
-    guard = (CartGuard(cart_policy, block_media, site=site) if cart_mode else Guard(allowlist, False, block_media))
+    context = h.context
+    guard = Guard(allowlist, False, block_media)
     capture = Capture()
     loc = effective_location(location)
-    if loc.get("lat") is not None and loc.get("lon") is not None:
-        context.grant_permissions(["geolocation"])
-        context.set_geolocation({"latitude": loc["lat"], "longitude": loc["lon"]})
-    guard.install(context)
-    capture.install(context)
-    on_page = None
     try:
-        if cart_mode:
-            for p in context.pages:
-                _bypass_service_workers(context, p, h.bypassed)  # raises: never run cart mode unguarded
-
-            def on_page(p):
-                try:
-                    _bypass_service_workers(context, p, h.bypassed)
-                except Exception:
-                    log.warning("service-worker bypass failed on a new page; closing it")
-                    with contextlib.suppress(Exception):
-                        p.close()
-            context.on("page", on_page)
+        guard.install(context)
+        if h.idle_route is not None:  # the block-all route goes only now that this job's guard is in place
+            context.unroute("**/*", h.idle_route)
+            h.idle_route = None
+        if loc.get("lat") is not None and loc.get("lon") is not None:
+            context.grant_permissions(["geolocation"])
+            context.set_geolocation({"latitude": loc["lat"], "longitude": loc["lon"]})
+        capture.install(context)
         page = context.pages[0] if context.pages else context.new_page()
-        if cart_mode:
-            _bypass_service_workers(context, page, h.bypassed)
         yield context, page, guard, capture
     except BaseException:
         close_warm(save=False)  # a job that blew up leaves no half-used browser behind
         raise
     finally:
-        if POOL.handle is h:  # still pooled: hand it back clean for the next job
-            with contextlib.suppress(Exception):
-                if cart_mode:
-                    context.remove_listener("page", on_page)
-                    context.remove_listener("response", guard._on_response)
-                context.remove_listener("response", capture._on_response)
-                context.unroute_all(behavior="ignoreErrors")
-            POOL.last_used = POOL.clock()
+        if POOL.handle is h:  # still pooled: park it behind a block-all route for the next job
+            try:
+                _park(context, h, guard, capture)
+            except Exception as e:
+                log.warning("warm Chrome not parked (%s); closing it", type(e).__name__)
+                close_warm()  # the job itself succeeded: the profile is saved per the usual close rules
+            else:
+                POOL.last_used = POOL.clock()
 
 
 def open_site(site: str, allowlist: list[dict] | None = None, login_mode: bool = False,
               profile_dir: Path | None = None, location: dict | None = None,
               proxy_server: str | None = None,
               block_media: bool = False, cart_policy=None):
-    """open_site, or its warm variant inside a warm_scope (never for a login): same yield, but Chrome stays
-    open in POOL for the worker's next job for the same (user, profile, mode)."""
+    """open_site, or its warm variant inside a warm_scope (never for a login, never in cart mode): same yield, but
+    Chrome stays open in POOL for the worker's next job for the same (user, profile, mode). A cart-mode Chrome
+    always opens cold and exits as soon as the fill or cart learn ends."""
     key = _warm_key.get()
-    if key is not None and not login_mode:
-        return _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media, cart_policy)
+    if key is not None and not login_mode and cart_policy is None:
+        return _open_site_warm(key, site, allowlist, profile_dir, location, proxy_server, block_media)
     return _open_site_cold(site, allowlist, login_mode, profile_dir, location, proxy_server, block_media,
                            cart_policy)
 
@@ -645,7 +704,7 @@ def _open_site_cold(site: str, allowlist: list[dict] | None = None, login_mode: 
             on_page = None
             if cart_mode:
                 # Service-worker fetches skip context.route: every page (and any page opened later) bypasses them.
-                bypassed: set[int] = set()
+                bypassed = _BypassRecord()
                 for p in context.pages:
                     _bypass_service_workers(context, p, bypassed)  # raises: never run cart mode unguarded
 

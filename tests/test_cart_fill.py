@@ -171,6 +171,7 @@ def shop(monkeypatch):
     monkeypatch.setattr(browser, "open_site", fake_open_site)
     monkeypatch.setattr(browser, "goto", lambda page, url, *a, **k: s.gotos.append(url))
     monkeypatch.setattr(browser, "fetch_in_page", s.handle)
+    monkeypatch.setattr(browser, "unregister_service_workers", lambda page: 0)
     monkeypatch.setattr(cart_fill.time, "sleep", s.sleeps.append)
 
     def build_request(rec, text, location, store_id=None):
@@ -482,9 +483,9 @@ def test_saved_address_selected_only_within_500m(monkeypatch, shop):
 
 # --- failures --------------------------------------------------------------------------------
 
-def test_first_add_failure_is_drift(monkeypatch, shop):
-    shop.fail_add = "500"
-    with pytest.raises(cart_fill.CartDrift, match="add failed"):
+def test_first_add_failure_is_interrupted(monkeypatch, shop):
+    shop.fail_add = "500"       # the add may have landed: interrupted, not drift (test_fill_hardening has the 4xx case)
+    with pytest.raises(cart_fill.CartInterrupted, match="add_unconfirmed"):
         run_fill(shop, plan=[add("p1", 1), add("p2", 1)])
     assert shop.add_calls == 1
 

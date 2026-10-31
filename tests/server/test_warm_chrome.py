@@ -47,6 +47,7 @@ def chrome(monkeypatch, tmp_path):
     ROUTES.clear()
     ctx.route.side_effect = lambda pattern, handler: ROUTES.append(handler)
     ctx.unroute_all.side_effect = lambda **k: ROUTES.clear()
+    ctx.unroute.side_effect = lambda pattern, handler=None: ROUTES.remove(handler)  # a parked Chrome swaps routes
     br = pw.chromium.connect_over_cdp.return_value
     br.contexts = [ctx]
     br.new_browser_cdp_session.return_value.send.return_value = {"targetInfos": []}

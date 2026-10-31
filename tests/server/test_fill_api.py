@@ -1,4 +1,5 @@
 """Fill API (Plan 6 T7): fill options, start, confirm, answers, limits and admin cart learning."""
+import json
 import pathlib
 import re
 from datetime import datetime, timedelta, timezone
@@ -286,3 +287,20 @@ def test_only_tapped_routes_create_fill_jobs(client, pg):
     enqueuers = [f.name for f in server.glob("*.py")
                  if re.search(r"enqueue\(.*[\"']fill_cart[\"']", f.read_text(encoding="utf-8"))]
     assert enqueuers == ["fill.py"]
+
+
+def test_stale_answer_for_an_earlier_question_is_409(client, token_a, pg, pg2):
+    """M5: a late answer to question 0 that arrives while question 1 is open is refused, not taken as its answer."""
+    jid = fill_job(pg)
+    pg.execute("update jobs set progress = %s where id = %s",
+               (Jsonb({"stage": "question_needed", "question_index": 1,
+                       "choices": [{"id": "c2"}, {"id": "skip"}]}), jid))
+    chan = "otp_" + jid.replace("-", "")
+    pg2.execute(f"listen {chan}")
+    post = lambda body: client.post(f"/jobs/{jid}/answer", json=body, headers=token_a).status_code  # noqa: E731
+    assert post({"answer": "c2", "question_index": 0}) == 409
+    assert post({"answer": "c1"}) == 409                       # not a choice of the open question
+    assert post({"answer": "c2", "question_index": 1}) == 204
+    notes = list(pg2.notifies(timeout=2, stop_after=1))
+    assert [json.loads(n.payload) for n in notes] == [{"question_index": 1, "answer": "c2"}]  # the worker re-checks
+    assert post({"answer": "skip", "question_index": 1}) == 204

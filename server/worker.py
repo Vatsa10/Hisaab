@@ -1,6 +1,7 @@
 """Worker: claims connect/sync/learn jobs from Postgres and runs the browser login/sync/learn code per user."""
 import _thread
 import contextlib
+import json
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from psycopg import sql
 import addresses
 import browser
 import cart_fill
+import cart_recipe
 import food_learn
 import food_search
 import llm
@@ -49,12 +51,27 @@ MAX_ERROR_LEN = 300
 PROMPT_STAGES = {"otp": ("otp_needed", "otp_received"), "question": ("question_needed", "answer_received")}
 
 
+def _tagged_answer(payload: str) -> tuple[int, str] | None:
+    """(question_index, answer) when the API relayed an indexed answer ({"question_index", "answer"}), else None."""
+    if not payload.startswith("{"):
+        return None
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return None
+    if (isinstance(data, dict) and isinstance(data.get("question_index"), int)
+            and isinstance(data.get("answer"), str)):
+        return data["question_index"], data["answer"]
+    return None
+
+
 def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
     """Return a prompt(text, kind="otp") callable that publishes the question on the job's progress and waits
     for the answer relayed via NOTIFY otp_<job id>. kind is "otp" or "question"; both use the same channel.
     The progress also carries prompt_at (ISO-8601 UTC), when the wait began, so the app can count the same
     timeout_s window down exactly. Raises sync.OtpTimeout(kind) when nothing arrives within timeout_s."""
     channel = "otp_" + job_id.replace("-", "")
+    asked = [0]  # questions asked so far: each carries question_index, so a late answer to an earlier one is refused
 
     def prompt(text: str, kind: str = "otp", choices: list | None = None) -> str:
         waiting, answered = PROMPT_STAGES[kind]
@@ -63,12 +80,22 @@ def make_prompt(listen_conn, job_conn, job_id: str, timeout_s: int):
         try:
             prompt_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             extra = {} if choices is None else {"choices": choices}
+            if kind == "question":
+                extra["question_index"] = asked[0]
+                asked[0] += 1
             jobs.set_progress(job_conn, job_id, stage=waiting, question=text, prompt_at=prompt_at, **extra)
             deadline = time.monotonic() + timeout_s
             while (remaining := deadline - time.monotonic()) > 0:
                 for note in listen_conn.notifies(timeout=remaining, stop_after=1):
+                    payload = note.payload
+                    if kind == "question":
+                        tagged = _tagged_answer(payload)
+                        if tagged is not None:
+                            if tagged[0] != extra["question_index"]:
+                                continue  # a late answer to an earlier question: never this one's answer
+                            payload = tagged[1]
                     jobs.set_progress(job_conn, job_id, stage=answered)
-                    return note.payload
+                    return payload
             raise sync.OtpTimeout(kind)
         finally:
             try:  # best effort: a broken listen connection must not mask the original error
@@ -627,6 +654,12 @@ def _do_search(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server
                               listing.get("distance_km"))
 
 
+def _adds_sent(e: BaseException) -> bool:
+    """A fill engine exception raised after at least one add request went out (cart_fill marks it), unless a 4xx
+    proved nothing landed: the fill must end interrupted (kept, never refunded, no re-fill)."""
+    return bool(getattr(e, cart_fill.ADDS_SENT_ATTR, 0))
+
+
 def _fill_id(job: jobs.Job) -> str | None:
     v = (job.payload or {}).get("fill_id")
     return str(v) if v and fills._is_uuid(v) else None
@@ -642,6 +675,11 @@ def _fill_precheck(job: jobs.Job, conn, s: Settings, db_site: str):
     recipe = store.get_recipe(conn, job.site, "cart")
     if recipe is None or not fills.cart_recipe_ready(conn, job.site):
         fills.fail_fill(conn, f["id"], "cart_unavailable", s)
+    elif err := cart_recipe.check_cart_recipe(recipe, job.site):
+        # The stored recipe is checked again before every fill: an invalid one never reaches a user's cart.
+        log.error("job %s: %s cart recipe is invalid (%s); cart filling paused", job.id, job.site, err)
+        fills.fail_fill(conn, f["id"], "cart_unavailable", s)
+        recipe_admin.pause_site(conn, job.site, "cart", f"cart recipe invalid: {err}"[:MAX_ERROR_LEN], reason="auto")
     elif _status(conn, job.user_id, db_site) != "connected":
         fills.fail_fill(conn, f["id"], "needs_login", s)
     else:
@@ -766,11 +804,12 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     phone = (job.payload or {}).get("phone")
     auto_learn = job.type == "learn" and bool((job.payload or {}).get("auto"))
     profile_name = sites.profile_for(job.site)
-    # Warm Chrome: one per (user, profile, mode). Anything else (another user, cart vs not, idle, a login or
-    # learn job) closes the pooled one first, so a profile is never open in two browsers.
+    # Warm Chrome: one per (user, profile), read mode only. Anything else (another user, idle, a login, learn or
+    # fill job) closes the pooled one first, so a profile is never open in two browsers. A cart-mode Chrome (a fill
+    # or a cart learn) is never kept warm: it closes as soon as the job's fill or learn ends.
     warm_key, warm = None, None
-    if job.type in ("sync", "search", "fill_cart") and not _fake_mode():
-        warm_key = (job.user_id, profile_name, job.type == "fill_cart")
+    if job.type in ("sync", "search") and not _fake_mode():
+        warm_key = (job.user_id, profile_name, False)
         browser.POOL.idle_s = s.warm_chrome_idle_s
         warm = browser.warm_handle(warm_key)
     if warm is None:
@@ -850,7 +889,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
 
     def throttled_out(e: browser.SiteThrottled) -> None:
         """R5: the site rate-limited us. Cool the site down; a sync waits and retries, a search reports blocked,
-        any other job fails site_busy."""
+        any other job fails site_busy (a fill that already sent an add: interrupted)."""
         browser.close_warm(save=False)
         until = site_health.record_throttle(conn, job.site, e.kind, e.retry_after_s, s)
         if job.type == "sync":
@@ -862,7 +901,7 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
             return
         if job.type == "search":
             return end_search("failed", "blocked")
-        fail("site_busy")
+        fail("site_busy", interrupted=_adds_sent(e))
 
     def save_profile() -> None:
         if fake:
@@ -1045,8 +1084,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                          user_id=job.user_id, dedupe_key=f"first_sync:{job.id}")
     except jobs.JobGone:
         log.info("job %s no longer ours; ending quietly", job.id)
-    except (browser.SessionExpired, recipes.TemplateError):  # TemplateError: the user's orders page is unknown
-        fail("needs_login", "needs_login")
+    except (browser.SessionExpired, recipes.TemplateError) as e:  # TemplateError: the user's orders page is unknown
+        fail("needs_login", "needs_login", interrupted=_adds_sent(e))
     except browser.SiteThrottled as e:
         throttled_out(e)
     except _SearchEnd as e:
@@ -1061,8 +1100,13 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     except sync.OtpTimeout as e:  # only an unanswered prompt; any other TimeoutError is a normal error below
         fail(f"{e.kind}_timeout", "error")
     except cart_fill.CartDrift as e:
-        fail("recipe_drift")
-        _on_cart_drift(conn, s, job.site, (str(e).splitlines() or [""])[0] or "cart drift")
+        if _adds_sent(e):  # an add went out and nothing proves it didn't land: interrupted, never drift
+            fail("recipe_drift", interrupted=True)
+        else:
+            fail("recipe_drift")
+            _on_cart_drift(conn, s, job.site, (str(e).splitlines() or [""])[0] or "cart drift")
+    except cart_fill.CartInterrupted as e:  # an add's result is unknown: the cart may hold it
+        fail((str(e).splitlines() or [""])[0] or "add_unconfirmed", interrupted=True)
     except sync.RecipeDrift as e:
         fail("recipe_drift")
         if job.type != "learn":

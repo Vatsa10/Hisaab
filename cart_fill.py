@@ -37,7 +37,25 @@ class CartError(Exception):
 
 
 class CartDrift(CartError):
-    """The cart recipe no longer works (the read or the first add failed): pause this site's filling."""
+    """The cart recipe no longer works (the read failed, or the first add got a 4xx, which proves it did not
+    land): pause this site's filling."""
+
+
+class CartInterrupted(CartError):
+    """An add request went out and nothing proves it did not land (a timeout, a 5xx, a non-JSON answer): the fill
+    ends interrupted (kept, never refunded, no re-fill), never as drift."""
+
+
+# Any exception leaving fill_cart after an add request went out carries `cart_adds_sent` (how many), unless a 4xx
+# proved that no add landed. The worker ends such a fill interrupted, whatever the exception.
+ADDS_SENT_ATTR = "cart_adds_sent"
+_HTTP_STATUS = re.compile(r"^HTTP (\d{3})\b")
+
+
+def _http_4xx(e: BaseException) -> bool:
+    """The add's error is an HTTP 4xx answer: the app refused it, so it did not land."""
+    m = _HTTP_STATUS.match(str(e))
+    return bool(m) and 400 <= int(m[1]) < 500
 
 
 # --- pure helpers --------------------------------------------------------------------------------
@@ -172,7 +190,7 @@ def _select_location(page, recipe: dict, target: dict, max_m) -> bool:
             return False
         browser.fetch_in_page(page, req)
         return True
-    except browser.SessionExpired:
+    except (browser.SessionExpired, browser.RedirectedWrite):
         raise
     except Exception as e:
         log.warning("location select failed (%s)", type(e).__name__)
@@ -231,15 +249,28 @@ def fill_cart(site, plan, priced, recipe, search_recipe, profile_dir, ask: Calla
         with timing.Phase("navigate"):
             browser.goto(page, recipe["home_url"])
         with timing.Phase("fetch"):  # the location check, the priced adds and the final cart read
-            return _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage,
-                         confirm_location, max_location_m)
+            sent = {"adds": 0, "proven_none": False}
+            try:
+                return _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage,
+                             confirm_location, max_location_m, sent)
+            except Exception as e:
+                if sent["adds"] and not sent["proven_none"]:
+                    setattr(e, ADDS_SENT_ATTR, sent["adds"])
+                raise
 
 
 def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, on_stage, confirm_location,
-          max_m) -> dict:
+          max_m, sent=None) -> dict:
+    sent = sent if sent is not None else {"adds": 0, "proven_none": False}
     if not isinstance(getattr(guard, "redirected_writes", None), list):
         # Fail closed: without the record of redirected writes, a fill can't tell a write went astray.
         raise CartError("the cart guard can't report redirected writes")
+    try:
+        # A service worker's own fetches (background or periodic sync) skip context.route: none may stay
+        # registered for the app's origin once adds start.
+        browser.unregister_service_workers(page)
+    except Exception as e:
+        raise CartError("service workers could not be unregistered") from e
     before = _quantities(_read_cart(page, recipe))
 
     on_stage("checking_location")
@@ -255,10 +286,27 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
     selected = False
     if not matched:
         on_stage("selecting_location")
-        if _select_location(page, recipe, target, max_m):
+        try:
+            did_select = _select_location(page, recipe, target, max_m)
+        except browser.RedirectedWrite:
+            log.warning("cart fill on %s stopped: the location select was redirected", site)
+            return outcome("failed", [], None, app_location=app, error="redirected_write")
+        if did_select:
             if _redirected(guard):
                 log.warning("cart fill on %s stopped: a write was redirected", site)
                 return outcome("failed", [], None, app_location=app, error="redirected_write")
+            # A store switch can drop lines the new store doesn't sell: re-read before any add.
+            try:
+                now = _quantities(_read_cart(page, recipe))
+            except CartDrift:
+                log.warning("cart fill on %s stopped: cart read failed after the location select", site)
+                return outcome("failed", [], None, app_location=app, location_selected=True,
+                               error="cart_read_failed")
+            if any(q > 0 and now.get(pid, 0) < q for pid, q in before.items()):
+                log.warning("cart fill on %s stopped: the location select changed existing lines", site)
+                return outcome("failed", [], None, app_location=app, location_selected=True,
+                               error="existing_changed", existing_changed=True)
+            before = now  # nothing went down: what the cart holds now is the baseline the adds are checked against
             app = _read_location(page, recipe)
             matched = selected = location_matches(app, target, expected_store, max_m)
     if not matched:
@@ -310,14 +358,24 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
                 base = max(before.get(pid, 0) + sent_so_far.get(pid, 0), floor.get(pid, 0))
                 req = build_add_request(recipe, pid, add_value(mode, base, packs), store_id)
                 requests += 1
+                sent["adds"] = requests
                 try:
                     verdict = classify_add(_response_text(browser.fetch_in_page(page, req)))
-                except browser.SessionExpired:
-                    raise
+                except (browser.SessionExpired, browser.SiteThrottled):
+                    raise                   # fill_cart marks it with the adds sent: the worker interrupts the fill
+                except browser.RedirectedWrite:
+                    verdict = "redirected"  # not followed; the write may still have landed at the first hop
                 except Exception as e:
-                    verdict = "out_of_stock" if classify_add(str(e)) == "out_of_stock" else "error"
-                if verdict == "error" and not any_ok:
+                    if _http_4xx(e):        # the app refused it: proven not added
+                        verdict = "out_of_stock" if classify_add(str(e)) == "out_of_stock" else "rejected"
+                    else:                   # a timeout, a 5xx, a non-JSON answer: it may have landed
+                        verdict = "unknown"
+                if not any_ok and verdict == "rejected":
+                    # Every add so far was refused with a 4xx: nothing landed, so this is the recipe (drift).
+                    sent["proven_none"] = True
                     raise CartDrift("add failed")
+                if not any_ok and verdict == "unknown":
+                    raise CartInterrupted("add_unconfirmed")
                 attempted.append(len(results))
                 if verdict == "ok":
                     any_ok = True
@@ -326,7 +384,7 @@ def _fill(site, page, guard, plan, target, recipe, search_recipe, ask, on_item, 
                 else:
                     res["status"] = "out_of_stock" if verdict == "out_of_stock" else "not_added"
                 res["product_id"] = pid
-                abort = _check(page, recipe, guard, floor, before)
+                abort = "redirected_write" if verdict == "redirected" else _check(page, recipe, guard, floor, before)
 
         results.append(res)
         on_item(dict(res))

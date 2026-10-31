@@ -329,3 +329,20 @@ def test_put_recipe_clears_pause(pg):
     recipe_admin.pause_site(pg, "zepto", "orders", "paused")
     assert store.put_recipe(pg, "zepto", BASE) == 2
     assert _recipe_row(pg) == (2, True, False, None)
+
+
+def test_decide_refuses_an_invalid_cart_recipe(pg, monkeypatch):
+    """I4: approving a cart recipe re-runs check_cart_recipe on what would be published."""
+    monkeypatch.delenv("WORKER_FAKE", raising=False)
+    from test_worker_plan6 import valid_cart_recipe
+    bad = valid_cart_recipe() | {"cart_allowlist": [{"url_regex": ".*", "why": "all", "op": "cart",
+                                                      "qty_path": "item.quantity"}]}
+    aid = recipe_admin.apply_learned(pg, "zepto", "cart", bad, set(), None, "learned")["approval_id"]
+    with pytest.raises(recipe_admin.InvalidRecipe):
+        recipe_admin.decide(pg, aid, "approve", A)
+    assert store.get_recipe(pg, "zepto", kind="cart") is None
+    assert _approval(pg, aid)[0] == "expired"
+
+    good = recipe_admin.apply_learned(pg, "zepto", "cart", valid_cart_recipe(), set(), None, "learned")["approval_id"]
+    assert recipe_admin.decide(pg, good, "approve", A) == "approved"
+    assert store.get_recipe(pg, "zepto", kind="cart")["add"]["qty_mode"] == "set"

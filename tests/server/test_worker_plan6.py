@@ -43,11 +43,23 @@ def _outcome(status="done", **k):
     return cart_fill.outcome(status, items, cart, app_location={"lat": 22.33, "lon": 73.16, "area": "Gorwa"}, **k)
 
 
+def valid_cart_recipe(site="zepto") -> dict:
+    """test_cart_recipe's valid zepto cart recipe, on the site's own host (check_cart_recipe passes it)."""
+    import importlib.util
+    import json
+    spec = importlib.util.spec_from_file_location("_valid_cart", Path(__file__).parents[1] / "test_cart_recipe.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    VALID = mod.RECIPE
+    word = "swiggy" if site == "instamart" else site
+    return json.loads(json.dumps(VALID).replace("zepto", word)) | {"site": site}
+
+
 def _setup(pg, site="zepto", seed=True):
     s = settings_for_tests()
     rid = ready(pg, site, user=A)
     pg.execute("update recipes set recipe = %s where site=%s and kind='cart'",
-               (Jsonb({"kind": "cart", "home_url": "https://x/"}), site))
+               (Jsonb(valid_cart_recipe(site)), site))
     if seed:
         _seed_profile(A, "swiggy" if site == "instamart" else site)
     made = fill.start_fill(pg, A, rid, site, NOW, s)
@@ -375,9 +387,133 @@ def test_only_fill_and_cart_learn_use_cart_mode(pg, monkeypatch):
 
     monkeypatch.setattr(browser, "open_site", open_site)
     rid, fid, jid, s = _setup(pg)
-    pg.execute("update recipes set recipe = %s where site='zepto' and kind='cart'",
-               (Jsonb({"kind": "cart", "home_url": "https://x/", "add": {"qty_mode": "set"}, "cart_allowlist": [],
-                       "location_allowlist": [], "read_post_allowlist": []}),))
     _run(pg, s)
     assert modes == [True]
     assert fill.get_fill(pg, fid)["status"] == "interrupted"
+
+
+# ---------------------------------------------------------------- final-review fixes (I1, I2, I4, M5)
+
+def _raise(e):
+    def engine(*a, **k):
+        raise e
+    return engine
+
+
+def _sent(e, n=1):
+    setattr(e, cart_fill.ADDS_SENT_ATTR, n)
+    return e
+
+
+def test_fill_chrome_is_never_kept_warm(pg, monkeypatch):
+    """I1: a fill runs outside any warm scope, so its cart-mode Chrome closes with the fill."""
+    rid, fid, jid, s = _setup(pg)
+    scopes = []
+    monkeypatch.setattr(cart_fill, "fill_cart", lambda *a, **k: scopes.append(browser._warm_key.get()) or _outcome())
+    _run(pg, s)
+    assert scopes == [None] and browser.POOL.handle is None
+    assert fill.get_fill(pg, fid)["status"] == "done"
+    row = pg.execute("select profile_blob_key from connections where user_id=%s and site='zepto'", (A,)).fetchone()
+    assert row[0]  # saved at once (no warm Chrome to defer the save to)
+
+
+def test_session_expired_after_an_add_is_interrupted(pg, monkeypatch):
+    rid, fid, jid, s = _setup(pg)
+    monkeypatch.setattr(cart_fill, "fill_cart", _raise(_sent(browser.SessionExpired("x"))))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert (f["status"], f["error"], f["counted"]) == ("interrupted", "needs_login", True)
+    assert store.get_connection(pg, A, "zepto")["status"] == "needs_login"
+
+
+def test_throttle_after_an_add_is_interrupted(pg, monkeypatch):
+    rid, fid, jid, s = _setup(pg)
+    monkeypatch.setattr(cart_fill, "fill_cart", _raise(_sent(browser.SiteThrottled("rate_limited"))))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert (f["status"], f["error"], f["counted"]) == ("interrupted", "site_busy", True)
+
+
+def test_throttle_before_any_add_fails_and_refunds(pg, monkeypatch):
+    rid, fid, jid, s = _setup(pg)
+    monkeypatch.setattr(cart_fill, "fill_cart", _raise(browser.SiteThrottled("rate_limited")))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert (f["status"], f["error"], f["counted"]) == ("failed", "site_busy", False)
+
+
+def test_unconfirmed_add_is_interrupted_not_drift(pg, monkeypatch):
+    rid, fid, jid, s = _setup(pg)
+    monkeypatch.setattr(cart_fill, "fill_cart", _raise(_sent(cart_fill.CartInterrupted("add_unconfirmed"))))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert (f["status"], f["error"], f["counted"]) == ("interrupted", "add_unconfirmed", True)
+    assert not recipe_admin.is_paused(pg, "zepto", "cart")
+
+
+def test_drift_after_an_add_is_interrupted_and_does_not_pause(pg, monkeypatch):
+    rid, fid, jid, s = _setup(pg)
+    monkeypatch.setattr(cart_fill, "fill_cart", _raise(_sent(cart_fill.CartDrift("x"))))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert f["status"] == "interrupted" and not recipe_admin.is_paused(pg, "zepto", "cart")
+
+
+def test_invalid_cart_recipe_fails_the_fill_and_pauses(pg, monkeypatch):
+    """I4: the stored cart recipe is checked again before every fill."""
+    rid, fid, jid, s = _setup(pg)
+    bad = valid_cart_recipe() | {"cart_allowlist": [{"url_regex": ".*", "why": "all", "op": "cart",
+                                                      "qty_path": "item.quantity"}]}
+    pg.execute("update recipes set recipe = %s where site='zepto' and kind='cart'", (Jsonb(bad),))
+    monkeypatch.setattr(cart_fill, "fill_cart", lambda *a, **k: pytest.fail("an invalid recipe never fills"))
+    _run(pg, s)
+    f = fill.get_fill(pg, fid)
+    assert (f["status"], f["error"], f["counted"]) == ("failed", "cart_unavailable", False)
+    assert recipe_admin.is_paused(pg, "zepto", "cart")
+
+
+def test_question_progress_carries_its_index(pg):
+    """M5: each question of a fill job is numbered on the progress, so a late answer can be told apart."""
+    rid, fid, jid, s = _setup(pg)
+    job = jobs.claim(pg, "w", ("fill_cart",))
+    import psycopg
+    listen = psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True)
+    prompt = worker.make_prompt(listen, pg, job.id, 5)
+    indexes = []
+    for n in range(2):
+        out = []
+        t = threading.Thread(target=lambda: out.append(prompt("Which?", "question", [{"id": "a"}])))
+        t.start()
+        for _ in range(50):
+            prog = _job(pg, job.id)[2]
+            if prog.get("stage") == "question_needed":
+                break
+            time.sleep(0.05)
+        indexes.append(prog["question_index"])
+        pg.execute("select pg_notify(%s, %s)", ("otp_" + job.id.replace("-", ""), "a"))
+        t.join(5)
+    assert indexes == [0, 1]
+    listen.close()
+
+
+def test_prompt_ignores_an_indexed_answer_to_an_earlier_question(pg):
+    """M5: the worker re-checks the index the API relays, so a late answer can't race into the next question."""
+    import json as _json
+    rid, fid, jid, s = _setup(pg)
+    job = jobs.claim(pg, "w", ("fill_cart",))
+    import psycopg
+    listen = psycopg.connect(os.environ["TEST_DATABASE_URL"], autocommit=True)
+    prompt = worker.make_prompt(listen, pg, job.id, 5)
+    chan = "otp_" + job.id.replace("-", "")
+    out = []
+    t = threading.Thread(target=lambda: out.append(prompt("Which?", "question", [{"id": "a"}, {"id": "b"}])))
+    t.start()
+    for _ in range(50):
+        if _job(pg, job.id)[2].get("stage") == "question_needed":
+            break
+        time.sleep(0.05)
+    pg.execute("select pg_notify(%s, %s)", (chan, _json.dumps({"question_index": 7, "answer": "a"})))
+    pg.execute("select pg_notify(%s, %s)", (chan, _json.dumps({"question_index": 0, "answer": "b"})))
+    t.join(5)
+    assert out == ["b"]
+    listen.close()

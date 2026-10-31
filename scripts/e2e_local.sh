@@ -265,7 +265,9 @@ export DATABASE_URL
 PHASE="starting the API"
 (
   server_env
-  export ASK_FAKE=1 CORS_ORIGINS="$WEB_URL"
+  # WORKER_FAKE=1 here only lets the cart-recipe check accept the fake apps' hosts (fake.<site>.test) when the
+  # admin approves the learned cart recipe (recipe_admin.decide re-runs check_cart_recipe).
+  export ASK_FAKE=1 CORS_ORIGINS="$WEB_URL" WORKER_FAKE=1
   exec "$PY" -m uvicorn server.api:app --host "$HOST" --port "$API_PORT"
 ) >"$LOGS/api.log" 2>&1 &
 API_PID=$!
