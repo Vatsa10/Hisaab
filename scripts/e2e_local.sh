@@ -8,7 +8,7 @@
 #    .env.server.local, and the PWA
 # 4. starts Mailpit (every email of the run lands there), makes admin@e2e.test an admin, and sends the API and the
 #    worker's mail and links to it (SMTP_HOST, SMTP_PORT, APP_URL)
-# 5. runs Playwright (e2e/: product.spec.ts, plan4.spec.ts and plan5.spec.ts), then stops everything it started, including Mailpit
+# 5. runs Playwright (e2e/: product.spec.ts, plan4.spec.ts, plan5.spec.ts and plan6.spec.ts), then stops everything it started, including Mailpit
 #    and Supabase if it started it
 #
 # Usage: bash scripts/e2e_local.sh [playwright args, e.g. -g "updates live"]
@@ -37,6 +37,7 @@ STARTED_SUPABASE=0
 STARTED_MAILPIT=0
 PIDS=()
 RESULT=""
+FAKE_STATE_DIR=""
 
 rm -rf "$LOGS"
 mkdir -p "$LOGS" "$RUN_DIR/profiles"
@@ -90,6 +91,7 @@ cleanup() {
     if command -v taskkill >/dev/null 2>&1; then taskkill //F //T //PID "$(cat "$RUN_DIR/worker.pid")" >/dev/null 2>&1 || true
     else kill -TERM -- "-$(cat "$RUN_DIR/worker.pid")" 2>/dev/null || true; fi
   fi
+  if [ -n "$FAKE_STATE_DIR" ]; then rm -rf "$FAKE_STATE_DIR" 2>/dev/null || true; fi
   if [ "$STARTED_MAILPIT" = 1 ]; then docker rm -f "$MAILPIT_NAME" >/dev/null 2>&1 || true; fi
   if [ "$STARTED_SUPABASE" = 1 ] && [ "${E2E_KEEP_SUPABASE:-0}" != 1 ]; then
     log "stopping the Supabase this run started"
@@ -267,6 +269,11 @@ PIDS+=("$API_PID")
 wait_for "API" 60 "$API_PID" "$LOGS/api.log" http_ok "$API_URL/healthz"
 
 PHASE="starting the worker"
+# Where the fake apps keep each user's cart (Plan 6): the worker writes it, the specs read it and set the app's
+# location. A native path (cygpath -m) because the worker and Playwright are Windows processes under Git Bash.
+FAKE_STATE_DIR="$(mktemp -d)"
+if command -v cygpath >/dev/null 2>&1; then FAKE_STATE_DIR="$(cygpath -m "$FAKE_STATE_DIR")"; fi
+export FAKE_STATE_DIR
 # One launcher for the worker, so a spec can stop it and start it again with other switches (restartWorker in
 # e2e/helpers/stack.ts, which reads worker.pid and runs this file). FAKE_PAGE_DELAY_S: the fake fetch pauses between
 # its pages, so the live "Found so far" count is on screen. MATCH_JUDGE=0: no small-model call for product matching.
@@ -278,6 +285,7 @@ set -a
 set +a
 unset SUPABASE_JWT_SECRET ANTHROPIC_API_KEY TYPESAFE_API_KEY PROXY_URL_TEMPLATE
 export WORKER_FAKE=1 CATEGORIZE=0 FAKE_PAGE_DELAY_S=0.4 PROFILE_ROOT="$RUN_DIR/profiles" DRAIN_S=5 MATCH_JUDGE=0
+export FAKE_STATE_DIR="$FAKE_STATE_DIR"
 exec "$PY" -m server.worker
 LAUNCH
 export E2E_RUN_DIR="$RUN_DIR"

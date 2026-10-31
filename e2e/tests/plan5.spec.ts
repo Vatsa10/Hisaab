@@ -333,6 +333,7 @@ test("cheapest cart ranks apps with fees", async ({ page }) => {
   const fill = page.getByRole("button", { name: "Fill cart on Zepto", exact: true });
   await expect(fill).toBeVisible();
   await expect(fill).toBeDisabled();
+  await expect(page.getByText("Not available for Zepto yet")).toBeVisible();
 });
 
 test("item table and split line", async ({ page }) => {
@@ -417,6 +418,7 @@ test("food compare", async ({ page }) => {
   await expect(page.getByText("Offers in the app may lower this.").first()).toBeVisible();
   const fill = page.getByRole("button", { name: "Fill cart on Swiggy", exact: true });
   await expect(fill).toBeDisabled();
+  await expect(page.getByText("Filling isn't available for food orders.").first()).toBeVisible();
 
   await page.getByRole("button", { name: "See item prices" }).click();
   const table = page.getByRole("table");

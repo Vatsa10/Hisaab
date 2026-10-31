@@ -37,7 +37,7 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    | Service | Command | Port | Switches |
    | --- | --- | --- | --- |
    | API | `python -m uvicorn server.api:app` | 8010 | `ASK_FAKE=1`, `CORS_ORIGINS=http://localhost:3110` |
-   | Worker | `python -m server.worker`, started by `e2e/.run/start-worker.sh` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `FAKE_PAGE_DELAY_S=0.4`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5`, `MATCH_JUDGE=0` |
+   | Worker | `python -m server.worker`, started by `e2e/.run/start-worker.sh` | - | `WORKER_FAKE=1`, `CATEGORIZE=0`, `FAKE_PAGE_DELAY_S=0.4`, `PROFILE_ROOT=e2e/.run/profiles`, `DRAIN_S=5`, `MATCH_JUDGE=0`, `FAKE_STATE_DIR` |
    | PWA | `next start` | 3110 | - |
 
    The script waits for `/healthz`, the worker's `worker started` line and the PWA's `/login` before going on.
@@ -45,10 +45,19 @@ run `pnpm --dir e2e exec playwright install --with-deps webkit` once for its sys
    and `E2E_RUN_DIR` exported), so a spec can stop it and start it again with extra switches: `restartWorker(env)` in
    `e2e/helpers/stack.ts`. The cleanup trap stops a worker a spec restarted too.
 6. **Playwright** (`e2e/`, its own `package.json` with `@playwright/test` pinned, so `web/` keeps no test
-   browser dependency) runs `e2e/tests/product.spec.ts`, `e2e/tests/plan4.spec.ts` and `e2e/tests/plan5.spec.ts` on the iPhone 14 profile
+   browser dependency) runs `e2e/tests/product.spec.ts`, `e2e/tests/plan4.spec.ts`, `e2e/tests/plan5.spec.ts` and `e2e/tests/plan6.spec.ts` on the iPhone 14 profile
    (WebKit, 390x844, touch).
 7. **Cleanup.** A trap stops the API, the worker and the PWA (with their child processes; `taskkill /T` on
    Windows) however the run ends, removes the Mailpit container, and stops Supabase if this run started it. Set `E2E_KEEP_SUPABASE=1` to keep it.
+
+**Fake carts (Plan 6).** The script creates a temporary directory (`FAKE_STATE_DIR`, a native path via `cygpath -m` on
+Windows), gives it to the worker and to Playwright, and removes it when the run ends. The fake apps keep each user's
+cart and location there as `<user id>-<site>.json`. `e2e/tests/plan6.spec.ts` uses three helpers in
+`e2e/helpers/stack.ts`: `setFakeAppLocation(email, site, {lat, lon, area, locked})` (where the app says the user is, and
+whether it refuses a change; the cart is kept), `readFakeCart(email, site)` and `fakeStateKeys(email, site)`. The fake
+fill runs inside the worker, so there is no HTTP request log: "add-only" is checked from the cart's lines, the state
+file holding only a cart, a location and a lock, and the worker log never naming a checkout or place-order call. The
+spec runs alone too: a `beforeAll` learns Zepto's grocery price recipe through the admin view when it is missing.
 
 Extra arguments go to Playwright: `bash scripts/e2e_local.sh -g "updates live"`, or `bash scripts/e2e_local.sh tests/plan4.spec.ts`.
 `E2E_SKIP_BUILD=1` reuses an earlier `web/.next` from this script instead of building again.

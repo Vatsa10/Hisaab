@@ -239,3 +239,55 @@ export async function restartWorker(env: Record<string, string> = {}): Promise<v
   fs.writeFileSync(pidFile, String(child.pid));
   await until("the worker to start again", () => startedLines(log) > before, 60_000);
 }
+
+// ---- the fake apps' per-user carts (Plan 6) ------------------------------------------------------------------
+
+interface FakeAppState {
+  cart: Record<string, { name: string; qty: number }>;
+  location: { lat: number | null; lon: number | null; area: string | null };
+  locked: boolean;
+}
+
+function fakeStatePath(email: string, site: string): string {
+  const uid = userId(email);
+  if (!uid) throw new Error("fake app state: no such user");
+  return path.join(need("FAKE_STATE_DIR"), `${uid}-${site}.json`);
+}
+
+function readFakeState(file: string, site: string): FakeAppState {
+  if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf-8")) as FakeAppState;
+  // What server/fake_sites.py starts a user with: one Amul Butter 100g in the cart.
+  return {
+    cart: { [`${site}-amul-butter-100g`]: { name: "Amul Butter 100g", qty: 1 } },
+    location: { lat: null, lon: null, area: null },
+    locked: false,
+  };
+}
+
+/**
+ * Where the fake `site` app says the user is (and whether the app refuses a location change). The cart in the
+ * fake app is kept. Before the first fill the location is empty, and the fake worker then takes the priced one.
+ */
+export function setFakeAppLocation(
+  email: string,
+  site: string,
+  where: { lat: number; lon: number; area: string; locked: boolean },
+): void {
+  const file = fakeStatePath(email, site);
+  const state = readFakeState(file, site);
+  state.location = { lat: where.lat, lon: where.lon, area: where.area };
+  state.locked = where.locked;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(state), "utf-8");
+}
+
+/** The fake app's cart for this user: product id -> {name, qty}. */
+export function readFakeCart(email: string, site: string): Record<string, { name: string; qty: number }> {
+  return readFakeState(fakeStatePath(email, site), site).cart;
+}
+
+/** The keys of the fake app's state file for this user (a cart, a location, a lock: no order, no checkout). */
+export function fakeStateKeys(email: string, site: string): string[] {
+  return Object.keys(readFakeState(fakeStatePath(email, site), site)).sort();
+}
+
