@@ -156,7 +156,7 @@ cat <<EOF
  Hisaab is running.
 
    App:      $WEB_URL
-   Emails:   http://$SHOWN_HOST:8025   (invites and alerts land here)
+   Emails:   http://localhost:8025   (invites and alerts land here; this laptop only)
    Logs:     $LOGS
 
  1. Open the app and SIGN UP with $ADMIN_EMAIL (you are already invited and an admin).
