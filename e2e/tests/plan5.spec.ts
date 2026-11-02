@@ -507,6 +507,7 @@ test("logged out at compare time", async ({ page }) => {
 
 test("a saved address that moved is not priced", async ({ page }) => {
   test.setTimeout(300_000);
+  setConnectionStatus(state.userA, "blinkit", "connected"); // the logged-out test left Blinkit needing a login
   // The picker lists each app's saved Home as one place (the fake apps keep Home at the user's society).
   await signIn(page, state.userA);
   await page.goto("/accounts");
