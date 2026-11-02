@@ -132,7 +132,7 @@ def parse_retry_after(value: str | None, now: datetime | None = None) -> int | N
     return max(0, min(int((when - now).total_seconds()), RETRY_AFTER_CAP))
 
 
-_PAGE_BLOCK_JS = "() => document.title + '\n' + ((document.body && document.body.innerText) || '').slice(0, %d)" % BLOCK_SCAN_CHARS
+_PAGE_BLOCK_JS = "() => document.title + '\\n' + ((document.body && document.body.innerText) || '').slice(0, %d)" % BLOCK_SCAN_CHARS
 
 
 def raise_if_blocked(page) -> None:
