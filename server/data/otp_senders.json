@@ -1,0 +1,7 @@
+{
+  "_note": "SMS sender-ID patterns (Python and Kotlin regex, matched case-insensitively against the whole sender). TRAI headers look like 'VK-ZOMATO' and may end in a -S/-T/-P/-G category suffix. These are best guesses: confirm each one from a real OTP SMS before relying on it.",
+  "zomato": ["^(?:[A-Z]{2}-)?ZOMATO(?:-[STPG])?$"],
+  "swiggy": ["^(?:[A-Z]{2}-)?(?:SWIGGY|SWIGGI)(?:-[STPG])?$"],
+  "zepto": ["^(?:[A-Z]{2}-)?(?:ZEPTO|ZEPTON|ZEPTOO|ZEPTOM)(?:-[STPG])?$"],
+  "blinkit": ["^(?:[A-Z]{2}-)?(?:BLINKT|BLNKIT|BLINKIT|GROFRS)(?:-[STPG])?$"]
+}

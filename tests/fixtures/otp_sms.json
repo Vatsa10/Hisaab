@@ -1,0 +1,23 @@
+{
+  "_note": "Invented SMS texts for the OTP filter. Shared by tests/server/test_otp_devices.py and android/app/src/test. brand: expected brand from the sender (null = not allowlisted). code: expected extracted code (null = drop).",
+  "cases": [
+    {"id": "zomato_plain", "sender": "VM-ZOMATO", "body": "582913 is your OTP to log in to Zomato. Do not share it with anyone. Zomato will never call you asking for it. Ref: 8kT2pQ/xYz", "brand": "zomato", "code": "582913"},
+    {"id": "zomato_suffix", "sender": "JD-ZOMATO-S", "body": "Your Zomato verification code is 7741. It is valid for 10 minutes.", "brand": "zomato", "code": "7741"},
+    {"id": "swiggy_plain", "sender": "AD-SWIGGY", "body": "Your OTP for Swiggy login is 309184. Please do not share this OTP with anyone. -Swiggy rH3kAbCdE1q", "brand": "swiggy", "code": "309184"},
+    {"id": "swiggy_lower", "sender": "vk-swiggy", "body": "Use 4410 as your one time password to sign in to Swiggy. Valid for 5 mins.", "brand": "swiggy", "code": "4410"},
+    {"id": "zepto_plain", "sender": "VM-ZEPTON", "body": "Dear customer, 66213 is your One Time Password for Zepto. Do not share it with anyone.", "brand": "zepto", "code": "66213"},
+    {"id": "zepto_bare", "sender": "ZEPTO", "body": "Zepto OTP: 128840. Valid for 10 minutes. Never share your OTP.", "brand": "zepto", "code": "128840"},
+    {"id": "blinkit_plain", "sender": "BP-BLNKIT", "body": "720615 is your Blinkit login code. Do not share it with anyone. -blinkit", "brand": "blinkit", "code": "720615"},
+    {"id": "blinkit_grofers", "sender": "TX-GROFRS-T", "body": "Your verification code for blinkit is 9021", "brand": "blinkit", "code": "9021"},
+    {"id": "bank_otp", "sender": "AX-HDFCBK", "body": "OTP is 451209 for txn of INR 1,499.00 at ZOMATO on HDFC Bank card ending 4521. Valid till 14:05. Do not share OTP.", "brand": null, "code": null},
+    {"id": "bank_lookalike", "sender": "VM-ICICIB", "body": "Dear Customer, 88123 is the OTP for your Swiggy payment of Rs 349. Do not share it.", "brand": null, "code": null},
+    {"id": "zomato_promo", "sender": "VM-ZOMATO", "body": "Craving biryani? Use code TRYNEW for 60% off up to Rs 120 on orders above Rs 1599. T&C apply.", "brand": "zomato", "code": null},
+    {"id": "swiggy_promo_no_keyword", "sender": "AD-SWIGGY", "body": "Flat Rs 125 off! Order before 2359 hrs tonight on Swiggy Instamart.", "brand": "swiggy", "code": null},
+    {"id": "two_numbers", "sender": "VM-ZOMATO", "body": "Your Zomato OTP is 4821. Order 58213 is out for delivery.", "brand": "zomato", "code": null},
+    {"id": "phone_number_only", "sender": "VK-ZEPTON", "body": "Verification pending. Call 9876543210 for help with your Zepto order.", "brand": "zepto", "code": null},
+    {"id": "too_short", "sender": "VM-ZEPTON", "body": "Your Zepto code is 123.", "brand": "zepto", "code": null},
+    {"id": "too_long", "sender": "VM-ZEPTON", "body": "Your Zepto code is 123456789.", "brand": "zepto", "code": null},
+    {"id": "personal_number", "sender": "+919876543210", "body": "bro my zomato otp is 5512 can u send it", "brand": null, "code": null},
+    {"id": "lookalike_header", "sender": "VM-ZOMATOX", "body": "582913 is your OTP to log in to Zomato.", "brand": null, "code": null}
+  ]
+}

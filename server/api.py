@@ -547,3 +547,6 @@ app.include_router(cart_api.router)
 from server import food_api  # noqa: E402
 
 app.include_router(food_api.router)
+from server import otp_devices  # noqa: E402
+
+app.include_router(otp_devices.router)

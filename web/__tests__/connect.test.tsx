@@ -18,6 +18,7 @@ const live = vi.hoisted(() => ({
   connections: [] as Array<(rows: unknown) => void>,
   connectionUnsubs: 0,
 }));
+vi.mock("@/components/account/OtpDevicesCard", () => ({ OtpDevicesCard: () => null }));
 vi.mock("@/lib/me", () => ({
   getMe: vi.fn(async () => ({ user_id: "u", email: "a@b.co", is_admin: false })),
   getLimits: vi.fn(async () => {

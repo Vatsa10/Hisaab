@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DataCard } from "@/components/account/DataCard";
+import { OtpDevicesCard } from "@/components/account/OtpDevicesCard";
 import { Card } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import type { AppAddress } from "@/lib/addresses";
@@ -244,6 +245,7 @@ export function AccountsScreen({
       <AddressRow profile={profile} onSaved={setProfile} initialAddresses={initialAddresses} userId={userId} />
 
       <DataCard connected={APPS.filter((a) => connectionFor.has(a.id))} />
+      <OtpDevicesCard />
 
       {flow && flowApp ? (
         <ConnectFlow
