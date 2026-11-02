@@ -2,7 +2,9 @@
 # Run the whole product locally against your REAL Zepto / Blinkit / Swiggy / Zomato accounts, for a hands-on demo.
 #
 #   bash scripts/demo_local.sh you@example.com        # first run: sets up everything, makes you the admin
-#   bash scripts/demo_local.sh you@example.com        # later runs keep your data (add --reset to wipe it)
+#   bash scripts/demo_local.sh you@example.com --lan  # also reachable from your phone on the same Wi-Fi
+#   (later runs keep your data; add --reset to wipe it. Over plain http a phone browser cannot install the app to the
+#   home screen or get push notifications; those need https, so they wait for the real domain.)
 #
 # What it starts: local Supabase, Mailpit (invite and alert emails: http://localhost:8025), the API (port 8000),
 # the REAL worker (a real Chrome opens on this machine for each login), the scheduler and the PWA (port 3000).
@@ -14,18 +16,30 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
-ADMIN_EMAIL="${1:-}"
-RESET=0
-[ "${2:-}" = "--reset" ] && RESET=1
-[ "${1:-}" = "--reset" ] && { RESET=1; ADMIN_EMAIL=""; }
-[ -n "$ADMIN_EMAIL" ] || { echo "usage: bash scripts/demo_local.sh you@example.com [--reset]" >&2; exit 2; }
+ADMIN_EMAIL=""; RESET=0; LAN=0
+for a in "$@"; do
+  case "$a" in
+    --reset) RESET=1 ;;
+    --lan) LAN=1 ;;
+    -*) echo "unknown option $a" >&2; exit 2 ;;
+    *) ADMIN_EMAIL="$a" ;;
+  esac
+done
+[ -n "$ADMIN_EMAIL" ] || { echo "usage: bash scripts/demo_local.sh you@example.com [--lan] [--reset]" >&2; exit 2; }
 
 PY="python"; command -v "$PY" >/dev/null 2>&1 || PY="python3"
 HOST=127.0.0.1
 API_PORT=8000
 WEB_PORT=3000
-WEB_URL="http://localhost:$WEB_PORT"
-API_URL="http://localhost:$API_PORT"
+SHOWN_HOST=localhost
+if [ "$LAN" = 1 ]; then
+  # Phone mode: listen on every interface and use this machine's Wi-Fi address, so a phone on the same Wi-Fi can open it.
+  HOST=0.0.0.0
+  SHOWN_HOST="$("$PY" -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.connect(('8.8.8.8',80));print(s.getsockname()[0])" 2>/dev/null || true)"
+  [ -n "$SHOWN_HOST" ] || { echo "could not find this machine's Wi-Fi address" >&2; exit 1; }
+fi
+WEB_URL="http://$SHOWN_HOST:$WEB_PORT"
+API_URL="http://$SHOWN_HOST:$API_PORT"
 DEMO="$ROOT/.demo"
 LOGS="$DEMO/logs"
 SUPABASE="npx --yes supabase@2.122.0"
@@ -125,10 +139,13 @@ log "starting the scheduler"
 PIDS+=($!)
 
 log "starting the PWA on $WEB_URL (the first page load compiles; give it a few seconds)"
+SUPABASE_PUBLIC_URL="$(env_value web/.env.local NEXT_PUBLIC_SUPABASE_URL)"
+[ "$LAN" = 1 ] && SUPABASE_PUBLIC_URL="$(printf '%s' "$SUPABASE_PUBLIC_URL" | sed "s#//[^:/]*#//$SHOWN_HOST#")"
 [ -d web/node_modules ] || pnpm --dir web install --frozen-lockfile >"$LOGS/web-install.log" 2>&1
 (
   cd web
-  NEXT_PUBLIC_API_URL="$API_URL" NEXT_TELEMETRY_DISABLED=1 exec node node_modules/next/dist/bin/next dev -H "$HOST" -p "$WEB_PORT"
+  SB_URL="$SUPABASE_PUBLIC_URL"
+  NEXT_PUBLIC_API_URL="$API_URL" NEXT_PUBLIC_SUPABASE_URL="$SB_URL" NEXT_TELEMETRY_DISABLED=1 exec node node_modules/next/dist/bin/next dev -H "$HOST" -p "$WEB_PORT"
 ) >"$LOGS/web.log" 2>&1 &
 PIDS+=($!)
 wait_for "PWA" 120 "$WEB_URL/login"
@@ -138,8 +155,8 @@ cat <<EOF
 ================================================================================
  Hisaab is running.
 
-   App:      $WEB_URL        (open on this laptop; on your phone use this machine's LAN address)
-   Emails:   http://localhost:8025   (invites and alerts land here)
+   App:      $WEB_URL
+   Emails:   http://$SHOWN_HOST:8025   (invites and alerts land here)
    Logs:     $LOGS
 
  1. Open the app and SIGN UP with $ADMIN_EMAIL (you are already invited and an admin).
