@@ -10,6 +10,8 @@ export const QUESTION_SECONDS = 180;
 
 export interface FillQuestionProps {
   jobId: string;
+  /** The open question's index (the job's progress.question_index), sent back with the answer. */
+  questionIndex: number;
   question: string;
   choices: FillChoice[];
   /** When the question was asked (ISO), if the worker recorded it; otherwise it counts from mount. */
@@ -23,7 +25,7 @@ function secondsLeft(askedAt: string | undefined, mountedAt: number): number {
 }
 
 /** One item the app has several answers for: the user picks, or skips it. Unanswered it skips after 180s. */
-export function FillQuestion({ jobId, question, choices, askedAt }: FillQuestionProps) {
+export function FillQuestion({ jobId, questionIndex, question, choices, askedAt }: FillQuestionProps) {
   const name = useId();
   const [mountedAt] = useState(() => Date.now());
   const [picked, setPicked] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export function FillQuestion({ jobId, question, choices, askedAt }: FillQuestion
     setSending(answer);
     setError(null);
     try {
-      await answerFill(jobId, answer);
+      await answerFill(jobId, answer, questionIndex);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : "Couldn't send that. Try again.");
       setSending(null);

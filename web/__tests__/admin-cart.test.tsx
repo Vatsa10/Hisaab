@@ -78,7 +78,7 @@ describe("admin cart learning", () => {
     render(<SitesPanel onForbidden={vi.fn()} />);
 
     const group = await screen.findByRole("list", { name: "Cart filling" });
-    expect(screen.getByText("Cart filling")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Cart filling" })).toBeInTheDocument();
     expect(within(group).queryByRole("button", { name: /Pause/ })).not.toBeInTheDocument();
 
     expect(within(group).getByRole("button", { name: "Learn Instamart cart" })).toBeDisabled();

@@ -2,11 +2,12 @@
 per-app address a compare or cart fill uses. Nothing here logs an address or a coordinate."""
 from psycopg.rows import dict_row
 
-from addresses import db_site, distance_m, norm_line
-from server import store
+import addresses
+from addresses import db_site
+from server import address_match, store
 
-SAME_PLACE_M = 150.0  # two saved addresses this close (or with the same line) are one place
 SITE_ORDER = ("zepto", "blinkit", "swiggy", "zomato")  # the Accounts screen's order
+SAME_PLACE_M = 150.0  # the worker flags a refreshed address whose pin moved further than this
 COLUMNS = ("address_id", "label", "line", "area", "city", "lat", "lon", "is_default")
 
 
@@ -62,8 +63,8 @@ def saved_for(conn, user_id: str, site: str, near: tuple[float, float] | None = 
     no saved address there (then the app is not priced: "Add this address in <App> to compare here").
 
     - The choice came from this app: that same address_id.
-    - Otherwise: this app's saved address with the same line as the chosen one, else the nearest within
-      SAME_PLACE_M of near (default: the profile's saved lat/lon).
+    - Otherwise: this app's best-scoring saved address against the chosen one (address_match.score: same threshold
+      and vetoes as the picker), with the chosen pin replaced by near (default: the profile's saved lat/lon).
     Instamart uses the swiggy account's addresses."""
     account = db_site(site)
     rows = _rows(conn, user_id, account)
@@ -74,17 +75,19 @@ def saved_for(conn, user_id: str, site: str, near: tuple[float, float] | None = 
         hit = next((r for r in rows if r["address_id"] == chosen.get("address_id")), None)
         if hit:
             return hit
-    if chosen:
-        picked = get(conn, user_id, chosen.get("site") or "", chosen.get("address_id") or "")
-        line = norm_line(picked.get("line")) if picked else ""
-        hit = next((r for r in rows if line and norm_line(r["line"]) == line), None)
-        if hit:
-            return hit
-    if near is None:
-        p = store.get_profile(conn, user_id) or {}
-        near = (p["lat"], p["lon"]) if p.get("lat") is not None and p.get("lon") is not None else None
-    if near is None:
-        return None
-    close = [(distance_m(near, pin), r) for r in rows if (pin := _pin(r))]
-    close = [(d, r) for d, r in close if d <= SAME_PLACE_M]
-    return min(close, key=lambda x: x[0])[1] if close else None
+    picked = get(conn, user_id, chosen.get("site") or "", chosen.get("address_id") or "") if chosen else None
+    profile = store.get_profile(conn, user_id) or {}
+    if near is None and profile.get("lat") is not None and profile.get("lon") is not None:
+        near = (profile["lat"], profile["lon"])
+    # A typed address (no chosen app address) is matched by its text and pin like any other pair.
+    ref = dict(picked) if picked else {"line": profile.get("address"), "lat": None, "lon": None}
+    if near is not None:
+        ref["lat"], ref["lon"] = near
+    if not ref.get("line") and near is not None:
+        # a bare pin (no address text to score): the app's nearest saved pin within SAME_PLACE_M
+        close = [(addresses.distance_m(near, pin), r) for r in rows if (pin := _pin(r))]
+        close = [(d, r) for d, r in close if d <= SAME_PLACE_M]
+        return min(close, key=lambda x: x[0])[1] if close else None
+    scored = [(address_match.score(ref, r), r) for r in rows]
+    scored = [(sc, r) for sc, r in scored if sc >= address_match.THRESHOLD]
+    return max(scored, key=lambda x: x[0])[1] if scored else None

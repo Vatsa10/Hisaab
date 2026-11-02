@@ -185,7 +185,7 @@ def test_lookup_limit_and_budget_pause(pg, s):
     cache_restaurants(pg, query="biryani")
     assert food_cart.lookup_restaurants(pg, A, "biryani", NOW, s)["status"] == "ready"
     pg.execute("delete from restaurant_cache")
-    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values ('2026-10', 'paused', 1, 1)")
+    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values (%s, 'paused', 1, 1)", (_this_month(),))
     assert budget.is_paused(pg, NOW, s.app_tz)
     with pytest.raises(limits.BudgetPaused):
         food_cart.lookup_restaurants(pg, A, "biryani", NOW, s)
@@ -391,3 +391,8 @@ def test_purge_cache_older_than_a_day(pg):
     assert food_cart.purge_cache(pg, now=NOW) == 2
     assert pg.execute("select count(*) from restaurant_cache").fetchone() == (1,)
     assert pg.execute("select count(*) from menu_cache").fetchone() == (1,)
+
+
+def _this_month() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m")

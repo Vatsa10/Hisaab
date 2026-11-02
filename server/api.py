@@ -272,7 +272,7 @@ def post_otp(job_id: str, body: OtpBody, user: str = Depends(current_user), conn
 
 
 def _stale_fill_answer(conn, job_id: str, user: str, body: AnswerBody) -> bool:
-    """A fill job's answer that isn't for its open question: an earlier question_index, or a choice the open
+    """A fill job's answer that isn't for its open question: a question_index that isn't the open one, or a choice the open
     question doesn't offer ("skip" is always one)."""
     try:
         jid = str(uuid.UUID(job_id))
@@ -283,7 +283,11 @@ def _stale_fill_answer(conn, job_id: str, user: str, body: AnswerBody) -> bool:
     if row is None or not isinstance(row[0], dict):
         return False
     progress = row[0]
-    if body.question_index is not None and progress.get("question_index") != body.question_index:
+    if body.question_index is None and progress.get("stage") != "question_needed":
+        return False  # no open question: the relay answers 404
+    if body.question_index is None:
+        raise HTTPException(422, "question_index is required to answer a fill question.")
+    if progress.get("question_index") != body.question_index:
         return True
     choices = progress.get("choices")
     if isinstance(choices, list) and choices and body.answer != "skip":

@@ -126,3 +126,11 @@ def test_addresses_op_job_only_refreshes(pg, monkeypatch):
     _run_all(pg)
     assert seen == ["search"] and addresses_store.get(pg, A, "zepto", "zepto-home")
     assert pg.execute("select status, error from jobs").fetchone() == ("done", None)
+
+
+def test_fake_home_can_be_placed_by_env(monkeypatch):
+    monkeypatch.setenv("FAKE_ADDRESS_HOME", "12 Shanti Society|Gorwa|Vadodara|22.33|73.15")
+    home = fake_sites.saved_addresses("zepto")[0]
+    assert (home["line"], home["area"], home["city"], home["lat"]) == ("12 Shanti Society", "Gorwa", "Vadodara", 22.33)
+    monkeypatch.setenv("FAKE_ADDRESS_HOME", "broken")
+    assert fake_sites.saved_addresses("zepto")[0]["city"] == "Bengaluru"

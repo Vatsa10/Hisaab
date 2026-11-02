@@ -30,6 +30,8 @@ export interface JobProgress {
   prompt_at?: string;
   /** Cart fill: the choices offered for the question (the id goes back as the answer). */
   choices?: { id: string; label: string }[];
+  /** Cart fill: which question is open; an answer carries it so a late one is refused. */
+  question_index?: number;
   /** Cart fill: items handled so far, and in all. */
   done?: number;
   total?: number;

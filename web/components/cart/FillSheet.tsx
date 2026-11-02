@@ -180,8 +180,9 @@ export function FillBody({
         {asking ? (
           <div className="mt-3">
             <FillQuestion
-              key={`${job.id}-${job.progress.question}-${job.progress.prompt_at ?? ""}`}
+              key={`${job.id}-${job.progress.question_index ?? 0}-${job.progress.question}-${job.progress.prompt_at ?? ""}`}
               jobId={job.id}
+              questionIndex={job.progress.question_index ?? 0}
               question={job.progress.question ?? ""}
               choices={job.progress.choices ?? []}
               askedAt={job.progress.prompt_at}

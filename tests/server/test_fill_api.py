@@ -187,16 +187,16 @@ def fill_job(pg, stage="question_needed", status="running", type="fill_cart"):
     return str(pg.execute(
         "insert into jobs (user_id, type, site, profile, payload, status, progress) "
         "values (%s,%s,'zepto','zepto','{}',%s,%s) returning id",
-        (A, type, status, Jsonb({"stage": stage}))).fetchone()[0])
+        (A, type, status, Jsonb({"stage": stage, "question_index": 0}))).fetchone()[0])
 
 
 def test_answer_reaches_fill_job(client, token_a, pg, pg2):
     jid = fill_job(pg)
     chan = "otp_" + jid.replace("-", "")
     pg2.execute(f"listen {chan}")
-    assert client.post(f"/jobs/{jid}/answer", json={"answer": "c1"}, headers=token_a).status_code == 204
+    assert client.post(f"/jobs/{jid}/answer", json={"answer": "c1", "question_index": 0}, headers=token_a).status_code == 204
     notes = list(pg2.notifies(timeout=2, stop_after=1))
-    assert notes and notes[0].channel == chan and notes[0].payload == "c1"
+    assert notes and notes[0].channel == chan and json.loads(notes[0].payload) == {"question_index": 0, "answer": "c1"}
     pg.execute("update jobs set status = 'done'")
     other = fill_job(pg, stage="filling")
     assert client.post(f"/jobs/{other}/answer", json={"answer": "x"}, headers=token_a).status_code == 404
@@ -299,7 +299,9 @@ def test_stale_answer_for_an_earlier_question_is_409(client, token_a, pg, pg2):
     pg2.execute(f"listen {chan}")
     post = lambda body: client.post(f"/jobs/{jid}/answer", json=body, headers=token_a).status_code  # noqa: E731
     assert post({"answer": "c2", "question_index": 0}) == 409
-    assert post({"answer": "c1"}) == 409                       # not a choice of the open question
+    assert post({"answer": "c1", "question_index": 1}) == 409  # not a choice of the open question
+    assert post({"answer": "c2"}) == 422                       # a fill answer must say which question it answers
+    assert post({"answer": "c2", "question_index": 2}) == 409  # a question that isn't open yet
     assert post({"answer": "c2", "question_index": 1}) == 204
     notes = list(pg2.notifies(timeout=2, stop_after=1))
     assert [json.loads(n.payload) for n in notes] == [{"question_index": 1, "answer": "c2"}]  # the worker re-checks

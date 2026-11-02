@@ -140,10 +140,10 @@ export function confirmFill(fillId: string): Promise<FillStarted> {
   return apiFetch<FillStarted>(`/cart/fills/${encodeURIComponent(fillId)}/confirm`, { method: "POST" });
 }
 
-export async function answerFill(jobId: string, answer: string): Promise<void> {
+export async function answerFill(jobId: string, answer: string, questionIndex: number): Promise<void> {
   await apiFetch(`/jobs/${encodeURIComponent(jobId)}/answer`, {
     method: "POST",
-    body: JSON.stringify({ answer }),
+    body: JSON.stringify({ answer, question_index: questionIndex }),
   });
 }
 

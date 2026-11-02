@@ -241,3 +241,14 @@ def test_no_nearby_saved_address_skips_app(pg):
     assert addresses_store.saved_for(pg, A, "blinkit", near=HOME) is None  # 3.6 km away: not priced
     assert addresses_store.saved_for(pg, A, "zomato", near=HOME) is None  # nothing saved at all
     assert addresses_store.saved_for(pg, B, "zepto", near=HOME) is None  # another user's list never counts
+
+
+def test_saved_for_uses_scorer_vetoes_and_threshold(pg):
+    # another flat in the same building is a different place (unit veto), even at the same pin
+    addresses_store.replace(pg, A, "zepto", [row("z-home", *HOME)])
+    addresses_store.replace(pg, A, "swiggy", [row("s-other", *HOME, line="Flat 99, Lakeview Residency")])
+    _choose(pg, "zepto", "z-home", *HOME)
+    assert addresses_store.saved_for(pg, A, "swiggy", near=HOME) is None
+    # the best scoring one wins when two pass
+    addresses_store.replace(pg, A, "blinkit", [row("b-1", *NEAR_HOME, line="Lakeview Residency"), row("b-2", *HOME)])
+    assert addresses_store.saved_for(pg, A, "blinkit", near=HOME)["address_id"] == "b-2"

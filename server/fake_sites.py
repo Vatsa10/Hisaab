@@ -174,13 +174,26 @@ def _env_sites(name: str) -> frozenset[str]:
     return frozenset(x.strip() for x in (os.getenv(name) or "").split(",") if x.strip())
 
 
+def _fake_home() -> dict:
+    """The fake apps' Home address. FAKE_ADDRESS_HOME="line|area|city|lat|lon" puts it somewhere else (the e2e
+    stack puts it at the made-up society its users type, so a refresh before a search finds the address unchanged)."""
+    parts = (os.getenv("FAKE_ADDRESS_HOME") or "").split("|")
+    if len(parts) != 5:
+        return _FAKE_HOME
+    try:
+        return _FAKE_HOME | {"line": parts[0], "area": parts[1], "city": parts[2], "lat": float(parts[3]),
+                             "lon": float(parts[4])}
+    except ValueError:
+        return _FAKE_HOME
+
+
 def saved_addresses(site) -> list[dict]:
     """Two saved addresses per app, already in addresses.normalise() form (Instamart: Swiggy's). Read live from the
     environment, so tests can change an address between calls: FAKE_ADDRESS_MOVED_SITES (comma-separated accounts)
     moves the home pin about a kilometre; FAKE_ADDRESS_DELETED_SITES removes the home address."""
     account = "swiggy" if site == "instamart" else site
-    home = _FAKE_HOME | {"address_id": f"fake-{account}-home", "is_default": True,
-                         "lat": round(_FAKE_HOME["lat"] + _FAKE_NUDGE.get(account, 0.0), 6)}
+    home = _fake_home() | {"address_id": f"fake-{account}-home", "is_default": True,
+                         "lat": round(_fake_home()["lat"] + _FAKE_NUDGE.get(account, 0.0), 6)}
     second = _FAKE_SECOND.get(account, _FAKE_WORK) | {"address_id": f"fake-{account}-2", "is_default": False}
     if account in _env_sites("FAKE_ADDRESS_MOVED_SITES"):
         home["lat"] = round(home["lat"] + 0.01, 6)

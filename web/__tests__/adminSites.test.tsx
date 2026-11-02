@@ -92,3 +92,37 @@ describe("SitesPanel site health", () => {
     expect(calm).not.toHaveClass("font-semibold");
   });
 });
+
+describe("SitesPanel jump nav", () => {
+  beforeEach(() => api.apiFetch.mockReset());
+
+  it("links to every group's anchor, sticky, with 44px targets", async () => {
+    api.apiFetch.mockResolvedValue([
+      site({ kind: "orders" }),
+      site({ kind: "search" }),
+      site({ kind: "food" }),
+      site({ kind: "cart" }),
+      site({ kind: "addresses" }),
+    ]);
+    render(<SitesPanel onForbidden={() => {}} />);
+    const nav = await screen.findByRole("navigation", { name: "Jump to a group" });
+    expect(nav.className).toContain("sticky");
+    expect(nav.className).toContain("flex-wrap");
+    const links = Array.from(nav.querySelectorAll("a"));
+    expect(links.map((a) => a.textContent)).toEqual([
+      "Order history",
+      "Grocery prices",
+      "Restaurants & menus",
+      "Cart filling",
+      "Other",
+    ]);
+    for (const a of links) {
+      expect(a.className).toContain("min-h-11");
+      const id = a.getAttribute("href")!.slice(1);
+      expect(document.getElementById(id)?.tagName).toBe("SECTION");
+    }
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([
+      "#sites-orders", "#sites-search", "#sites-food", "#sites-cart", "#sites-other",
+    ]);
+  });
+});

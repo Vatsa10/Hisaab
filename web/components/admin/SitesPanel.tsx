@@ -69,8 +69,22 @@ export function SitesPanel({ onForbidden }: PanelProps) {
 
   return (
     <div aria-label="Sites">
+      <nav
+        aria-label="Jump to a group"
+        className="sticky top-0 z-10 -mx-4 mb-4 flex flex-wrap gap-1 bg-canvas px-4 py-2"
+      >
+        {sections.map((g) => (
+          <a
+            key={g.id}
+            href={`#sites-${g.id}`}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control bg-line-soft px-3 text-label font-semibold text-ink-muted hover:text-ink"
+          >
+            {g.title}
+          </a>
+        ))}
+      </nav>
       {sections.map((g) => (
-        <section key={g.id} aria-labelledby={`sites-group-${g.id}`} className="mt-6 first:mt-0">
+        <section key={g.id} id={`sites-${g.id}`} aria-labelledby={`sites-group-${g.id}`} className="mt-6 scroll-mt-16 first:mt-0">
           <SectionLabel>
             <span id={`sites-group-${g.id}`}>{g.title}</span>
           </SectionLabel>

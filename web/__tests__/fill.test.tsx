@@ -246,7 +246,7 @@ describe("live sheet", () => {
     expect(screen.getByText("Checking prices at Zepto's location…")).toBeInTheDocument();
   });
 
-  const ask = { stage: "question_needed", question: "Which Chips?", choices: [{ id: "a1", label: "Lay's Classic 52g" }, { id: "a2", label: "Bingo Mad Angles" }], done: 1, total: 3 };
+  const ask = { stage: "question_needed", question: "Which Chips?", question_index: 2, choices: [{ id: "a1", label: "Lay's Classic 52g" }, { id: "a2", label: "Bingo Mad Angles" }], done: 1, total: 3 };
 
   it("question shows choices and answers with the choice id", async () => {
     api.apiFetch.mockResolvedValue({});
@@ -261,7 +261,7 @@ describe("live sheet", () => {
     expect(screen.getByRole("timer")).toHaveTextContent("180s left");
     fireEvent.click(add);
     await waitFor(() =>
-      expect(api.apiFetch).toHaveBeenCalledWith("/jobs/j1/answer", { method: "POST", body: JSON.stringify({ answer: "a2" }) }),
+      expect(api.apiFetch).toHaveBeenCalledWith("/jobs/j1/answer", { method: "POST", body: JSON.stringify({ answer: "a2", question_index: 2 }) }),
     );
   });
 
@@ -272,7 +272,7 @@ describe("live sheet", () => {
     pushJob(ask);
     fireEvent.click(screen.getByRole("button", { name: "Skip item" }));
     await waitFor(() =>
-      expect(api.apiFetch).toHaveBeenCalledWith("/jobs/j1/answer", { method: "POST", body: JSON.stringify({ answer: "skip" }) }),
+      expect(api.apiFetch).toHaveBeenCalledWith("/jobs/j1/answer", { method: "POST", body: JSON.stringify({ answer: "skip", question_index: 2 }) }),
     );
   });
 

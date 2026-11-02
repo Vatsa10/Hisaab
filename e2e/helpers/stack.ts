@@ -179,7 +179,7 @@ export function setAddress(email: string, address: string, lat: number, lon: num
     sql(
       "insert into app_addresses (user_id, site, address_id, label, line, area, city, lat, lon, is_default) " +
         "values (%s::uuid, %s, %s, 'Home', %s, %s, %s, %s, %s, true)",
-      [uid, site, `e2e-${site}-home`, parts[0] ?? address, parts[1] ?? null, parts[2] ?? null, lat + i * 0.0001, lon],
+      [uid, site, `fake-${site}-home`, parts[0] ?? address, parts[1] ?? null, parts[2] ?? null, lat + i * 0.0001, lon],
     );
   });
 }

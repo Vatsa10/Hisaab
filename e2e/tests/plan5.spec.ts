@@ -505,6 +505,27 @@ test("logged out at compare time", async ({ page }) => {
   }
 });
 
+test("a saved address that moved is not priced", async ({ page }) => {
+  test.setTimeout(300_000);
+  // The picker lists each app's saved Home as one place (the fake apps keep Home at the user's society).
+  await signIn(page, state.userA);
+  await page.goto("/accounts");
+  await expect(page.getByText("Home").first()).toBeVisible();
+  await restartWorker({ FAKE_ADDRESS_MOVED_SITES: "zepto" });
+  try {
+    await page.goto("/cart");
+    await addItems(page, ["Amul Taza Milk 500ml"]);
+    await compare(page);
+    // Zepto's own list was re-read before pricing: its Home pin moved ~1 km, so it is not priced.
+    await expect(card(page, "Zepto")).toContainText("Your saved address in Zepto changed. Pick it again.");
+    await expect(card(page, "Blinkit")).toContainText("₹");
+    await expectNoHorizontalScroll(page, "a result with a changed address");
+  } finally {
+    await restartWorker({});
+    setAddress(state.userA, ADDRESS, LAT, LON); // the moved pin was stored: put the user's places back
+  }
+});
+
 test("daily limit", async ({ page }) => {
   test.setTimeout(600_000);
   const token = await accessToken(state.userA, PASSWORD);

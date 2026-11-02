@@ -105,6 +105,11 @@ def test_food_check_error_strings(client, token_a, pg, at_now):
     assert (r.status_code, r.json()["detail"]) == (409, "Add your delivery address first.")
     pg.execute("update profiles set lat = 22.31, lon = 73.18 where user_id = %s", (A,))
     cache_restaurants(pg)
-    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values ('2026-10','paused',1,1)")
+    pg.execute("insert into budget_state (month, level, spent_inr, budget_inr) values (%s,'paused',1,1)", (_this_month(),))
     r = client.post("/cart/food/checks", json=body(), headers=token_a)
     assert r.status_code == 503 and "paused" in r.json()["detail"]
+
+
+def _this_month() -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m")
