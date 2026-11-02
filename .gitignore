@@ -38,3 +38,6 @@ deploy/azure/.env.deploy
 web/.env.local
 .env.server.local
 .env.local
+
+# local demo state (vault, master key, logs)
+.demo/
