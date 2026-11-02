@@ -104,6 +104,12 @@ if [ "$need_reset" = 1 ]; then
 fi
 export DATABASE_URL
 
+if [ "$need_reset" = 0 ]; then
+  # Newer code may ship newer migrations: add them without touching your data.
+  log "applying any new migrations (your data is kept)"
+  $SUPABASE migration up --local >"$LOGS/migrate.log" 2>&1 || { tail -20 "$LOGS/migrate.log"; fail "supabase migration up failed"; }
+fi
+
 # ---- Mailpit ------------------------------------------------------------------------------------------------------
 docker rm -f "$MAILPIT_NAME" >/dev/null 2>&1 || true
 docker run -d --rm --name "$MAILPIT_NAME" -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 axllent/mailpit:v1.21 >"$LOGS/mailpit.log" 2>&1 \
