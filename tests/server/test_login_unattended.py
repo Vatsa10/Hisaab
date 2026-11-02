@@ -80,8 +80,8 @@ def test_empty_location_does_not_leak_the_cli_location(monkeypatch):
     seen = fake_login_env(monkeypatch, _ends("stuck"), settings_location=SAVED)
     assert sync.login("zomato", "9876543210", prompt=_never_called, location={}) is False
     assert seen["agents"][0].location == ""
-    assert seen["goto"] == ["https://www.zomato.com/"]
-    assert seen["agents"][0].home == "https://www.zomato.com/"  # where it backs off to on a blocked page
+    assert seen["goto"] == ["https://www.zomato.com/mumbai/restaurants"]
+    assert seen["agents"][0].home == "https://www.zomato.com/mumbai/restaurants"  # where it backs off to on a blocked page
     assert seen["open_site"][0]["location"] == {}
 
 
