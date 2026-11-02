@@ -143,8 +143,6 @@ def test_cart_check_runs_while_only_some_apps_are_cooling(client, token_a, pg):
 
 
 def test_admin_site_health_rows_carry_cooldown_fields(pg):
-    from datetime import datetime, timezone
-
     from server import admin
     helpers.add_user(pg, A, EA)
     helpers.add_user(pg, B, EB)
@@ -153,7 +151,8 @@ def test_admin_site_health_rows_carry_cooldown_fields(pg):
                "values (%s, 'sync', 'zepto', 'zepto', 'failed', 'boom', now())", (A,))
     pg.execute("insert into jobs(user_id, type, site, profile, status, finished_at) "
                "values (%s, 'sync', 'zepto', 'zepto', 'done', now())", (B,))
-    now = datetime.now(timezone.utc)
+    # The jobs' finished_at is the database clock; read "now" from it too, so a drifting Docker clock can't matter.
+    now = pg.execute("select now() + interval '1 second'").fetchone()[0]
     rows = {(r["site"], r["kind"]): r for r in admin.site_health(pg, now, A)}
     z = rows[("zepto", "orders")]
     assert z["cooldown_until"] == until and z["backoff_level"] == 1
