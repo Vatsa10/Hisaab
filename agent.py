@@ -136,7 +136,7 @@ _SNAPSHOT_JS = """(prefix) => {
   return {elements: out, overlay: covered > 3};
 }"""
 
-# OTP field: autocomplete=one-time-code, an otp/code-ish name, or a row of >=4 single-character boxes.
+# OTP field: autocomplete=one-time-code, an otp/code-ish name, or a row of 4-8 one- or two-character boxes.
 _FIND_OTP_JS = """() => {
   document.querySelectorAll('[data-ea-otp]').forEach(e => e.removeAttribute('data-ea-otp'));
   const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 &&
@@ -144,7 +144,9 @@ _FIND_OTP_JS = """() => {
   const ins = [...document.querySelectorAll('input')].filter(i => vis(i) && !['hidden','checkbox','radio'].includes(i.type));
   const words = i => [i.name, i.id, i.placeholder, i.getAttribute('aria-label'), i.getAttribute('data-testid')].join(' ');
   let otp = ins.find(i => i.autocomplete === 'one-time-code' || /otp|one.?time|verif|passcode/i.test(words(i)));
-  if (!otp) { const singles = ins.filter(i => i.maxLength === 1); if (singles.length >= 4) otp = singles[0]; }
+  // A row of 4-8 empty one- or two-character boxes (Zomato's boxes take two) is an OTP entry.
+  if (!otp) { const shorts = ins.filter(i => i.maxLength >= 1 && i.maxLength <= 2 && !i.value
+    && ['text','tel','number','password',''].includes(i.type)); if (shorts.length >= 4 && shorts.length <= 8) otp = shorts[0]; }
   if (!otp || otp.value) return false;
   otp.setAttribute('data-ea-otp', '1');
   return true;
@@ -835,7 +837,7 @@ class LoginAgent(Discovery):
         except Exception:
             loc.focus()
         self.page.keyboard.type(otp, delay=60)  # keystrokes also walk split one-digit boxes
-        boxes = frame.locator("input[maxlength='1']:visible")
+        boxes = frame.locator("input[maxlength='1']:visible, input[maxlength='2']:visible")
         if boxes.count() >= len(otp) >= 4 and "".join(boxes.nth(i).input_value() for i in range(len(otp))) != otp:
             for i, digit in enumerate(otp):  # boxes that don't auto-advance: one digit each
                 boxes.nth(i).click(timeout=2000)
