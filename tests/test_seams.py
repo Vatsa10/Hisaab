@@ -152,10 +152,10 @@ SAVED = {"query": "Sunrise Apts, Akota, Vadodara, Gujarat", "lat": 22.3, "lon": 
 def test_home_url_city_comes_from_given_location(monkeypatch):
     monkeypatch.setattr(browser, "load_settings", lambda: {"location": SAVED})
     assert browser.home_url("zomato") == "https://www.zomato.com/vadodara/restaurants"  # CLI: saved settings
-    assert browser.home_url("zomato", {}) == "https://www.zomato.com/"  # given but empty: no city
+    assert browser.home_url("zomato", {}) == "https://www.zomato.com/mumbai/restaurants"  # no city: a default city page, never the landing page
     other = {"query": "Flat 2, Indiranagar, Bengaluru, Karnataka", "lat": 12.9, "lon": 77.6}
     assert browser.home_url("zomato", other) == "https://www.zomato.com/bangalore/restaurants"
-    assert browser.home_url("zomato", {"query": None, "lat": 1.0, "lon": 2.0}) == "https://www.zomato.com/"
+    assert browser.home_url("zomato", {"query": None, "lat": 1.0, "lon": 2.0}) == "https://www.zomato.com/mumbai/restaurants"
 
 
 class _Recorder:
@@ -213,3 +213,10 @@ def test_recover_blocked_reloads_the_given_home(monkeypatch):
     la.blocked_page = lambda: False
     la.recover_blocked()
     assert went == ["https://www.zomato.com/"]
+
+
+def test_home_url_env_override_stays_on_the_site(monkeypatch):
+    monkeypatch.setenv("HOME_URL_ZOMATO", "https://www.zomato.com/ncr/restaurants")
+    assert browser.home_url("zomato", {}) == "https://www.zomato.com/ncr/restaurants"
+    monkeypatch.setenv("HOME_URL_ZOMATO", "https://evil.example.com/ncr/restaurants")  # another host is ignored
+    assert browser.home_url("zomato", {}) == "https://www.zomato.com/mumbai/restaurants"

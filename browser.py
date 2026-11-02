@@ -64,11 +64,21 @@ def city_slug(location: dict | None = None) -> str | None:
     return ZOMATO_CITY_ALIASES.get(slug, slug)
 
 
+DEFAULT_CITY = "mumbai"  # a real city page for sites whose home needs one, when the user's city is unknown
+
+
 def home_url(site: str, location: dict | None = None) -> str:
+    # HOME_URL_<SITE> (for example HOME_URL_ZOMATO) overrides the start page, so a site that moves its login can be
+    # pointed at the new page without a code change. It must stay on the site's own host.
+    override = os.environ.get(f"HOME_URL_{site.upper()}", "").strip()
+    if override and urlsplit(override).hostname and urlsplit(override).hostname.endswith(
+            urlsplit(SITES[site]["home"]).hostname.split(".", 1)[-1]):
+        return override
     home = SITES[site]["home"]
     if "{city}" in home:
-        city = city_slug(location)
-        return home.format(city=city) if city else home.split("{city}")[0]
+        # Without a known city (a user who has not set an address yet) use a default city page: the plain domain is
+        # only an app-download landing page with no login, so the login agent would wander around it.
+        return home.format(city=city_slug(location) or DEFAULT_CITY)
     return home
 
 LOGIN_URL = re.compile(r"login|signin|sign-in|/auth\b|otp", re.I)
