@@ -60,7 +60,9 @@ def jev():
         return None
     try:
         from typesafe_sdk import TypeSafeClient
-        return TypeSafeClient()
+        # Pinned to the latest Jev on purpose (the SDK default could change under us); TYPESAFE_MODEL=jev-preview
+        # tries the next version before it is promoted.
+        return TypeSafeClient(model=(os.getenv("TYPESAFE_MODEL") or "").strip() or "jev-latest")
     except Exception as e:
         log.warning("Jev unavailable (%s): using Claude for every step", e)
         return None
@@ -158,6 +160,22 @@ _FIND_OTP_JS = """() => {
 }"""
 
 _DOM_SIG_JS = "() => document.body ? document.body.innerText.length + ':' + document.getElementsByTagName('*').length : ''"
+# Marks the leaf element whose text is exactly the wanted page number inside a row of 3+ page numbers.
+_MARK_PAGER_JS = """(want) => {
+  document.querySelectorAll('[data-ea-pager]').forEach(e => e.removeAttribute('data-ea-pager'));
+  const isNum = el => el.children.length === 0 && /^\\s*\\d{1,3}\\s*$/.test(el.textContent || '');
+  const nums = [...document.querySelectorAll('body *')].filter(isNum);
+  for (const el of nums) {
+    if (parseInt(el.textContent, 10) !== want) continue;
+    const row = el.parentElement;
+    if (!row) continue;
+    const siblings = [...row.children].filter(isNum);
+    const r = el.getBoundingClientRect();
+    if (siblings.length >= 3 && r.width > 0 && r.height > 0) { el.setAttribute('data-ea-pager', '1'); return true; }
+  }
+  return false;
+}"""
+
 
 
 _REF_FRAMES: dict[str, object] = {}  # ref -> Playwright Frame, rebuilt by every snapshot()
@@ -425,6 +443,7 @@ class Discovery:
         self.last_key = None
         self.asks = 0
         self.verify_refusals = 0
+        self.page_no = 1  # the pager page we are on; the next click goes to page_no + 1
         self.last_probs: dict = {}
         self.jev_unsure = False
         self.last_action: str | None = None
@@ -560,7 +579,41 @@ class Discovery:
 
     def order_responses(self) -> int:
         """Responses that really carry order records (not just an 'order' in the URL, e.g. an ads call)."""
-        return sum(any(sc >= 3 for sc, *_ in _collections(c["json"])) for c in self.capture.items)
+        items = self.capture.items if self.capture is not None else []
+        return sum(any(sc >= 3 for sc, *_ in _collections(c["json"])) for c in items)
+
+    def order_pages(self) -> int:
+        """How many DIFFERENT pages of orders have arrived: responses to one endpoint with different content. A page
+        that makes the same request more than once (Zomato makes three for page 1) counts as one."""
+        groups: dict[tuple, set] = {}
+        for c in (self.capture.items if self.capture is not None else []):
+            if any(sc >= 3 for sc, *_ in _collections(c["json"])):
+                key = (c.get("method"), urlsplit(c["url"]).path)
+                groups.setdefault(key, set()).add(hash(json.dumps(c["json"], sort_keys=True, default=str)))
+        return max((len(v) for v in groups.values()), default=0)
+
+    def _click_next_page_number(self) -> bool:
+        """Click the next page number of a pager by its text, scrolling to it first: the pager may sit below the
+        fold or under a sticky bar, where the clickable-element snapshot does not list it. A row of 3+ numbers
+        that contains the next number counts as a pager; a click that is covered is sent as a script click."""
+        want = self.page_no + 1
+        try:
+            found = self.page.evaluate(_MARK_PAGER_JS, want)
+        except Exception:
+            return False
+        if not found:
+            return False
+        loc = self.page.locator('[data-ea-pager="1"]').first
+        try:
+            loc.scroll_into_view_if_needed(timeout=2500)
+            loc.click(timeout=2500)
+        except Exception:
+            try:
+                loc.evaluate("el => el.click()")  # covered by a sticky bar: dispatch the click on the element
+            except Exception:
+                return False
+        self.page_no = want
+        return True
 
     def auto_load_more(self) -> bool:
         """Code, not the model, clicks a visible 'Load More' / 'Next' / next page number (as with the OTP)."""
@@ -568,21 +621,29 @@ class Discovery:
         nums = sorted(int(e["text"].strip()) for e in elements if PAGE_NUMBER.match(e.get("text") or ""))
         target = (next((e for e in elements if MORE_BUTTON.search(e.get("text") or "")), None) or
                   next((e for e in elements if nums and (e.get("text") or "").strip() == str(nums[0])), None))
-        if not target:
-            return False
         before = self.order_responses()
         self.click(target["ref"])
         settle(self.page)
         self.history.append(f"system clicked {describe(target)} to load more orders")
         log.info("[%s] auto-clicked %s", self.site, mask_log(describe(target), self.secrets))
-        return self.order_responses() > before
+        if not target:
+            if not self._click_next_page_number():
+                return False
+            settle(self.page)
+            self.history.append(f"system clicked page {self.page_no} of the pager to load more orders")
+            log.info("[%s] auto-clicked pager page %d", self.site, self.page_no)
+            self.loads += 1
+            return self.order_responses() > before or self.order_pages() >= 2
+        if PAGE_NUMBER.match(target.get("text") or ""):
+            self.page_no = int(target["text"].strip())
+        return self.order_responses() > before or self.order_pages() >= 2
 
     def premature(self) -> str | None:
         # Scrolling alone proves nothing (Zepto pages with a "Load More" button): more order data must arrive.
         # After two refusals accept anyway - the history may really be a single page.
-        if (self.loads >= 2 and self.order_responses() >= 2) or self.refusals >= 2:
+        if (self.loads >= 2 and self.order_pages() >= 2) or self.refusals >= 2:
             return None
-        if self.auto_load_more() and self.order_responses() >= 2:
+        if self.auto_load_more() and self.order_pages() >= 2:
             return None
         self.refusals += 1
         return ("no further page of orders has loaded yet; click a 'Load More' / 'Show more' button or the next "
