@@ -55,11 +55,13 @@ export interface Connection {
   site: SiteId | string;
   status: ConnectionStatus | string;
   last_synced_at: string | null;
+  /** Set when the user logged in but the site has no orders recipe yet; cleared by the first sync. */
+  waiting_for_setup_at?: string | null;
 }
 
 /** Columns read from `jobs`. Never `payload` (it carries the phone while a connect runs). */
 export const JOB_COLUMNS = "id, site, type, status, progress, error, started_at";
-export const CONNECTION_COLUMNS = "site, status, last_synced_at";
+export const CONNECTION_COLUMNS = "site, status, last_synced_at, waiting_for_setup_at";
 
 const TERMINAL: ReadonlySet<string> = new Set(["done", "failed"]);
 
@@ -86,6 +88,7 @@ function toConnection(row: Record<string, unknown>): Connection {
     site: String(row.site ?? ""),
     status: String(row.status ?? ""),
     last_synced_at: typeof row.last_synced_at === "string" ? row.last_synced_at : null,
+    waiting_for_setup_at: typeof row.waiting_for_setup_at === "string" ? row.waiting_for_setup_at : null,
   };
 }
 

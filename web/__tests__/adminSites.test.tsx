@@ -126,3 +126,23 @@ describe("SitesPanel jump nav", () => {
     ]);
   });
 });
+
+describe("SitesPanel users waiting for setup", () => {
+  beforeEach(() => api.apiFetch.mockReset());
+
+  it("shows N users waiting on the order history row", async () => {
+    show(site({ site: "zomato", version: null, waiting_users: 3 }));
+    expect(await screen.findByText("3 users waiting")).toBeInTheDocument();
+  });
+
+  it("says 1 user waiting for one", async () => {
+    show(site({ site: "zomato", version: null, waiting_users: 1 }));
+    expect(await screen.findByText("1 user waiting")).toBeInTheDocument();
+  });
+
+  it("shows no badge when nobody waits", async () => {
+    show(site({ waiting_users: 0 }));
+    await screen.findByText("Healthy");
+    expect(screen.queryByText(/waiting/)).toBeNull();
+  });
+});

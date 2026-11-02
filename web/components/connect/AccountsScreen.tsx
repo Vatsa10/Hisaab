@@ -216,6 +216,7 @@ export function AccountsScreen({
                 refreshing={refreshing === app.id}
                 refreshLeft={limits?.refresh_left[app.id]}
                 now={now}
+                isAdmin={isAdmin}
               />
             );
           })}

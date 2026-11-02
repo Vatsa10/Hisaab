@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { ReactNode } from "react";
 import type { AppInfo } from "@/lib/apps";
 import { cn } from "@/lib/cn";
@@ -7,13 +8,15 @@ import type { Connection } from "@/lib/jobs";
 import { relativeTime } from "./copy";
 import { RefreshIcon, Spinner } from "./icons";
 
-export type RowState = "connect" | "synced" | "syncing" | "needs_login";
+export type RowState = "connect" | "synced" | "syncing" | "needs_login" | "waiting";
 
 /** What a row shows, from the connection row and whether a job for the app is running. */
 export function rowState(connection: Connection | undefined, busy = false): RowState {
   if (busy || connection?.status === "syncing") return "syncing";
   if (connection?.status === "needs_login") return "needs_login";
-  if (connection?.status === "connected") return "synced";
+  if (connection?.status === "connected") {
+    return connection.waiting_for_setup_at && !connection.last_synced_at ? "waiting" : "synced";
+  }
   // "error" keeps showing the last good sync if there was one; a connect that never worked is
   // simply not connected yet.
   if (connection?.status === "error" && connection.last_synced_at) return "synced";
@@ -32,6 +35,8 @@ export interface AppRowProps {
   refreshing?: boolean;
   /** Manual refreshes left today for this app; unknown (undefined) until the limits load. */
   refreshLeft?: number;
+  /** The signed-in user is an admin: a connection waiting for setup gets a "Set up" button. */
+  isAdmin?: boolean;
   /** Clock for "Synced 2h ago" (the screen ticks it every minute). */
   now?: number;
 }
@@ -49,7 +54,7 @@ function Name({ children }: { children: ReactNode }) {
 }
 
 /** One app on the Accounts screen: logo, name and its state, with the action that state needs. */
-export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh, refreshing, refreshLeft, now }: AppRowProps) {
+export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh, refreshing, refreshLeft, now, isAdmin }: AppRowProps) {
   const state = rowState(connection, busy);
 
   if (state === "connect" || state === "needs_login") {
@@ -106,6 +111,33 @@ export function AppRow({ app, connection, busy, onOpenJob, onConnect, onRefresh,
         ) : (
           <div className="flex items-center gap-3 pl-4">{body}</div>
         )}
+      </li>
+    );
+  }
+
+  if (state === "waiting") {
+    return (
+      <li className="group flex items-start gap-3 pl-4">
+        <span className="pt-3">
+          <Logo app={app} />
+        </span>
+        <span className={cn(INNER, "flex-col items-stretch gap-1 py-3 pr-4")}>
+          <span className="flex items-center gap-3">
+            <Name>{app.name}</Name>
+            <span className="text-label font-semibold text-accent">✓ Connected</span>
+          </span>
+          <span className="text-label text-ink-muted">
+            Connected. Setting up {app.name}. We&apos;ll import your orders as soon as it&apos;s ready.
+          </span>
+          {isAdmin ? (
+            <Link
+              href="/admin?tab=sites"
+              className="mt-1 inline-flex min-h-11 min-w-11 items-center justify-center self-start rounded-control bg-line-soft px-4 text-label font-semibold text-ink transition-colors duration-150 active:bg-canvas"
+            >
+              Set up {app.name}
+            </Link>
+          ) : null}
+        </span>
       </li>
     );
   }

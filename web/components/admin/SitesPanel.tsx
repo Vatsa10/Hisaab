@@ -215,6 +215,12 @@ function SiteCard({ site: s, group, learnLabel, pause, onChanged, onForbidden }:
         {cart && s.pending_approval ? <Badge tone="warn">Waiting for approval</Badge> : healthBadge(s)}
       </div>
 
+      {group === "orders" && (s.waiting_users ?? 0) > 0 ? (
+        <Badge tone="warn" className="mt-3">
+          {s.waiting_users} {s.waiting_users === 1 ? "user" : "users"} waiting
+        </Badge>
+      ) : null}
+
       {cooling ? (
         <Badge tone="warn" className="mt-3">
           Cooling down until {hhmm(s.cooldown_until!)} · level {s.backoff_level ?? 0}

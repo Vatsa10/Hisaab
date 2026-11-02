@@ -57,6 +57,8 @@ export interface SiteHealth {
   slow_jobs_window?: number;
   /** Cart rows only: a cart recipe is waiting in Approvals. */
   pending_approval?: boolean;
+  /** Orders rows only: connected users waiting for this site to be set up. */
+  waiting_users?: number;
 }
 
 export interface Invite {

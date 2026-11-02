@@ -7,6 +7,7 @@ export const metadata: Metadata = { title: "Admin" };
  * Admin view. All data comes from the API's /admin/* routes, which check that the caller is an
  * admin (403 "admin only" otherwise); the page itself holds no privileged key or data.
  */
-export default function AdminPage() {
-  return <AdminScreen />;
+export default async function AdminPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+  const { tab } = await searchParams;
+  return <AdminScreen initialTab={tab === "sites" ? "sites" : undefined} />;
 }

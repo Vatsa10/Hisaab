@@ -21,7 +21,7 @@ MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augus
 def due_connections(conn, now: datetime, interval_h: int) -> list[tuple[str, str]]:
     """Connections whose scheduled sync is due: connected (or errored after at least one sync), last synced more than
     interval_h ago, no sync/connect job active or created within interval_h (so a failed run is not retried the same
-    interval), an orders recipe that is not unhealthy or paused (no recipe row does not exclude), and a site that is not
+    interval), an orders recipe that exists and is not unhealthy or paused (a site with no recipe would only fail as no_recipe), and a site that is not
     cooling down after throttling."""
     iv = timedelta(hours=interval_h)
     rows = conn.execute(
@@ -30,8 +30,8 @@ def due_connections(conn, now: datetime, interval_h: int) -> list[tuple[str, str
         "AND (c.last_synced_at IS NULL OR c.last_synced_at < %s) "
         "AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.user_id = c.user_id AND j.site = c.site "
         "  AND j.type IN ('sync','connect') AND (j.status IN ('queued','running') OR j.created_at > %s)) "
-        "AND NOT EXISTS (SELECT 1 FROM recipes r WHERE r.site = c.site AND r.kind = 'orders' "
-        "  AND (NOT r.healthy OR r.paused)) "
+        "AND EXISTS (SELECT 1 FROM recipes r WHERE r.site = c.site AND r.kind = 'orders' "
+        "  AND r.healthy AND NOT r.paused) "
         "ORDER BY c.last_synced_at NULLS FIRST, c.user_id, c.site",
         (now - iv, now - iv)).fetchall()
     return [(str(u), site) for u, site in rows if site_health.cooldown_until(conn, site, now) is None]

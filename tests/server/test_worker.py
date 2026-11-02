@@ -1,4 +1,5 @@
 import dataclasses
+from datetime import datetime, timezone
 import threading
 import time
 
@@ -192,6 +193,41 @@ def test_recipe_error_keeps_connection_status(pg, monkeypatch):
     worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
     assert pg.execute("select status from connections").fetchone() == ("connected",)
     assert pg.execute("select status, error from jobs").fetchone() == ("failed", "no_recipe: no recipe for zepto")
+
+
+def test_connect_without_orders_recipe_is_a_success_waiting_for_setup(pg, monkeypatch):
+    monkeypatch.setattr(worker.sync, "login", lambda *a, **k: True)
+
+    def no_recipe(*a, **k):
+        raise worker.sync.RecipeError("no recipe for zomato; an admin must learn it")
+    monkeypatch.setattr(worker.sync, "fetch_orders", no_recipe)
+    jobs.enqueue(pg, A, "connect", "zomato", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert pg.execute("select status, error, progress->>'stage' from jobs").fetchone() == (
+        "done", None, "waiting_for_setup")
+    assert pg.execute("select status, last_synced_at, waiting_for_setup_at is not null from connections"
+                      ).fetchone() == ("connected", None, True)
+
+
+def test_a_later_good_sync_clears_waiting(pg, monkeypatch):
+    store.set_connection(pg, A, "zomato", status="connected", waiting_for_setup_at=datetime.now(timezone.utc))
+    monkeypatch.setattr(worker.sync, "fetch_orders", lambda *a, **k: [order("1")])
+    jobs.enqueue(pg, A, "sync", "zomato")
+    worker.run_job(jobs.claim(pg, "w", ("sync",)), pg, settings_for_tests())
+    assert pg.execute("select last_synced_at is not null, waiting_for_setup_at from connections"
+                      ).fetchone() == (True, None)
+
+
+def test_connect_with_a_recipe_that_errors_still_fails_as_no_recipe(pg, monkeypatch):
+    store.put_recipe(pg, "zomato", {"orders_page_url": "https://www.zomato.com/x"})
+    monkeypatch.setattr(worker.sync, "login", lambda *a, **k: True)
+
+    def bad(*a, **k):
+        raise worker.sync.RecipeError("recipe is broken")
+    monkeypatch.setattr(worker.sync, "fetch_orders", bad)
+    jobs.enqueue(pg, A, "connect", "zomato", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert pg.execute("select status from jobs").fetchone() == ("failed",)
 
 
 def test_exception_message_masks_phone(pg, monkeypatch):

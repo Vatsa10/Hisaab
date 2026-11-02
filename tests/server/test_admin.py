@@ -107,3 +107,10 @@ def test_site_health_paused_reason_auto_manual(pg):
     recipe_admin.resume_site(pg, "zepto", "orders")
     rows = {r["site"]: r for r in admin.site_health(pg, NOW, A) if r["kind"] == "orders"}
     assert rows["zepto"]["paused_reason"] is None
+
+
+def test_site_health_counts_users_waiting_for_setup(pg):
+    pg.execute("insert into connections (user_id, site, status, waiting_for_setup_at) values (%s,'zomato','connected',now())", (A,))
+    pg.execute("insert into connections (user_id, site, status) values (%s,'zomato','connected')", (B,))
+    rows = {r["site"]: r for r in admin.site_health(pg, NOW, A) if r["kind"] == "orders"}
+    assert rows["zomato"]["waiting_users"] == 1 and rows["zepto"]["waiting_users"] == 0

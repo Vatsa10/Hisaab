@@ -309,7 +309,7 @@ def _do_sync(job: jobs.Job, conn, db_site: str, sub_platform: str | None, profil
             "AND coalesce(status, '') <> ALL(%s)",
             (job.user_id, db_site, [o["order_id"] for o in orders], list(_NOT_COUNTED))).fetchone()[0]
         store.set_connection(conn, job.user_id, db_site, status="connected",
-                             last_synced_at=datetime.now(timezone.utc))
+                             last_synced_at=datetime.now(timezone.utc), waiting_for_setup_at=None)
     jobs.set_progress(conn, job.id, stage="synced", orders_found=n, amount_found=round(float(total), 2),
                       phase_ms=timing.current_phase_ms())
     return n, float(total)
@@ -1109,9 +1109,22 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                 with jobs.owned(conn, job.id, job.worker_id):
                     store.set_connection(conn, job.user_id, db_site, status="connected", needs_login_at=None)
                 save_profile()  # a good login is kept even if the first sync below fails
-            n, total = _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
-                                fetch=fake_sites.fetch_orders if fake else sync.fetch_orders,
-                                block_media=job.type == "sync" and s.sync_block_media)  # R12: user syncs only
+            try:
+                n, total = _do_sync(job, conn, db_site, sub_platform, profile_dir, proxy_server,
+                                    fetch=fake_sites.fetch_orders if fake else sync.fetch_orders,
+                                    block_media=job.type == "sync" and s.sync_block_media)  # R12: user syncs only
+            except sync.RecipeError:
+                if job.type != "connect" or store.get_recipe(conn, job.site) is not None:
+                    raise
+                # Logged in, but no orders recipe exists yet: a success. The login stays saved; the connection
+                # waits, and publishing the recipe syncs it (recipe_admin.enqueue_waiting_syncs).
+                with jobs.owned(conn, job.id, job.worker_id):
+                    store.set_connection(conn, job.user_id, db_site, status="connected", needs_login_at=None,
+                                         waiting_for_setup_at=datetime.now(timezone.utc))
+                    jobs.set_progress(conn, job.id, stage="waiting_for_setup")
+                save_profile()
+                jobs.finish(conn, job.id, worker_id=job.worker_id)
+                return
             site_health.record_success(conn, job.site)
             save_profile()
             _refresh_addresses(job, conn, db_site, profile_dir, proxy_server, fake)

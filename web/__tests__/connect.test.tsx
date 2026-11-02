@@ -484,6 +484,40 @@ describe("AccountsScreen", () => {
     expect(await screen.findByRole("button", { name: "I understand" })).toBeInTheDocument();
   });
 
+  it("a connection waiting for setup says so, with no error and no refresh", () => {
+    const rows: Connection[] = [
+      { site: "zomato", status: "connected", last_synced_at: null, waiting_for_setup_at: new Date().toISOString() },
+    ];
+    render(<AccountsScreen initialConnections={rows} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    expect(
+      screen.getByText("Connected. Setting up Zomato. We'll import your orders as soon as it's ready."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/something went wrong/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Refresh Zomato/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Set up Zomato" })).toBeNull();
+  });
+
+  it("an admin gets a Set up button that opens Admin > Sites", async () => {
+    const me = await import("@/lib/me");
+    vi.mocked(me.getMe).mockResolvedValueOnce({ user_id: "u", email: "a@b.co", is_admin: true });
+    const rows: Connection[] = [
+      { site: "zomato", status: "connected", last_synced_at: null, waiting_for_setup_at: new Date().toISOString() },
+    ];
+    render(<AccountsScreen initialConnections={rows} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    const link = await screen.findByRole("link", { name: "Set up Zomato" });
+    expect(link).toHaveAttribute("href", "/admin?tab=sites");
+    expect(link.className).toContain("min-h-11");
+  });
+
+  it("a synced connection is not shown as waiting", () => {
+    const rows: Connection[] = [
+      { site: "zomato", status: "connected", last_synced_at: new Date().toISOString(), waiting_for_setup_at: "2026-10-01T00:00:00Z" },
+    ];
+    render(<AccountsScreen initialConnections={rows} initialConsents={[]} initialProfile={null} initialJobs={[]} />);
+    expect(screen.queryByText(/Setting up/)).toBeNull();
+    expect(screen.getByText("✓ Synced just now")).toBeInTheDocument();
+  });
+
   it("shows the promise line, the Instamart note and live connection updates", () => {
     const { unmount } = render(
       <AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />,
@@ -790,7 +824,7 @@ describe("lib/jobs watchJob / watchConnections", () => {
 
   it("watchConnections re-reads the user's connections on every change and on (re)connect", async () => {
     const real = await vi.importActual<typeof import("@/lib/jobs")>("@/lib/jobs");
-    const rows = [{ site: "zepto", status: "connected", last_synced_at: "2026-10-27T10:00:00Z" }];
+    const rows = [{ site: "zepto", status: "connected", last_synced_at: "2026-10-27T10:00:00Z", waiting_for_setup_at: null }];
     const { client: base, channels } = fakeClient({ connections: rows });
     const client = { ...base, auth: { getSession: async () => ({ data: { session: null } }) } };
     const onChange = vi.fn();

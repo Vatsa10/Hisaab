@@ -291,6 +291,8 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
              Jsonb(diff(current, clean)), "pending" if hold else "auto_applied", job_id, base_version,
              bool(hold)),
         ).fetchone()[0]
+    if not hold and kind == "orders":
+        enqueue_waiting_syncs(conn, site)
     return {"approval_id": str(approval_id), "status": "pending" if hold else "auto_applied", "version": version}
 
 
@@ -343,7 +345,27 @@ def decide(conn, approval_id: str, decision: str, admin_user_id: str) -> str:
                          (status, str(admin_user_id), row["id"]))
     if failure is not None:  # raised after the commit, so the expiry is kept
         raise failure
+    if status == "approved" and row["kind"] == "orders" and not row["live_request"]:
+        enqueue_waiting_syncs(conn, row["site"])
     return status
+
+
+def enqueue_waiting_syncs(conn, site: str) -> int:
+    """A site's orders recipe was just published: sync every connected user who has never synced (they connected
+    while it had no recipe). Already-active jobs and deleted users are skipped. Returns how many were queued."""
+    users = [str(r[0]) for r in conn.execute(
+        "SELECT user_id FROM connections WHERE site=%s AND status='connected' AND last_synced_at IS NULL "
+        "ORDER BY user_id", (site,))]
+    queued = 0
+    for user_id in users:
+        try:
+            jobs.enqueue(conn, user_id, "sync", site, {"trigger": "recipe_ready"})
+            queued += 1
+        except jobs.Conflict:
+            pass
+        except jobs.NoSuchUser:
+            continue
+    return queued
 
 
 # ---------------------------------------------------------------- site health

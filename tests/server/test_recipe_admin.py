@@ -1,4 +1,5 @@
 """Recipe approvals (live POST-allowlist decisions and pending learned recipes), site health and admin learners."""
+from datetime import datetime, timezone
 import threading
 import time
 
@@ -369,3 +370,63 @@ def test_rejected_post_is_not_asked_again(pg, pg2, pg_listen):
     other = recipe_admin.make_approver(pg_listen, pg, jid, "blinkit", "orders", timeout_s=0.2)
     other([NEW_POST])   # another site is asked
     assert pg.execute("select count(*) from recipe_approvals").fetchone()[0] == n + 1
+
+
+# ---------------------------------------------------------------- waking users who connected before the recipe
+
+def _waiting(pg, user, site="zepto", synced=False):
+    pg.execute("insert into auth.users(id) values (%s) on conflict do nothing", (user,))
+    pg.execute("insert into connections (user_id, site, status, last_synced_at) values (%s,%s,'connected',%s)",
+               (user, site, datetime.now(timezone.utc) if synced else None))
+
+
+def _syncs(pg):
+    return pg.execute("select user_id::text, payload->>'trigger' from jobs where type='sync' order by user_id"
+                      ).fetchall()
+
+
+def test_apply_learned_syncs_users_who_never_synced(pg):
+    C = "00000000-0000-0000-0000-00000000000c"
+    _waiting(pg, A)
+    _waiting(pg, B, synced=True)
+    _waiting(pg, C, site="blinkit")
+    store.put_recipe(pg, "zepto", BASE)
+    res = recipe_admin.apply_learned(pg, "zepto", "orders", BASE, set(), None, "learned")
+    assert res["status"] == "auto_applied" and _syncs(pg) == [(A, "recipe_ready")]
+
+
+def test_a_pending_recipe_syncs_nobody_until_approved(pg):
+    _waiting(pg, A)
+    learned = BASE | {"read_post_allowlist": [NEW_POST]}
+    res = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")
+    assert res["status"] == "pending" and _syncs(pg) == []
+    recipe_admin.decide(pg, res["approval_id"], "approve", A)
+    assert _syncs(pg) == [(A, "recipe_ready")]
+
+
+def test_rejecting_syncs_nobody_and_a_queued_sync_is_not_duplicated(pg):
+    _waiting(pg, A)
+    learned = BASE | {"read_post_allowlist": [NEW_POST]}
+    res = recipe_admin.apply_learned(pg, "zepto", "orders", learned, set(), None, "learned")
+    recipe_admin.decide(pg, res["approval_id"], "reject", A)
+    assert _syncs(pg) == []
+    jobs.enqueue(pg, A, "sync", "zepto")
+    store.put_recipe(pg, "zepto", BASE)
+    recipe_admin.apply_learned(pg, "zepto", "orders", BASE, set(), None, "learned")
+    assert len(_syncs(pg)) == 1
+
+
+def test_a_deleted_user_does_not_stop_the_others(pg):
+    _waiting(pg, A)
+    _waiting(pg, B)
+    real = jobs.enqueue
+
+    def flaky(conn, user_id, *a, **k):
+        if user_id == A:
+            raise jobs.NoSuchUser(user_id)
+        return real(conn, user_id, *a, **k)
+    import pytest
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(jobs, "enqueue", flaky)
+        assert recipe_admin.enqueue_waiting_syncs(pg, "zepto") == 1
+    assert _syncs(pg) == [(B, "recipe_ready")]

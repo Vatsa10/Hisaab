@@ -16,11 +16,13 @@ def S(**kw):
     return Settings(**base)
 
 
-def conn_row(pg, site="zepto", status="connected", age_h: float | None = 25, user=U):
+def conn_row(pg, site="zepto", status="connected", age_h: float | None = 25, user=U, with_recipe=True):
     last = None if age_h is None else NOW - timedelta(hours=age_h)
     pg.execute("insert into auth.users(id) values (%s) on conflict do nothing", (user,))  # enqueue needs the user
     pg.execute("insert into connections (user_id, site, status, last_synced_at) values (%s,%s,%s,%s)",
                (user, site, status, last))
+    if with_recipe:  # a site with no orders recipe is never scheduled
+        pg.execute("insert into recipes (site, kind, recipe) values (%s,'orders','{}') on conflict do nothing", (site,))
 
 
 def jobs(pg):
@@ -60,17 +62,25 @@ def test_never_synced_connected_is_due(pg):
 
 
 def test_tick_skips_unhealthy_or_paused_recipe(pg):
-    conn_row(pg, "zepto")
-    conn_row(pg, "blinkit")
-    conn_row(pg, "zomato")
+    conn_row(pg, "zepto", with_recipe=False)
+    conn_row(pg, "blinkit", with_recipe=False)
+    conn_row(pg, "zomato", with_recipe=False)
     pg.execute("insert into recipes (site, kind, recipe, healthy) values ('zepto','orders','{}',false)")
     pg.execute("insert into recipes (site, kind, recipe, paused) values ('blinkit','orders','{}',true)")
     pg.execute("insert into recipes (site, kind, recipe) values ('zomato','orders','{}')")
     assert scheduler.due_connections(pg, NOW, 24) == [(U, "zomato")]
-    # an unhealthy search recipe does not matter, and a missing orders recipe does not exclude
+    # an unhealthy search recipe does not matter, but a missing orders recipe excludes
     pg.execute("delete from recipes")
     pg.execute("insert into recipes (site, kind, recipe, healthy) values ('zepto','search','{}',false)")
-    assert len(scheduler.due_connections(pg, NOW, 24)) == 3
+    assert scheduler.due_connections(pg, NOW, 24) == []
+    pg.execute("insert into recipes (site, kind, recipe) values ('zepto','orders','{}')")
+    assert scheduler.due_connections(pg, NOW, 24) == [(U, "zepto")]
+
+
+def test_tick_does_not_enqueue_syncs_for_a_site_without_an_orders_recipe(pg):
+    conn_row(pg, "zomato", age_h=None, with_recipe=False)   # connected, waiting for setup
+    r = scheduler.tick(pg, S(), NOW)
+    assert r["enqueued"] == 0 and jobs(pg) == []
 
 
 def test_failed_scheduled_sync_not_retried_same_day(pg):
