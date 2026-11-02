@@ -95,7 +95,8 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
     with open_site(site, login_mode=True, profile_dir=profile_dir, location=location,
                    proxy_server=proxy_server) as (_, page, guard, capture):
         try:
-            browser.goto(page, home)
+            with timing.Phase("login_open"):
+                browser.goto(page, home)
         except Exception as e:  # e.g. a bot-filter 403; the agent backs off and retries from the error page
             log.warning("%s home page failed to load: %s", site, redact_path(str(e).splitlines()[0]))
         done = None

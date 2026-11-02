@@ -23,6 +23,7 @@ import recipes
 from browser import SITES, SessionExpired, SiteThrottled, fetch_in_page, goto, home_url, scrub_headers
 from cart_guard import forbidden_category
 from guard import BLOCKED_URL, redact_url
+from server import timing
 
 log = logging.getLogger("agent")
 
@@ -44,6 +45,10 @@ BLOCK_BODY = re.compile(r"max challenge attempts|access denied|you don't have au
 MORE_BUTTON = re.compile(r"^\s*((load|show|view|see)\s+more(\s+orders)?|next( page)?|older orders|previous orders|[›»>])\s*$",
                          re.I)
 PAGE_NUMBER = re.compile(r"^\s*([2-9]|[1-9]\d)\s*$")  # numbered pagers (Zomato: 1 2 3 ... 18)
+# Login fast paths (code, not model): the phone input and the one button that sends the OTP.
+PHONE_FIELD = re.compile(r"phone|mobile", re.I)
+SEND_BUTTON = re.compile(r"\b(send|get otp|continue|next|log ?in|login)\b", re.I)
+SETTLE_ACTIONS = {"click", "navigate", "type_value", "close_popup"}  # the page may still be moving after these
 
 
 @functools.cache
@@ -228,6 +233,22 @@ def settle(page, max_ms: int = 3000) -> None:
         last = sig
 
 
+def settle_dom(page, max_ms: int = 2000, poll_ms: int = 150) -> int:
+    """Poll the DOM signature until two reads agree (or max_ms passes); returns the ms waited."""
+    last, waited = None, 0
+    while waited < max_ms:
+        try:
+            sig = page.evaluate(_DOM_SIG_JS)
+        except Exception:  # navigation in progress
+            sig = None
+        if sig is not None and sig == last:
+            return waited
+        last = sig
+        page.wait_for_timeout(poll_ms)
+        waited += poll_ms
+    return waited
+
+
 def click_ref(page, ref: str) -> str:
     """Click like a user: normal click, else a real mouse click at the element's centre, else a DOM click."""
     loc = locate(page, ref)
@@ -301,6 +322,12 @@ def wheel(page) -> None:
     page.mouse.move(vp["width"] / 2, vp["height"] / 2)
     page.mouse.wheel(0, 2500)
     settle(page, 2000)
+
+
+def _is_phone_input(e: dict) -> bool:
+    if e.get("type") == "tel" or (e.get("autocomplete") or "").lower().startswith("tel"):
+        return True
+    return any(PHONE_FIELD.search(e.get(k) or "") for k in ("name", "placeholder", "label"))
 
 
 def describe(el: dict) -> str:
@@ -399,6 +426,8 @@ class Discovery:
         self.asks = 0
         self.verify_refusals = 0
         self.last_probs: dict = {}
+        self.jev_unsure = False
+        self.last_action: str | None = None
         if goal := SITES[site].get("goal"):
             self.GOAL = f"{self.GOAL} Target: {goal}"
         self.done = None
@@ -568,6 +597,10 @@ class Discovery:
         if not self.snap["overlay"] and shows_login_button(self.snap["elements"]):
             self.done = {"success": False, "note": "LOGGED_OUT", "url": self.page.url}
 
+    def fast_decision(self):
+        """A step code can take without any model; None defers to Jev/Claude."""
+        return None
+
     def blocked_page(self) -> bool:
         if self.page.url.startswith("chrome-error://") or BLOCK_TITLE.search(self.page.title()):
             return True
@@ -623,6 +656,7 @@ class Discovery:
         }
 
     def decide_jev(self):
+        self.jev_unsure = False
         client = jev()
         if client is None:
             return None
@@ -649,7 +683,8 @@ class Discovery:
         conf = min(kind.confidence, item.confidence) if targeted and item else kind.confidence
         floor = JEV_SAFE_MIN_CONFIDENCE if kind.choice in SAFE_KINDS else JEV_MIN_CONFIDENCE
         if conf < floor or (targeted and not item):
-            log.info("Jev unsure (%s %.2f); asking Claude", kind.choice, conf)
+            log.info("Jev unsure (%s %.2f)", kind.choice, conf)
+            self.jev_unsure = True
             return None
         ref = item.choice if item else None
         call = {
@@ -715,7 +750,19 @@ class Discovery:
                 break
             t0 = time.time()
             self.last_probs = {}
-            decision = None if self.force_llm else self.decide_jev()
+            decision = self.fast_decision()
+            if decision is None and not self.force_llm:
+                decision = self.decide_jev()
+                if decision is None and self.jev_unsure and self.last_action in SETTLE_ACTIONS:
+                    # Right after a click the page is often still loading: let the DOM settle and look once
+                    # more instead of paying for a Claude call that would only say "wait".
+                    settle_dom(self.page)
+                    self.observe()
+                    if self.done:
+                        break
+                    decision = self.fast_decision() or self.decide_jev()
+            if decision is None:
+                log.info("[%s] asking Claude", self.site)
             name, args, source = decision or self.decide_llm()
             t_decide = time.time() - t0
             target = mask(self._target(args), self.secrets)
@@ -730,6 +777,7 @@ class Discovery:
             except Exception as e:
                 result = {"error": f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"}
             # A failure, or the same action on the same page again, means the fast path is looping: let Claude think.
+            self.last_action = name
             key = (name, target, self.page.url)
             self.force_llm = "error" in result or (key == self.last_key and name not in ("scroll", "wait"))
             self.last_key = key
@@ -785,6 +833,9 @@ class LoginAgent(Discovery):
         self.secrets["PHONE"] = phone
         self.location, self.dry_run = location, dry_run
         self.phone_typed = self.otp_entered = False
+        self.sent_clicked = self.login_clicked = False
+        self.started = time.monotonic()
+        self.phone_at: float | None = None
         self.GOAL = (f"Log in to the user's own {site} account with phone + OTP (set the delivery location first if a "
                      "location popup asks), then open the order history page.")
 
@@ -820,8 +871,42 @@ class LoginAgent(Discovery):
                 self.refs = {e["ref"]: e for e in self.snap["elements"]}
                 return
 
+    def fast_decision(self):
+        """Deterministic login steps: type the phone into the one empty phone input, click the one button that
+        sends the OTP, or click the one Log in button. Each fires at most once; anything ambiguous (more than
+        one candidate), a repeat or an earlier failure goes to the model."""
+        if self.otp_entered or self.done or self.force_llm:
+            return None
+        els = self.snap["elements"]
+        if not self.phone_typed:
+            if any(e.get("tag") == "input" and e.get("filled") and _is_phone_input(e) for e in els):
+                return None  # something already typed there: let the model look
+            phones = [e for e in els if e.get("tag") == "input" and _is_phone_input(e)]
+            if len(phones) == 1:
+                return "type_value", {"element_ref": phones[0]["ref"], "field": "PHONE"}, "fast"
+            if phones or self.login_clicked:
+                return None
+            logins = [e for e in els if LOGIN_BUTTON.match(e.get("text") or e.get("label") or "")
+                      and not self.refuse_click(e)]
+            if len(logins) == 1:
+                self.login_clicked = True
+                return "click", {"element_ref": logins[0]["ref"]}, "fast"
+            return None
+        if self.sent_clicked:
+            return None
+        sends = [e for e in els if (e.get("tag") == "button" or e.get("role") == "button"
+                                    or (e.get("tag") == "input" and e.get("type") == "submit"))
+                 and SEND_BUTTON.search(e.get("text") or e.get("label") or "") and not self.refuse_click(e)]
+        if len(sends) == 1:
+            self.sent_clicked = True
+            return "click", {"element_ref": sends[0]["ref"]}, "fast"
+        return None
+
     def enter_otp(self, frame=None) -> None:
         frame = frame or self.page.main_frame
+        now = time.monotonic()
+        timing.mark("login_otp_prompt", now - (self.phone_at or self.started))
+        log.info("[%s] login: %.1fs to OTP prompt", self.site, now - self.started)
         try:
             otp = self.prompt(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ", "otp").strip()
         except TimeoutError:
@@ -878,6 +963,8 @@ class LoginAgent(Discovery):
                 loc.fill("")
                 self.page.keyboard.type(value, delay=40)
             self.phone_typed = True
+            self.phone_at = time.monotonic()
+            timing.mark("login_phone", self.phone_at - self.started)
         else:
             self.page.keyboard.type(value, delay=40)  # autocomplete boxes / split OTP boxes want keystrokes
             if field == "OTP":

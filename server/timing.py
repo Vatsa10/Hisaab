@@ -70,6 +70,13 @@ def Phase(name: str):
             yield
 
 
+def mark(name: str, seconds: float) -> None:
+    """Record an already-measured span (e.g. login_phone) on the job's recorder; a no-op outside a job."""
+    rec = _current.get()
+    if rec is not None:
+        rec.phases.append({"phase": name, "ms": int(round(seconds * 1000))})
+
+
 def current_phase_ms() -> dict:
     """Milliseconds per phase so far on this job's recorder ({} outside a job)."""
     rec = _current.get()
