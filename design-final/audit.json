@@ -589,12 +589,7 @@
    "sw": 375
   },
   "fill-03-progress-390.png": {
-   "small": [
-    "input\"\" 16x16",
-    "input\"\" 16x16",
-    "input\"\" 16x16",
-    "input\"\" 16x16"
-   ],
+   "small": [],
    "contrast": [],
    "overflowX": false,
    "vw": 390,
@@ -891,12 +886,41 @@
    "overflowX": false,
    "vw": 390,
    "sw": 390
+  },
+  "ask-03-answer-table-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "ask-03-answer-table-375.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 375,
+   "sw": 375
+  },
+  "fill-09-result-all-added-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
+  },
+  "cart-15-result-app-logged-out-390.png": {
+   "small": [],
+   "contrast": [],
+   "overflowX": false,
+   "vw": 390,
+   "sw": 390
   }
  },
  "missed": [
   "ask answer: TimeoutError: locator.click: Timeout 20000ms exceeded.",
   "ask error: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed",
   "fill reprice: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed",
-  "worker logged out compare: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed"
+  "worker logged out compare: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed",
+  "cart recipe: Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed"
  ]
 }
