@@ -54,4 +54,19 @@ describe("OtpDevicesCard", () => {
     });
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't make a pairing code");
   });
+
+  it("clears the pairing code once the poll shows a new phone", async () => {
+    let paired = false;
+    api.apiFetch.mockImplementation(async (path: string) => {
+      if (path === "/otp-devices") return { devices: paired ? [device, { ...device, id: "d2", name: "New phone" }] : [device] };
+      if (path === "/otp-devices/pairing") return { code: "ABCD2345", expires_in: 600 };
+      throw new Error(path);
+    });
+    render(<OtpDevicesCard />);
+    await userEvent.click(screen.getByRole("button", { name: "Pair an Android phone" }));
+    expect(await screen.findByLabelText("Pairing code")).toHaveTextContent("ABCD2345");
+    paired = true;
+    await waitFor(() => expect(screen.queryByLabelText("Pairing code")).not.toBeInTheDocument(), { timeout: 8000 });
+    expect(await screen.findByText("New phone")).toBeInTheDocument();
+  }, 12000);
 });

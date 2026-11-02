@@ -31,6 +31,8 @@ param askDatabaseUrl string
 param supabaseJwksUrl string
 @description('The PWA https origin(s), comma separated. A hosted API refuses localhost, http and wildcards.')
 param corsOrigins string = 'http://localhost:3000'
+@description('Proxy IPs uvicorn trusts for X-Forwarded-For (the pairing limiter keys on the client IP). Container Apps ingress is the only way in, so * is safe here.')
+param forwardedAllowIps string = '*'
 @secure()
 param proxyUrlTemplate string
 
@@ -331,6 +333,7 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             { name: 'ASK_DATABASE_URL', secretRef: 'ask-database-url' }
             { name: 'SUPABASE_JWKS_URL', value: supabaseJwksUrl }
             { name: 'CORS_ORIGINS', value: corsOrigins }
+            { name: 'FORWARDED_ALLOW_IPS', value: forwardedAllowIps }
             { name: 'PROFILE_STORE_URL', secretRef: 'profile-store-url' }
           ], budgetEnv, notifySecretEnv)
           probes: [

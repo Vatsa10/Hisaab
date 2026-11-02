@@ -36,7 +36,11 @@ export function OtpDevicesCard() {
   const load = useCallback(async () => {
     try {
       const res = await apiFetch<{ devices: OtpDevice[] }>("/otp-devices");
-      setDevices(res?.devices ?? []);
+      const next = res?.devices ?? [];
+      setDevices((prev) => {
+        if (next.some((d) => !prev.some((p) => p.id === d.id))) setPairing(null);
+        return next;
+      });
     } catch {
       // the list is a convenience; pairing still works
     }

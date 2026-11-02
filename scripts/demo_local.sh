@@ -126,7 +126,7 @@ server_env() {
 }
 
 log "starting the API on $API_URL"
-( server_env; exec "$PY" -m uvicorn server.api:app --host "$HOST" --port "$API_PORT" ) >"$LOGS/api.log" 2>&1 &
+( server_env; exec "$PY" -m uvicorn server.api:app --host "$HOST" --port "$API_PORT" --proxy-headers --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}" ) >"$LOGS/api.log" 2>&1 &
 PIDS+=($!)
 wait_for "API" 60 "$API_URL/healthz"
 

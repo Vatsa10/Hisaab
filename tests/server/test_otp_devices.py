@@ -18,9 +18,13 @@ ZOMATO_SMS = {"sender": "VM-ZOMATO", "body": "582913 is your OTP to log in to Zo
 def _fresh_limits():
     otp_devices.pair_limiter.reset()
     otp_devices.sms_limiter.reset()
+    otp_devices.pair_fail_limiter.reset()
+    otp_devices.seen_codes.reset()
     yield
     otp_devices.pair_limiter.reset()
     otp_devices.sms_limiter.reset()
+    otp_devices.pair_fail_limiter.reset()
+    otp_devices.seen_codes.reset()
 
 
 def _ms(offset_s=0.0):
@@ -40,7 +44,7 @@ def _dev(tok):
 
 def _waiting_job(pg, user, site="zomato", jtype="connect", stage="otp_needed"):
     return str(pg.execute("insert into jobs(user_id, type, site, profile, status, progress) values (%s,%s,%s,%s||'_'||%s,'running',"
-                          "jsonb_build_object('stage', %s::text)) returning id", (user, jtype, site, user, site, stage)).fetchone()[0])
+                          "jsonb_build_object('stage', %s::text, 'prompt_at', now())) returning id", (user, jtype, site, user, site, stage)).fetchone()[0])
 
 
 def _send(client, tok, sms=ZOMATO_SMS, ts=None):
@@ -232,3 +236,40 @@ def test_tables_are_server_only(pg):
         assert pg.execute("select count(*) from pg_policies where tablename = %s", (t,)).fetchone()[0] == 0
         for role in ("anon", "authenticated"):
             assert pg.execute("select has_table_privilege(%s, %s, 'select')", (role, t)).fetchone()[0] is False
+
+
+# ------------------------------------------------------------------ replay, freshness, global ceiling, purge
+
+def test_replay_is_dropped_and_older_than_prompt_is_dropped(client, token_a, pg, pg2):
+    tok = _pair(client, token_a)["token"]
+    jid = _waiting_job(pg, A)
+    pg2.execute("listen otp_" + jid.replace("-", ""))
+    _send(client, tok, ts=_ms(-30))                      # sent before the prompt: stale
+    assert _notified(pg2, jid, 0.5) == []
+    _send(client, tok)                                   # fresh
+    assert _notified(pg2, jid) == ["582913"]
+    _send(client, tok)                                   # replay of the same code
+    assert _notified(pg2, jid, 0.5) == []
+
+
+def test_global_failed_pair_ceiling_delays_but_valid_code_works(client, token_a, monkeypatch):
+    monkeypatch.setattr(otp_devices, "pair_limiter", otp_devices.Window(1000, 3600))
+    monkeypatch.setattr(otp_devices, "pair_fail_limiter", otp_devices.Window(2, 3600))
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(otp_devices.asyncio, "sleep", fake_sleep)
+    for _ in range(4):
+        assert client.post("/otp-devices/pair", json={"code": "ABCDEFGH"}).status_code == 400
+    assert len(slept) == 2
+    code = client.post("/otp-devices/pairing", headers=token_a).json()["code"]
+    assert client.post("/otp-devices/pair", json={"code": code}).status_code == 200
+    assert len(slept) == 2
+
+
+def test_old_pairing_rows_are_purged_on_new_code(client, token_a, pg):
+    client.post("/otp-devices/pairing", headers=token_a)
+    pg.execute("update otp_pairings set expires_at = now() - interval '2 days', used_at = now() - interval '2 days'")
+    client.post("/otp-devices/pairing", headers=token_a)
+    assert pg.execute("select count(*) from otp_pairings").fetchone()[0] == 1

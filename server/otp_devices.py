@@ -9,6 +9,7 @@ that user's own running connect or fill job that is waiting for an OTP on the ma
 204 with no body. The SMS body, the code and the sender text are never stored and never logged: logs carry counts and
 exception class names only.
 """
+import asyncio
 import hashlib
 import hmac
 import json
@@ -41,6 +42,11 @@ SMS_PER_DEVICE = 10             # per SMS_WINDOW_S
 SMS_WINDOW_S = 60
 TS_MAX_AGE_S = 120
 TS_MAX_AHEAD_S = 60
+PAIR_FAILS_GLOBAL = 100         # failed /pair tries per PAIR_WINDOW_S across all IPs
+PAIR_FAIL_DELAY_S = 3.0
+PROMPT_SLACK_S = 5
+SEEN_TTL_S = 300
+PURGE_AFTER = "1 day"
 MAX_SENDER = 32
 MAX_BODY = 1000
 
@@ -119,6 +125,35 @@ class Window:
 
 
 pair_limiter = Window(PAIR_TRIES_PER_IP, PAIR_WINDOW_S)
+# Global ceiling on FAILED pair tries. Past it, a failure is answered after a delay, but every code is still checked,
+# so a valid code always works and a flood from one (proxy) IP cannot lock real users out; it only gets slow.
+pair_fail_limiter = Window(PAIR_FAILS_GLOBAL, PAIR_WINDOW_S)
+
+
+class SeenCodes:
+    """In-process TTL set of sha256(user, brand, code): the same OTP SMS is relayed once within SEEN_TTL_S."""
+
+    def __init__(self, ttl: int):
+        self.ttl = ttl
+        self._seen: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def seen(self, key: str) -> bool:
+        now = _now()
+        with self._lock:
+            self._seen = {k: t for k, t in self._seen.items() if t > now}
+            return key in self._seen
+
+    def add(self, key: str) -> None:
+        with self._lock:
+            self._seen[key] = _now() + self.ttl
+
+    def reset(self) -> None:
+        with self._lock:
+            self._seen.clear()
+
+
+seen_codes = SeenCodes(SEEN_TTL_S)
 sms_limiter = Window(SMS_PER_DEVICE, SMS_WINDOW_S)
 
 
@@ -165,6 +200,7 @@ def _all_patterns() -> list[str]:
 
 @router.post("/pairing")
 def create_pairing(user: str = Depends(_user), conn=Depends(_conn)):
+    conn.execute("DELETE FROM otp_pairings WHERE expires_at < now() - %s::interval", (PURGE_AFTER,))
     recent = conn.execute("SELECT count(*) FROM otp_pairings WHERE user_id = %s "
                           "AND created_at > now() - interval '1 hour'", (user,)).fetchone()[0]
     if recent >= PAIRINGS_PER_HOUR:
@@ -173,6 +209,12 @@ def create_pairing(user: str = Depends(_user), conn=Depends(_conn)):
     conn.execute("INSERT INTO otp_pairings(code_hash, user_id, expires_at) "
                  "VALUES (%s, %s, now() + make_interval(secs => %s))", (_sha(code), user, PAIRING_TTL_S))
     return {"code": code, "expires_in": PAIRING_TTL_S}
+
+
+async def _failed_pair():
+    if not pair_fail_limiter.allow("all"):
+        await asyncio.sleep(PAIR_FAIL_DELAY_S)
+    raise HTTPException(400, "invalid or expired code")
 
 
 @router.post("/pair")
@@ -190,12 +232,12 @@ async def pair(request: Request, conn=Depends(_conn)):
     name = data.get("name") if isinstance(data.get("name"), str) else None
     name = (name or "Android phone").strip()[:60] or "Android phone"
     if len(code) != CODE_LEN:
-        raise HTTPException(400, "invalid or expired code")
+        await _failed_pair()
     want = _sha(code)
     row = conn.execute("UPDATE otp_pairings SET used_at = now() WHERE code_hash = %s AND used_at IS NULL "
                        "AND expires_at > now() RETURNING code_hash, user_id", (want,)).fetchone()
     if row is None or not hmac.compare_digest(row[0], want):
-        raise HTTPException(400, "invalid or expired code")
+        await _failed_pair()
     token = secrets.token_urlsafe(32)
     device_id = conn.execute("INSERT INTO otp_devices(user_id, name, token_hash) VALUES (%s, %s, %s) RETURNING id",
                              (row[1], name, _sha(token))).fetchone()[0]
@@ -208,12 +250,14 @@ def config(_device_ids: tuple[str, str] = Depends(_device)):
     return {"senders": _all_patterns()}
 
 
-def _relay(conn, user_id: str, brand: str, code: str) -> int:
-    """NOTIFY the code to this user's running connect/fill jobs that wait for an OTP on the brand's sites."""
+def _relay(conn, user_id: str, brand: str, code: str, ts_ms: float) -> int:
+    """NOTIFY the code to this user's running connect/fill jobs that wait for an OTP on the brand's sites. Only an SMS
+    sent at or after the wait began (progress.prompt_at minus PROMPT_SLACK_S) counts, so stale codes never match."""
     rows = conn.execute(
         "SELECT id FROM jobs WHERE user_id = %s AND status = 'running' AND type IN ('connect', 'fill_cart') "
-        "AND progress->>'stage' = 'otp_needed' AND site = ANY(%s)",
-        (user_id, list(BRAND_SITES[brand]))).fetchall()
+        "AND progress->>'stage' = 'otp_needed' AND site = ANY(%s) "
+        "AND (progress->>'prompt_at')::timestamptz - make_interval(secs => %s) <= to_timestamp(%s)",
+        (user_id, list(BRAND_SITES[brand]), PROMPT_SLACK_S, ts_ms / 1000.0)).fetchall()
     for (jid,) in rows:
         conn.execute("SELECT pg_notify(%s, %s)", ("otp_" + str(jid).replace("-", ""), code))
     return len(rows)
@@ -251,7 +295,13 @@ def _handle_sms(conn, user_id: str, data) -> int:
     code = extract_code(body)
     if code is None:
         return 0
-    return _relay(conn, user_id, brand, code)
+    key = _sha(f"{user_id}|{brand}|{code}")
+    if seen_codes.seen(key):
+        return 0
+    n = _relay(conn, user_id, brand, code, ts)
+    if n:
+        seen_codes.add(key)
+    return n
 
 
 @router.get("")

@@ -13,4 +13,4 @@ RUN useradd --create-home --uid 10001 app && chown -R app:app /app
 
 USER app
 EXPOSE 8000
-CMD ["uvicorn", "server.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "exec uvicorn server.api:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"${FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

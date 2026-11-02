@@ -96,6 +96,8 @@ and `plan7` specs). That proves the code, not your accounts: sections 7 to 9 are
 - [ ] **`deploy.sh` from a clean tree** (`git status` empty; the script refuses a dirty one). Then
   `curl "$API/healthz"`. Verify: `{"ok":true}` with a 200, and the Container Apps revisions are healthy.
 
+- [ ] **Postgres `log_statement` is not `all` in production.** OTP codes pass through `pg_notify` as statement text, so full statement logging would write them to the database logs. **Verify:** `show log_statement;` returns `none` (or `ddl`).
+
 ## 7. Privacy wording (owner confirmation)
 
 - [ ] Read `/privacy` on the deployed PWA as a stranger would. It states: payment is never touched, nothing is ever

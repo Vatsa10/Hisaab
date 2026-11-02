@@ -127,6 +127,7 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *app-env
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"  # proxy IPs trusted for X-Forwarded-For
       ASK_DATABASE_URL: ${COMPOSE_ASK_DATABASE_URL:-postgresql://ask_reader:ask_reader_local@db:5432/postgres}
     ports:
       - "127.0.0.1:8000:8000"
