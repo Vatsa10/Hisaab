@@ -353,3 +353,37 @@ describe("admin view, review round 1", () => {
     expect(rows.map((r) => r.getAttribute("data-id"))).toEqual(expected);
   });
 });
+
+describe("login recipe approvals", () => {
+  it("shows each login step in plain words instead of a JSON diff", async () => {
+    routes({
+      "GET /admin/approvals": () => [
+        approval({
+          id: "l1",
+          site: "zomato",
+          kind: "login",
+          reason: "login_learned",
+          proposed: {
+            steps: [],
+            summary: [
+              "Click the button 'log in'",
+              "Type the user's phone number into the box 'phone'",
+              "Click the button 'send one time password'",
+            ],
+          },
+          diff: [{ op: "add", path: "$.steps[0].name", new: "log in" }],
+        }),
+      ],
+    });
+    render(<ApprovalsPanel onForbidden={vi.fn()} />);
+    const card = await screen.findByRole("listitem", { name: /Zomato login/ });
+    const steps = within(card).getByRole("list", { name: "Login steps" });
+    expect(within(steps).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "Click the button 'log in'",
+      "Type the user's phone number into the box 'phone'",
+      "Click the button 'send one time password'",
+    ]);
+    expect(within(card).getByText("Learned login steps")).toBeInTheDocument();
+    expect(within(card).queryByText("$.steps[0].name")).toBeNull();
+  });
+});

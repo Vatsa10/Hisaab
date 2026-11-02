@@ -1,0 +1,19 @@
+<!doctype html><html><head><title>Login</title>
+<style>body{font-family:sans-serif;padding:16px}input{display:block;margin:8px 0;padding:6px}
+.otp input{display:inline-block;width:28px;margin:2px}</style></head>
+<body><h2>Login</h2>
+<div id="step1"><input type="tel" placeholder="Phone" maxlength="10"><button id="send">{{SEND}}</button></div>
+<div id="step2" class="otp" style="display:none">
+  <input maxlength="1"><input maxlength="1"><input maxlength="1"><input maxlength="1"><input maxlength="1"><input maxlength="1">
+</div>
+<script>
+document.getElementById('send').onclick = () => {
+  if (document.querySelector('input[type=tel]').value.replace(/\D/g, '').length !== 10) return;
+  setTimeout(() => { step1.style.display = 'none'; step2.style.display = 'block'; }, 400);
+};
+const boxes = [...document.querySelectorAll('.otp input')];
+boxes.forEach((b, i) => b.addEventListener('input', () => {
+  if (b.value && boxes[i + 1]) boxes[i + 1].focus();
+  if (boxes.every(x => x.value)) setTimeout(() => { window.top.location.href = 'https://www.zomato.com/orders'; }, 200);
+}));
+</script></body></html>

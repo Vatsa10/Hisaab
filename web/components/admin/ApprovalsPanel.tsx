@@ -9,6 +9,7 @@ import {
   decideApproval,
   getApprovals,
   isForbidden,
+  loginSteps,
   problem,
   proposedEntries,
   reasonLabel,
@@ -176,7 +177,15 @@ function PendingCard({
           <CartPermissions approval={a} />
         </div>
       ) : null}
-      <RecipeDiff diff={changesOf(a)} className="mt-3" />
+      {a.kind === "login" ? (
+        <ol aria-label="Login steps" className="mt-3 list-decimal space-y-1 pl-5 text-body text-ink">
+          {loginSteps(a).map((step, i) => (
+            <li key={i}>{step}</li>
+          ))}
+        </ol>
+      ) : (
+        <RecipeDiff diff={changesOf(a)} className="mt-3" />
+      )}
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Button onClick={() => decide("approve")} loading={busy === "approve"} disabled={busy !== null}>
           Approve

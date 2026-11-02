@@ -1,0 +1,19 @@
+<!doctype html><html><head><title>Zomato</title>
+<style>body{font-family:sans-serif;margin:0}header{display:flex;justify-content:space-between;padding:16px}
+#backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5)}
+iframe{position:fixed;top:120px;left:200px;width:440px;height:420px;border:1px solid #ccc;background:#fff}</style></head>
+<body><header><span>Fake food site</span><button id="login">Log in</button></header>
+<main><p>Restaurants near you</p><a href="/offers">Offers</a></main>
+<script>
+document.getElementById('login').onclick = () => {
+  if (document.querySelector('iframe')) return;
+  setTimeout(() => {               // the dialog arrives a little later, like the real one
+    const d = document.createElement('div');   // the modal backdrop covers the page behind the dialog
+    d.id = 'backdrop';
+    document.body.appendChild(d);
+    const f = document.createElement('iframe');
+    f.src = 'https://accounts.zomato.com/login';
+    document.body.appendChild(f);
+  }, 300);
+};
+</script></body></html>

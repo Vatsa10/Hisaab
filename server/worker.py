@@ -38,6 +38,7 @@ from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart,
 from guard import redact_path
 from server import fill as fills
 from server import fill_summary
+from server import login_recipes
 from server.config import OPEN_APP_URLS, SITE_NAMES, Settings, check_hosted, settings
 from server.local_db import is_local_db
 from server.proxy_relay import ProxyUnavailable, Relay, proxy_url_for
@@ -1103,7 +1104,8 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
                                 on_orders_url=lambda url: store.set_connection(conn, job.user_id, db_site,
                                                                                orders_page_url=url),
                                 proxy_server=proxy_server,
-                                recipe_loader=lambda site: store.get_recipe(conn, site))
+                                recipe_loader=lambda site: store.get_recipe(conn, site),
+                                **({} if fake else login_recipes.login_kwargs(conn, job.user_id, job.site, job.id)))
                 if not ok:
                     return fail("login_failed", "error")
                 with jobs.owned(conn, job.id, job.worker_id):

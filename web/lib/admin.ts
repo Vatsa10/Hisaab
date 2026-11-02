@@ -207,6 +207,10 @@ export function reasonLabel(reason: string): string {
       return "Learned recipe";
     case "drift_relearn":
       return "Re-learned after the old recipe stopped working";
+    case "login_learned":
+      return "Learned login steps";
+    case "login_drift":
+      return "Login steps changed; replaces the old ones";
     default:
       return reason;
   }
@@ -216,6 +220,12 @@ export function reasonLabel(reason: string): string {
 export function statusLabel(status: string): string {
   if (status === "auto_applied") return "Auto-applied";
   return status ? status[0]!.toUpperCase() + status.slice(1) : status;
+}
+
+/** A login approval's steps in plain words (`proposed.summary`). */
+export function loginSteps(a: Pick<Approval, "proposed">): string[] {
+  const raw = a.proposed?.summary;
+  return Array.isArray(raw) ? raw.filter((s): s is string => typeof s === "string") : [];
 }
 
 /** The POST entries a post_allowlist approval proposes (`proposed.read_post_allowlist`). */

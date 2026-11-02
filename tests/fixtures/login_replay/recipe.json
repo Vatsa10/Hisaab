@@ -1,0 +1,5 @@
+{"steps": [
+  {"action": "click", "field": null, "role": "button", "name": "log in", "tag": "button", "input_type": null},
+  {"action": "type", "field": "PHONE", "role": "textbox", "name": "phone", "tag": "input", "input_type": "tel"},
+  {"action": "click", "field": null, "role": "button", "name": "send one time password", "tag": "button", "input_type": null}
+]}

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 import llm
+import login_replay
 import metering
 import recipes
 from browser import SITES, SessionExpired, SiteThrottled, fetch_in_page, goto, home_url, scrub_headers
@@ -159,7 +160,6 @@ _FIND_OTP_JS = """() => {
   return true;
 }"""
 
-_DOM_SIG_JS = "() => document.body ? document.body.innerText.length + ':' + document.getElementsByTagName('*').length : ''"
 # Marks the leaf element whose text is exactly the wanted page number inside a row of 3+ page numbers.
 _MARK_PAGER_JS = """(want) => {
   document.querySelectorAll('[data-ea-pager]').forEach(e => e.removeAttribute('data-ea-pager'));
@@ -176,6 +176,7 @@ _MARK_PAGER_JS = """(want) => {
   return false;
 }"""
 
+_DOM_SIG_JS = "() => document.body ? document.body.innerText.length + ':' + document.getElementsByTagName('*').length : ''"
 
 
 _REF_FRAMES: dict[str, object] = {}  # ref -> Playwright Frame, rebuilt by every snapshot()
@@ -201,7 +202,8 @@ def frames(page) -> list[tuple[str, object]]:
     return out
 
 
-def snapshot(page) -> dict:
+def snapshot(page, aria_text: bool = True) -> dict:
+    """aria_text=False skips the slow accessibility text (login replay only needs the elements)."""
     elements, overlay, aria = [], False, []
     _REF_FRAMES.clear()
     for prefix, frame in frames(page):
@@ -215,6 +217,8 @@ def snapshot(page) -> dict:
             _REF_FRAMES[e["ref"]] = frame
         elements += found["elements"]
         overlay = overlay or found["overlay"] or bool(prefix)  # a visible same-site iframe is a dialog
+        if not aria_text:
+            continue
         try:
             aria.append(frame.locator("body").aria_snapshot(timeout=3000))
         except Exception:
@@ -439,11 +443,11 @@ class Discovery:
         self.refusals = 0
         self.waits = 0
         self.loads = 0
+        self.page_no = 1  # the pager page we are on; the next click goes to page_no + 1
         self.force_llm = False
         self.last_key = None
         self.asks = 0
         self.verify_refusals = 0
-        self.page_no = 1  # the pager page we are on; the next click goes to page_no + 1
         self.last_probs: dict = {}
         self.jev_unsure = False
         self.last_action: str | None = None
@@ -622,10 +626,6 @@ class Discovery:
         target = (next((e for e in elements if MORE_BUTTON.search(e.get("text") or "")), None) or
                   next((e for e in elements if nums and (e.get("text") or "").strip() == str(nums[0])), None))
         before = self.order_responses()
-        self.click(target["ref"])
-        settle(self.page)
-        self.history.append(f"system clicked {describe(target)} to load more orders")
-        log.info("[%s] auto-clicked %s", self.site, mask_log(describe(target), self.secrets))
         if not target:
             if not self._click_next_page_number():
                 return False
@@ -634,6 +634,10 @@ class Discovery:
             log.info("[%s] auto-clicked pager page %d", self.site, self.page_no)
             self.loads += 1
             return self.order_responses() > before or self.order_pages() >= 2
+        self.click(target["ref"])
+        settle(self.page)
+        self.history.append(f"system clicked {describe(target)} to load more orders")
+        log.info("[%s] auto-clicked %s", self.site, mask_log(describe(target), self.secrets))
         if PAGE_NUMBER.match(target.get("text") or ""):
             self.page_no = int(target["text"].strip())
         return self.order_responses() > before or self.order_pages() >= 2
@@ -889,9 +893,14 @@ class LoginAgent(Discovery):
 
     def __init__(self, site, page, guard, capture, phone: str, location: str = "", dry_run: bool = False,
                  prompt: Callable[[str, str], str] | None = None, home: str | None = None,
-                 runs_dir: Path | None = None):
+                 runs_dir: Path | None = None, login_recipe: dict | None = None):
         super().__init__(site, page, guard, capture, prompt, home, runs_dir)
         self.secrets["PHONE"] = phone
+        self.login_recipe = login_recipe  # an approved "login" recipe: replayed once, before any model
+        self.login_steps: list[dict] = []  # what this login did before the OTP prompt (no values)
+        self.script: list[dict] | None = None
+        self.replay_state: str | None = None  # None (not replayed) | "replayed" | "drift"
+        self.replay_started: float | None = None
         self.location, self.dry_run = location, dry_run
         self.phone_typed = self.otp_entered = False
         self.sent_clicked = self.login_clicked = False
@@ -963,10 +972,93 @@ class LoginAgent(Discovery):
             return "click", {"element_ref": sends[0]["ref"]}, "fast"
         return None
 
+    # --- learned login scripts (login_replay) ---
+
+    def click(self, element_ref: str):
+        el = self.refs.get(element_ref)
+        result = super().click(element_ref)
+        if el and "error" not in result and self.script is None and not self.otp_entered:
+            self.login_steps.append(login_replay.step_of("click", el))
+        return result
+
+    def run(self) -> dict:
+        if self.login_recipe and self.replay_state is None:
+            self.replay()  # once per run: a drift hands over to the loop below and is never retried
+            if self.done:
+                return self.done
+        return super().run()
+
+    def _single_match(self, step: dict, timeout_ms: int = 3000) -> dict | None:
+        """The one visible element matching step (main frame and same-site login iframes), waiting at most
+        timeout_ms for it to appear; None on zero or several matches."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            try:
+                self.snap = snapshot(self.page, aria_text=False)
+                self.refs = {e["ref"]: e for e in self.snap["elements"]}
+                found = [e for e in self.snap["elements"] if login_replay.matches(step, e)]
+            except SessionExpired:
+                raise
+            except Exception:  # navigating while being read
+                found = []
+            if len(found) == 1:
+                return found[0]
+            if time.monotonic() >= deadline:
+                return None
+            self.page.wait_for_timeout(150)
+
+    def replay(self) -> bool:
+        """Replay the approved login steps with no model. Any mismatch stops it (drift) and the model-driven
+        loop carries on from the current page. Guard, click policy and dry_run apply as for any step."""
+        self.replay_started = time.monotonic()
+        steps = (self.login_recipe or {}).get("steps")
+        if login_replay.validate(steps) is not None:
+            return self._replay_drift(1, "invalid recipe")
+        for k, step in enumerate(steps, 1):
+            el = self._single_match(step)
+            if el is None:
+                return self._replay_drift(k, "no single match")
+            if step["action"] == "type":
+                result = self.type_value(el["ref"], "PHONE")
+            else:
+                result = self.click(el["ref"])
+            self.history.append(f"replayed login step {k}: {login_replay.plain_words(step)}")
+            if self.done:  # dry run stopped at the phone input
+                return True
+            if "error" in result:
+                return self._replay_drift(k, "step refused")
+            if not site_allows_host(self.site, self.page.url):
+                return self._replay_drift(k, "left the site")
+            if step["action"] == "click":
+                if self.phone_typed:
+                    self.sent_clicked = True
+                else:
+                    self.login_clicked = True
+        self.replay_state = "replayed"
+        return True
+
+    def _replay_drift(self, k: int, why: str) -> bool:
+        self.replay_state = "drift"
+        timing.mark("login_replay_fallback", time.monotonic() - (self.replay_started or self.started))
+        log.info("[%s] login replay fell back at step %d (%s)", self.site, k, why)
+        return False
+
+    def learned_script(self) -> tuple[list[dict], bool] | None:
+        """(script, drifted) for a login that succeeded via the model or fast paths; None when the approved
+        script replayed cleanly (nothing new) or no generic script could be derived."""
+        if self.replay_state == "replayed" or not self.script:
+            return None
+        return self.script, self.replay_state == "drift"
+
     def enter_otp(self, frame=None) -> None:
         frame = frame or self.page.main_frame
         now = time.monotonic()
+        if self.script is None:
+            self.script = login_replay.derive(self.login_steps)
         timing.mark("login_otp_prompt", now - (self.phone_at or self.started))
+        if self.replay_state == "replayed":
+            timing.mark("login_replay_otp_prompt", now - self.started)
+            log.info("[%s] replayed login: %.1fs to OTP prompt", self.site, now - self.started)
         log.info("[%s] login: %.1fs to OTP prompt", self.site, now - self.started)
         try:
             otp = self.prompt(f"\n[{self.site}] OTP sent to your phone. Enter it here (blank to skip): ", "otp").strip()
@@ -1025,9 +1117,13 @@ class LoginAgent(Discovery):
                 self.page.keyboard.type(value, delay=40)
             self.phone_typed = True
             self.phone_at = time.monotonic()
+            if self.script is None:
+                self.login_steps.append(login_replay.step_of("type", el, "PHONE"))
             timing.mark("login_phone", self.phone_at - self.started)
         else:
             self.page.keyboard.type(value, delay=40)  # autocomplete boxes / split OTP boxes want keystrokes
+            if field == "LOCATION" and self.script is None:
+                self.login_steps.append(login_replay.step_of("type", el, "LOCATION"))  # makes it non-generic
             if field == "OTP":
                 self.otp_entered = True
         settle(self.page)

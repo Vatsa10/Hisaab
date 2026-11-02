@@ -83,13 +83,15 @@ def normalize_phone(raw: str) -> str:
 def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=None,
           profile_dir=None, location: dict | None = None, runs_dir=None,
           on_orders_url: Callable[[str], None] | None = None, proxy_server: str | None = None,
-          recipe_loader: Callable[[str], dict | None] | None = None) -> bool:
+          recipe_loader: Callable[[str], dict | None] | None = None, login_recipe: dict | None = None,
+          on_login_script: Callable[[list[dict], bool], None] | None = None) -> bool:
     """With a phone number the LoginAgent fills the form and asks for the OTP; otherwise (or if it gets
     stuck) you log in by hand. The number is never stored or logged. dry_run stops at the phone input.
 
     An injected prompt(text, kind) means an unattended run: there is no manual fallback. A prompt that timed
     out raises OtpTimeout; any other failure returns False."""
     unattended = prompt is not None
+    la = None
     recipe = (recipe_loader or recipes.load)(site)
     home = browser.home_url(site, location)  # location None: the CLI's saved one; {}: none
     with open_site(site, login_mode=True, profile_dir=profile_dir, location=location,
@@ -103,7 +105,7 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
         if phone:
             address = browser.effective_location(location).get("query") or ""
             la = agent.LoginAgent(site, page, guard, capture, phone, address, dry_run, prompt, home=home,
-                                  runs_dir=runs_dir)
+                                  runs_dir=runs_dir, login_recipe=login_recipe)
             try:
                 done = la.run()
             except Exception as e:
@@ -138,6 +140,11 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
         elif not recipe:
             recipes.RECIPES.mkdir(exist_ok=True)
             recipes.hint_path(site).write_text(orders_url, encoding="utf-8")
+        if on_login_script and la is not None and done and done["success"] and (got := la.learned_script()):
+            try:  # a learned login script is offered for approval (admins only); it never fails the login
+                on_login_script(*got)
+            except Exception as e:
+                log.warning("%s login script not proposed (%s)", site, type(e).__name__)
     print(f"Session OK for {site}; orders page {urlsplit(orders_url).path}")
     return True
 
