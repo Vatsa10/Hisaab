@@ -299,7 +299,7 @@ def _ask(llm: Llm, prompt: str, cands: list[dict], kind: str, validate) -> tuple
             obj, cand, fm, err = {}, None, None, f"invalid reply: {type(e).__name__}: {e}"
         if err is None:
             return cand, fm, obj.get("fee_map") if isinstance(obj.get("fee_map"), dict) else None
-        log.warning("%s field map attempt %d failed: %s | map: %s", kind, attempt + 1, str(err)[:240],
+        log.warning("%s field map attempt %d failed: %s | map: %s", kind, attempt + 1, str(err)[:1500],
                     json.dumps(fm, ensure_ascii=False)[:500] if fm else None)
         messages = [*messages, {"role": "assistant", "content": reply if isinstance(reply, str) else json.dumps(reply)},
                     {"role": "user", "content": f"Validation failed: {err}\nReturn a corrected JSON object."}]
@@ -442,9 +442,11 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
                     return None
         first = json.dumps(found[0], ensure_ascii=False)[:1500] if found else "(none)"
         lists = "; ".join(f"{path!r} ({n} rows)" for _s, path, n, _f in cols[:5]) or "none"
+        best = json.dumps(cols[0][3], ensure_ascii=False)[:1800] if cols else "(none)"
         return (f"the field_map extracted {len(rows)} restaurants with an id and a name (need at least "
                 f"{MIN_RESTAURANTS}); restaurants_path {fm.get('restaurants_path')!r} reaches {len(found)} rows; "
-                f"first row: {first}; lists in this response: {lists}")
+                f"first row: {first}; lists in this response: {lists}; first row of the best list "
+                f"({cols[0][1] if cols else ''}): {best}")
 
     prompt = RESTAURANTS_PROMPT.format(site=site, probe=RESTAURANT_PROBE, fee_rules=FEE_RULES,
                                        samples="\n\n".join(_describe(c, RESTAURANTISH_KEY) for c in cands))
