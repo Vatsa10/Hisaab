@@ -68,7 +68,11 @@ export function SitesPanel({ onForbidden }: PanelProps) {
   }).filter((g) => g.rows.length > 0);
 
   return (
-    <div aria-label="Sites">
+    <details aria-label="Sites" className="group">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between rounded-control bg-line-soft px-4 text-label font-semibold text-ink-muted">
+        Advanced: learn or pause one step by hand
+        <span aria-hidden="true" className="transition-transform duration-150 group-open:rotate-45">+</span>
+      </summary>
       <nav
         aria-label="Jump to a group"
         className="sticky top-0 z-10 -mx-4 mb-4 flex flex-wrap gap-1 bg-canvas px-4 py-2"
@@ -107,7 +111,7 @@ export function SitesPanel({ onForbidden }: PanelProps) {
           </ul>
         </section>
       ))}
-    </div>
+    </details>
   );
 }
 

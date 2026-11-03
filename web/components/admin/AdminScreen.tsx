@@ -9,6 +9,7 @@ import { ApprovalsPanel } from "./ApprovalsPanel";
 import { CostsPanel } from "./CostsPanel";
 import { FeesPanel } from "./FeesPanel";
 import { InvitesPanel } from "./InvitesPanel";
+import { SetupPanel } from "./SetupPanel";
 import { SitesPanel } from "./SitesPanel";
 
 const TABS = [
@@ -90,7 +91,12 @@ export function AdminScreen({ initialTab = "costs" }: { initialTab?: TabId }) {
       </div>
       <div id="admin-panel" role="tabpanel" aria-labelledby={`admin-tab-${tab}`}>
         {tab === "costs" ? <CostsPanel onForbidden={onForbidden} /> : null}
-        {tab === "sites" ? <SitesPanel onForbidden={onForbidden} /> : null}
+        {tab === "sites" ? (
+          <>
+            <SetupPanel onForbidden={onForbidden} />
+            <SitesPanel onForbidden={onForbidden} />
+          </>
+        ) : null}
         {tab === "fees" ? <FeesPanel onForbidden={onForbidden} /> : null}
         {tab === "invites" ? <InvitesPanel onForbidden={onForbidden} /> : null}
         {tab === "approvals" ? <ApprovalsPanel onForbidden={onForbidden} /> : null}

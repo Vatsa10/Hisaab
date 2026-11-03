@@ -127,6 +127,28 @@ export const resumeSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(s
 export type LearnKind = "orders" | "search" | "food" | "cart" | "addresses";
 export const startLearn = (site: string, kind: LearnKind = "orders") =>
   apiFetch<{ job_id: string }>(`/admin/learn/${enc(site)}${kind === "orders" ? "" : `?kind=${kind}`}`, { method: "POST" });
+export type StepStatus = "done" | "running" | "waiting_approval" | "failed" | "blocked" | "todo";
+export interface JourneyStep {
+  id: string;
+  label: string;
+  status: StepStatus;
+  detail: string | null;
+  op: "connect" | "learn" | "sync" | "approve" | null;
+  kind: string | null;
+}
+export interface Journey {
+  site: string;
+  name: string;
+  steps: JourneyStep[];
+  done: number;
+  total: number;
+  next: JourneyStep | null;
+  run: { status: "running" | "done" | "paused" | "stopped"; step: string | null; message: string | null } | null;
+}
+export const getJourney = () => apiFetch<Journey[]>("/admin/journey");
+export const startSetup = (site: string) => apiFetch<Journey>(`/admin/setup/${enc(site)}`, { method: "POST" });
+export const startSetupAll = () => apiFetch<Journey[]>("/admin/setup", { method: "POST" });
+export const stopSetup = (site: string) => apiFetch<void>(`/admin/setup/${enc(site)}`, { method: "DELETE" });
 export const getInvites = () => apiFetch<Invites>("/admin/invites");
 export const sendInvite = (email: string) => apiFetch<unknown>("/admin/invites", json({ email }));
 export const revokeInvite = (email: string) => apiFetch<void>(`/admin/invites/${enc(email)}`, { method: "DELETE" });
