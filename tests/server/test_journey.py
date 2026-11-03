@@ -210,3 +210,13 @@ def test_the_run_waits_for_the_first_address_read_before_food(pg):
                "values (%s,'swiggy','a1','3 Society',22.3,73.1,true)", (B,))
     journey.advance(pg, "swiggy")
     assert _kinds(pg)[-1] == ("learn", "food")  # the saved address filled the place, so food starts
+
+
+def test_a_user_with_no_profile_row_gets_one_from_the_saved_address(pg):
+    _admin(pg)
+    pg.execute("delete from profiles")
+    pg.execute("insert into app_addresses (user_id, site, address_id, line, area, city, lat, lon) "
+               "values (%s,'swiggy','a1','Surmandir Society','Gorwa','Vadodara',22.3,73.1)", (B,))
+    assert journey.ensure_location(pg, B) is True
+    assert pg.execute("select address, lat from profiles where user_id=%s", (B,)).fetchone() == (
+        "Surmandir Society, Gorwa, Vadodara", 22.3)

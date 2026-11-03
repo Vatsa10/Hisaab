@@ -175,8 +175,9 @@ def ensure_location(conn, user_id: str) -> bool:
     if row is None:
         return False
     text = ", ".join(p for p in row[:3] if p)
-    conn.execute("UPDATE profiles SET address=%s, lat=%s, lon=%s WHERE user_id=%s AND lat IS NULL",
-                 (text, row[3], row[4], user_id))
+    conn.execute("INSERT INTO profiles (user_id, address, lat, lon) VALUES (%s, %s, %s, %s) "
+                 "ON CONFLICT (user_id) DO UPDATE SET address=EXCLUDED.address, lat=EXCLUDED.lat, lon=EXCLUDED.lon "
+                 "WHERE profiles.lat IS NULL", (user_id, text, row[3], row[4]))
     return True
 
 
