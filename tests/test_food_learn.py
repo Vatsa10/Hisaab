@@ -367,3 +367,17 @@ def test_a_restaurant_list_whose_rows_are_wrapped_in_cards_is_still_found():
     data = {"statusCode": 0, "data": {"cards": [{"groupedCard": {"cardGroupMap": {"RESTAURANT": {"cards": [card, card, card]}}}}]}}
     found = food_learn._collections(data, food_learn.RESTAURANTISH_KEY)
     assert any(path.endswith("RESTAURANT.cards") and n == 3 for _, path, n, _ in found)
+
+
+def test_swiggy_rows_without_a_link_get_the_page_address_built_from_the_id():
+    rows = [{"restaurant_id": "123456", "name": "Oven", "url": None}, {"restaurant_id": "9", "name": "Cafe", "url": "/x"}]
+    got = food_learn.with_page_links("swiggy", rows)
+    assert got[0]["url"] == "https://www.swiggy.com/restaurants/menu-rest123456" and got[1]["url"] == "/x"
+    assert food_learn.with_page_links("zomato", rows) is rows  # another site: unchanged
+
+
+def test_a_rest_id_suffix_becomes_a_template_that_fits_other_restaurants():
+    assert food_learn.page_template("https://www.swiggy.com/restaurants/menu-rest123456", "123456") == \
+        "https://www.swiggy.com/restaurants/menu-rest{restaurant_id}"
+    assert food_learn.page_template("https://x.test/r/12345/menu", "12345") == "https://x.test/r/{restaurant_id}/menu"
+    assert food_learn.page_template("https://x.test/r/ab12345", "12345") is None  # still only part of a slug

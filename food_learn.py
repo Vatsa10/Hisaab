@@ -344,10 +344,22 @@ def _covering(allowlist: list[dict], endpoint: str, method: str) -> list[dict]:
             if re.search(e["url_regex"], endpoint)]
 
 
+# A site whose search results carry no link to a restaurant's page, but whose page address is built from the id
+# (Swiggy: .../restaurants/<any slug>-rest<id>).
+MENU_URL_FALLBACK = {"swiggy": "https://www.swiggy.com/restaurants/menu-rest{restaurant_id}"}
+
+
+def with_page_links(site: str, rows: list[dict]) -> list[dict]:
+    """rows, each given the site's own page address when the search results had no link."""
+    tpl = MENU_URL_FALLBACK.get(site)
+    return [{**r, "url": r["url"] or tpl.replace("{restaurant_id}", str(r["restaurant_id"]))}
+            for r in rows] if tpl else rows
+
+
 def page_template(url: str, restaurant_id: str) -> str | None:
     """The restaurant page URL with its id as a whole path segment or query value replaced by {restaurant_id};
     None when the id is only part of a name slug (that URL does not generalise to other restaurants)."""
-    rx = re.compile(rf"(?<=[/=]){re.escape(str(restaurant_id))}(?=$|[/?&#])")
+    rx = re.compile(rf"(?:(?<=[/=])|(?<=-rest)){re.escape(str(restaurant_id))}(?=$|[/?&#])")
     return rx.sub("{restaurant_id}", url, count=1) if rx.search(url) else None
 
 
@@ -503,6 +515,7 @@ def learn_food(site: str, location: dict, profile_dir, proxy_server=None, approv
         if agent.shows_login_button(agent.snapshot(page)["elements"]):
             raise browser.SessionExpired("the admin profile still shows a Login button")
         rest, rows = _learn_restaurants(site, location, page, guard, capture, approve, pre, llm)
+        rows = with_page_links(site, rows)
         openable = [r for r in rows if r["is_open"] is not False and r["url"]]
         if len(openable) < 2:
             log.warning("%s: %d restaurants mapped, %d with a link, %d open; first: %s", site, len(rows),
