@@ -423,7 +423,10 @@ def _log_captured(site: str, items: list[dict], page_url: str) -> None:
         u = urlsplit(c.get("url", ""))
         j = c.get("json")
         shape = list(j)[:6] if isinstance(j, dict) else type(j).__name__
-        seen.append(f"{c.get('status')} {u.netloc}{u.path[:60]} {shape}")
+        msg = ""
+        if isinstance(j, dict) and isinstance(j.get("statusMessage"), str):  # a site's own status text, no user data
+            msg = f" [{j.get('statusCode')}: {j['statusMessage'][:80]}]"
+        seen.append(f"{c.get('status')} {u.netloc}{u.path[:60]} {shape}{msg}")
     log.warning("%s: no restaurant-like response on %s; %d captured: %s", site, urlsplit(page_url).path, len(items),
                 " | ".join(seen))
 
