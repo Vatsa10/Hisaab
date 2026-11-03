@@ -491,12 +491,47 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     return recipe, rows
 
 
+def _menu_by_direct_request(page, items: list[dict], rid: str, location: dict) -> dict | None:
+    """Re-issue a captured menu-like GET from inside the page with the user's location and this restaurant bound
+    into it; the capture item for the answer when it holds a menu, else None. A read of the site's own endpoint."""
+    for c in items:
+        if c.get("method", "").upper() != "GET" or "menu" not in urlsplit(c["url"]).path.lower():
+            continue
+        lat, lon = location["lat"], location["lon"]
+        draft = {**_request_parts(c), "restaurant_param": find_value_param(c, rid),
+                 "location_inputs": find_location_inputs(c, lat, lon)}
+        if not draft["restaurant_param"]:
+            continue
+        try:
+            req = food_search.build_request(draft, location, draft["restaurant_param"], str(rid))
+            kind, data = food_search.fast_attempt(page, req)
+        except Exception as e:
+            log.info("direct menu request not usable (%s)", type(e).__name__)
+            continue
+        if kind != "ok":
+            continue
+        item = {"id": len(items) + 1000, "url": req["url"], "method": "GET", "status": 200,
+                "request_headers": c.get("request_headers") or {}, "request_body": None,
+                "sample": json.dumps(data, ensure_ascii=False)[:browser.SAMPLE_LIMIT],
+                "size": len(json.dumps(data)), "json": data}
+        if candidates([item], DISHISH_KEY, rid):
+            return item
+    return None
+
+
 def _learn_menu(site, location, page, guard, capture, approve, preapproved, llm, first: dict) -> dict:
     rid, url = first["restaurant_id"], first["url"]
     mark = len(capture.items)
     _visit(page, url)
     _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved, site)
     cands = candidates(capture.items[mark:], DISHISH_KEY, rid)[:6]
+    if not cands:
+        # The page's own menu call may have been made for the site's selected address, not ours (Swiggy answers
+        # "Something went wrong" for a restaurant it does not serve there): ask again for our location.
+        direct = _menu_by_direct_request(page, capture.items[mark:], rid, location)
+        if direct is not None:
+            capture.items.append(direct)
+            cands = candidates([direct], DISHISH_KEY, rid)[:6]
     if not cands:
         try:
             landed = urlsplit(page.url).path[:80]

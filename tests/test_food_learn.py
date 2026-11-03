@@ -439,3 +439,26 @@ def test_the_restaurants_tab_is_clicked_when_it_is_there_and_skipped_when_it_is_
     no = SimpleNamespace(locator=lambda sel: Tab(False), wait_for_timeout=lambda ms: None)
     assert food_learn._click_tab(yes, "Restaurants") is True and clicks == ["click"]
     assert food_learn._click_tab(no, "Restaurants") is False
+
+
+def test_a_menu_the_page_could_not_load_is_asked_for_again_at_our_location(monkeypatch):
+    dish = {"name": "Margherita", "price": 100, "veg": 1, "id": "d1", "category": "Pizza", "variant": "x"}
+    good = {"data": {"menu": {"items": [dict(dish, id=f"d{i}") for i in range(6)]}}}
+    asked = []
+
+    def fast(page, req):
+        asked.append(req["url"])
+        return "ok", good
+    monkeypatch.setattr(food_learn.food_search, "fast_attempt", fast)
+    bad = {"id": 3, "method": "GET", "status": 200, "request_headers": {},
+           "url": "https://www.swiggy.com/dapi/menu/pl?lat=22.1&lng=73.1&restaurantId=555&page-type=REGULAR_MENU",
+           "json": {"statusCode": 1, "statusMessage": "Oops"}, "sample": "{}"}
+    got = food_learn._menu_by_direct_request(object(), [bad], "555", {"lat": 22.329, "lon": 73.155})
+    assert got is not None and got["json"] is good
+    assert "lat=22.329" in asked[0] and "lng=73.155" in asked[0] and "restaurantId=555" in asked[0]
+
+
+def test_nothing_is_asked_for_when_no_captured_call_looks_like_a_menu():
+    other = {"id": 1, "method": "GET", "status": 200, "request_headers": {}, "json": {},
+             "url": "https://www.swiggy.com/dapi/cart"}
+    assert food_learn._menu_by_direct_request(object(), [other], "555", {"lat": 1.0, "lon": 2.0}) is None
