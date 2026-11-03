@@ -144,7 +144,8 @@ PIDS+=($!)
 wait_for "API" 60 "$API_URL/healthz"
 
 log "starting the worker (a real Chrome will open when you connect an app)"
-( server_env; exec "$PY" -m server.worker ) >"$LOGS/worker.log" 2>&1 &
+# exit code 3: the worker found its browser driver broken and stopped itself; start a fresh one
+( server_env; while true; do "$PY" -m server.worker; [ $? -eq 3 ] || break; echo "worker restarting after a browser driver failure"; done ) >"$LOGS/worker.log" 2>&1 &
 PIDS+=($!)
 
 log "starting the scheduler"

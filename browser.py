@@ -556,6 +556,34 @@ def close_idle_warm() -> None:
     POOL.close_idle(lambda h: h.close())
 
 
+_DRIVER_DEAD = ("Connection closed while reading from the driver", "object has no attribute '_playwright'")
+PLAYWRIGHT_START_TRIES = 3
+
+
+def _start_playwright():
+    """sync_playwright().start(), tried again (a fresh driver process each time) when the driver dies at startup:
+    seen after memory pressure and in a long-lived worker. Any other error, or the last failure, is raised."""
+    for attempt in range(1, PLAYWRIGHT_START_TRIES + 1):
+        try:
+            return sync_playwright().start()
+        except Exception as e:
+            if attempt == PLAYWRIGHT_START_TRIES or not any(m in str(e) for m in _DRIVER_DEAD):
+                raise
+            log.warning("Playwright driver died at startup (try %s of %s); starting a new one", attempt,
+                        PLAYWRIGHT_START_TRIES)
+            time.sleep(0.5 * attempt)
+
+
+@contextlib.contextmanager
+def _playwright():
+    pw = _start_playwright()
+    try:
+        yield pw
+    finally:
+        with contextlib.suppress(Exception):
+            pw.stop()
+
+
 def _launch_warm(key, profile: Path, proxy_server: str | None) -> WarmChrome:
     profile.mkdir(parents=True, exist_ok=True)
     port = _free_port()
@@ -571,7 +599,7 @@ def _launch_warm(key, profile: Path, proxy_server: str | None) -> WarmChrome:
     pw = None
     try:
         _wait_for_cdp(port, proc)
-        pw = sync_playwright().start()
+        pw = _start_playwright()
         browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         context = browser.contexts[0]
         cdp = browser.new_browser_cdp_session()
@@ -700,7 +728,7 @@ def _open_site_cold(site: str, allowlist: list[dict] | None = None, login_mode: 
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=chrome_env())
     try:
         _wait_for_cdp(port, proc)
-        with sync_playwright() as pw:
+        with _playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             context = browser.contexts[0]
             cdp = browser.new_browser_cdp_session()
