@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { AddressPicker } from "@/components/account/AddressPicker";
+import { UseMyLocation } from "@/components/account/UseMyLocation";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Sheet, type SheetHandle } from "@/components/ui/Sheet";
@@ -110,6 +111,11 @@ export function AddressRow({ profile, onSaved, initialAddresses, userId }: Addre
     closeSheet();
   }
 
+  function pinSaved(res: { address: string; lat: number; lon: number }) {
+    onSaved({ address: res.address, lat: res.lat, lon: res.lon, place: null, chosen: null });
+    closeSheet();
+  }
+
   async function save(e: FormEvent) {
     e.preventDefault();
     const value = draft.trim();
@@ -183,6 +189,7 @@ export function AddressRow({ profile, onSaved, initialAddresses, userId }: Addre
           )
         }
       >
+        <UseMyLocation onChosen={chosen} onPinSaved={pinSaved} />
         {picking ? (
           <AddressPicker
             options={options}
