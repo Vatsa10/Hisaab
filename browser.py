@@ -135,6 +135,11 @@ def parse_retry_after(value: str | None, now: datetime | None = None) -> int | N
 _PAGE_BLOCK_JS = "() => document.title + '\\n' + ((document.body && document.body.innerText) || '').slice(0, %d)" % BLOCK_SCAN_CHARS
 
 
+def page_text(page) -> str:
+    """The page title, a newline and the start of its visible text (what the challenge rules scan)."""
+    return page.evaluate(_PAGE_BLOCK_JS) or ""
+
+
 def raise_if_blocked(page) -> None:
     """One cheap evaluate on the loaded page (safe on a reused warm Chrome); raises SiteThrottled on a challenge."""
     text = page.evaluate(_PAGE_BLOCK_JS)

@@ -27,6 +27,7 @@ import cart_fill
 import cart_recipe
 import food_learn
 import food_search
+import jev_tools
 import llm
 import metering
 import recipes
@@ -519,7 +520,7 @@ JUDGE_PROMPT = ('Shopping-list line: "{text}"\nFor each product below, is it the
 def _judge():
     """The near-match judge for match.match_item: one cheap LLM call per uncertain item, listing at most 3
     product names. Any failure is "unsure" (None), which never accepts a product."""
-    def judge(text: str, names: list[str]) -> list:
+    def claude(text: str, names: list[str]) -> list:
         try:
             listing = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(names))
             resp = llm.create("match_judge", effort="low", max_tokens=400,
@@ -530,6 +531,16 @@ def _judge():
         except Exception as e:
             log.warning("match judge failed (%s)", type(e).__name__)
         return [None] * len(names)
+
+    def judge(text: str, names: list[str]) -> list:
+        # Jev answers in about half a second; Claude is asked only when Jev is off, failed or unsure.
+        answers = jev_tools.judge_match(text, names)
+        if answers is not None and all(a is not None for a in answers):
+            return answers
+        fallback = claude(text, names)
+        if answers is None:
+            return fallback
+        return [a if a is not None else f for a, f in zip(answers, fallback)]
     return judge
 
 

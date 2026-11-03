@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 import agent
 import db
+import jev_tools
 import recipes
 import browser
 from guard import redact_path
@@ -231,6 +232,20 @@ def _fast_path_parallel(page, recipe: dict, on_progress: Progress | None) -> lis
     return out
 
 
+def _check_thin_page(page) -> None:
+    """The text rules found no challenge. A page with almost no visible text may still be a bot check worded in a way
+    the rules do not know, so ask Jev (about half a second, only for such pages). Unsure or unavailable passes."""
+    try:
+        text = browser.page_text(page)
+    except Exception:
+        return
+    if len(text) >= jev_tools.THIN_PAGE_CHARS:
+        return
+    title, _, body = text.partition("\n")
+    if jev_tools.page_is_challenge(title, body) is True:
+        raise SiteThrottled("challenge")
+
+
 def _find_target(page, target: dict) -> str | None:
     elements = agent.snapshot(page)["elements"]
     for key in ("href", "text", "label"):
@@ -328,6 +343,7 @@ def fetch_orders(site: str, since: str | None, profile_dir=None, location: dict 
         with timing.Phase("session_check"):
             goto(page, orders_page_url or recipe["orders_page_url"])
             raise_if_blocked(page)
+            _check_thin_page(page)
         if recipe.get("fast_path_ok", True):
             try:
                 with timing.Phase("fetch"):
