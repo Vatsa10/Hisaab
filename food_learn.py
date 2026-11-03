@@ -129,6 +129,10 @@ def _preapproved_entries(preapproved: Iterable) -> list[dict]:
     return out
 
 
+TRACKING = re.compile(r"analytics|telemetry|beacon|tracking|/track|/collect|metrics|pixel|insights|sentry|newrelic|"
+                      r"message-set|/logs?|/events?|/ping|/csp-report", re.I)
+
+
 def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approve, preapproved: set[str],
                      site: str | None = None) -> None:
     """A POST the guard blocked that carries `needle` becomes a narrow allowlist entry, but only once it is
@@ -137,7 +141,7 @@ def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approv
     for b in guard.blocked:
         if b.get("method") != "POST" or b.get("reason") not in (None, "POST not allowlisted"):
             continue
-        if site in browser.SITES and not agent.site_allows_host(site, b["url"]):
+        if (site in browser.SITES and not agent.site_allows_host(site, b["url"])) or TRACKING.search(b["url"]):
             continue  # analytics and ad beacons carry the search text too; they are never a data call
         body = b.get("body") or ""
         if guard_mod.MUTATION.search(body) or needle.lower() not in (body + b["url"]).lower():

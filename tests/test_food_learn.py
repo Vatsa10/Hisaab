@@ -315,6 +315,7 @@ def test_third_party_beacons_are_never_offered_for_approval():
         allowlist=[], blocked=[
             {"method": "POST", "url": "https://www.google-analytics.com/g/collect?q=biryani", "body": "q=biryani"},
             {"method": "POST", "url": "https://ad.doubleclick.net/activity;x=1", "body": "biryani"},
+            {"method": "POST", "url": "https://analytics.swiggy.com/message-set", "body": "biryani"},
             {"method": "POST", "url": "https://www.swiggy.com/dapi/restaurants/search/v3", "body": '{"q":"biryani"}'},
         ])
     page = types.SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda ms: None,
