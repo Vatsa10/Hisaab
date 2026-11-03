@@ -120,6 +120,10 @@ def site_journey(conn, site: str, user_id: str) -> dict:
             steps.append(Step(sid, label, st, detail, "sync" if st in ("todo", "failed") else None))
             continue
         st, detail = _learn_state(conn, site, sid, sid)
+        if sid == "addresses" and st == "done" and conn.execute(
+                "SELECT 1 FROM jobs WHERE user_id=%s AND site=%s AND type='search' AND payload->>'op'='addresses' "
+                "AND status IN ('queued','running')", (user_id, site)).fetchone():
+            st, detail = "running", "Reading your saved addresses."  # the first read follows the recipe at once
         steps.append(Step(sid, label, st, detail, "learn" if st in ("todo", "failed") else
                           "approve" if st == "waiting_approval" else None, sid))
     # What an earlier step still blocks.

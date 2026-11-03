@@ -192,3 +192,21 @@ def test_the_api_starts_lists_and_stops(client, pg, token_b):
 def test_a_non_admin_cannot_start_a_setup(client, pg, token_a):
     add_user(pg, "00000000-0000-0000-0000-00000000000a", "a@example.com")
     assert client.post("/admin/setup/swiggy", headers=token_a).status_code in (401, 403)
+
+
+def test_the_run_waits_for_the_first_address_read_before_food(pg):
+    from server import jobs
+    _admin(pg)
+    pg.execute("update profiles set lat=null, lon=null")
+    for k in ("orders", "addresses"):
+        _recipe(pg, "swiggy", k)
+    _orders(pg, "swiggy")
+    jobs.enqueue(pg, B, "search", "swiggy", {"op": "addresses"})  # queued by publishing the addresses recipe
+    assert _steps(pg)["addresses"] == "running"
+    journey.start_run(pg, "swiggy", B)
+    assert journey.site_journey(pg, "swiggy", B)["run"]["status"] == "running"  # not paused on "add an address"
+    _end_jobs(pg)
+    pg.execute("insert into app_addresses (user_id, site, address_id, line, lat, lon, is_default) "
+               "values (%s,'swiggy','a1','3 Society',22.3,73.1,true)", (B,))
+    journey.advance(pg, "swiggy")
+    assert _kinds(pg)[-1] == ("learn", "food")  # the saved address filled the place, so food starts

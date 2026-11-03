@@ -1454,7 +1454,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                         browser.close_warm()
                 except Exception as e:
                     log.warning("closing the finished browser failed (%s)", type(e).__name__)
-                if job.type in ("learn", "sync", "connect"):  # a one-tap setup run takes its next step now
+                if job.type in ("learn", "sync", "connect", "search"):  # a one-tap setup run takes its next step now
                     journey.advance_after(conn, job.site)
                 infra_strikes = infra_strikes + 1 if _job_infra_failed else 0
                 if infra_strikes >= INFRA_STRIKES_MAX:
