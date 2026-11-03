@@ -430,10 +430,21 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
         if len(rows) >= MIN_RESTAURANTS:
             return None
         found = food_search._rows(c["json"], fm.get("restaurants_path"))
+        cols = sorted(_collections(c["json"], RESTAURANTISH_KEY),
+                      key=lambda x: (-("restaurant" in x[1].lower() and "dish" not in x[1].lower()), -x[0], -x[2]))
+        if not found:
+            # The model's row fields can be right while its list path is not (Swiggy nests the lists under cards
+            # that move around): try the lists this very response has, restaurant group first.
+            for _score, path, _n, _first in cols[:6]:
+                trial = {**fm, "restaurants_path": path}
+                if len(food_search.extract_restaurants(c["json"], trial)) >= MIN_RESTAURANTS:
+                    fm["restaurants_path"] = path
+                    return None
         first = json.dumps(found[0], ensure_ascii=False)[:1500] if found else "(none)"
+        lists = "; ".join(f"{path!r} ({n} rows)" for _s, path, n, _f in cols[:5]) or "none"
         return (f"the field_map extracted {len(rows)} restaurants with an id and a name (need at least "
                 f"{MIN_RESTAURANTS}); restaurants_path {fm.get('restaurants_path')!r} reaches {len(found)} rows; "
-                f"first row: {first}")
+                f"first row: {first}; lists in this response: {lists}")
 
     prompt = RESTAURANTS_PROMPT.format(site=site, probe=RESTAURANT_PROBE, fee_rules=FEE_RULES,
                                        samples="\n\n".join(_describe(c, RESTAURANTISH_KEY) for c in cands))

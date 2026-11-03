@@ -153,15 +153,25 @@ def test_learn_food_returns_both_recipes(monkeypatch, tmp_path):
     assert len(calls) == 2
 
 
-def test_learn_food_retries_field_map_with_error_feedback(monkeypatch, tmp_path):
+def test_learn_food_repairs_a_wrong_list_path_from_the_lists_the_response_has(monkeypatch, tmp_path):
     fake_learn_env(monkeypatch)
     calls = []
     out = food_learn.learn_food("swiggy", LOC, tmp_path, llm=stub_llm(calls, bad_first=True))
-    assert out["restaurants"]["field_map"] == REST_FM
-    assert len(calls) == 3
-    retry = calls[1]
-    assert retry[-1]["role"] == "user" and "Validation failed" in retry[-1]["content"]
-    assert "data.wrong" in retry[-1]["content"] or "restaurants" in retry[-1]["content"]
+    assert out["restaurants"]["field_map"] == REST_FM  # the model's path was wrong; the response's own list was used
+    assert len(calls) == 2  # no second round trip with the model: one restaurants call, one menu call
+
+
+def test_learn_food_sends_the_lists_back_when_nothing_can_be_repaired(monkeypatch, tmp_path):
+    fake_learn_env(monkeypatch)
+    calls = []
+
+    def llm(messages):
+        calls.append(messages)
+        return json.dumps({"candidate": 1, "field_map": {"restaurants_path": "data.nothing", "restaurant_id": "zzz",
+                                                         "name": "zzz"}, "fee_map": None})
+    with pytest.raises(sync.RecipeError, match="could not map"):
+        food_learn.learn_food("swiggy", LOC, tmp_path, llm=llm)
+    assert len(calls) == 3 and "lists in this response" in calls[1][-1]["content"]
 
 
 def test_learn_food_post_needs_approval(monkeypatch, tmp_path):
