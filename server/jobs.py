@@ -165,6 +165,12 @@ def owned(conn, job_id: str, worker_id: str) -> Iterator[None]:
         yield
 
 
+def has_ready_for(conn, user_id: str, site: str) -> bool:
+    """Is a queued job for this user and site claimable now? Decides whether a warm Chrome stays open."""
+    return conn.execute("SELECT 1 FROM jobs WHERE status='queued' AND user_id=%s AND site=%s "
+                        "AND coalesce(run_after, now()) <= now() LIMIT 1", (user_id, site)).fetchone() is not None
+
+
 def requeue(conn, job_id: str, worker_id: str, run_after: datetime | None = None,
             max_attempts: int = 3) -> str | None:
     """Put a job this worker is running back in the queue, claimable from run_after (None: at once). A job that

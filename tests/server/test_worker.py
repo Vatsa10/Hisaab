@@ -291,6 +291,45 @@ def test_a_worker_whose_driver_fails_twice_in_a_row_exits(pg, monkeypatch):
     assert pg.execute("select count(*) from jobs where status='queued'").fetchone()[0] == 1
 
 
+class _FakeChrome:
+    def __init__(self):
+        self.closes = []
+        self.profile = None
+
+    def alive(self):
+        return True
+
+    def close(self, save=True):
+        self.closes.append(save)
+
+
+def _closes_after_one_job(pg, monkeypatch, follow_up: bool) -> int:
+    """How many times the worker closed the browser around one job, not counting the shutdown close."""
+    jobs.enqueue(pg, A, "sync", "zepto")
+    if follow_up:
+        jobs.enqueue(pg, A, "learn", "zepto", {"kind": "orders"})
+    chrome = _FakeChrome()
+    monkeypatch.setattr(worker.browser.POOL, "handle", chrome)
+    monkeypatch.setattr(worker.browser.POOL, "key", "k")
+    monkeypatch.setattr(worker.browser.POOL, "last_used", worker.browser.POOL.clock())
+    calls = []
+    real = worker.browser.close_warm
+    monkeypatch.setattr(worker.browser, "close_warm", lambda save=True: (calls.append(save), real(save))[1])
+    monkeypatch.setattr(worker, "run_job", lambda job, conn, s, **k: jobs.finish(conn, job.id, worker_id=job.worker_id))
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=1)
+    return len(calls) - 1  # the last call is the shutdown close, which always happens
+
+
+def test_the_browser_closes_when_the_users_work_is_done(pg, monkeypatch):
+    assert _closes_after_one_job(pg, monkeypatch, follow_up=False) == 1
+
+
+def test_the_browser_stays_when_the_same_users_next_job_is_waiting(pg, monkeypatch):
+    assert _closes_after_one_job(pg, monkeypatch, follow_up=True) == 0
+
+
 def test_main_reconnects_after_a_db_error(pg, monkeypatch):
     import psycopg
     jobs.enqueue(pg, A, "sync", "zepto")

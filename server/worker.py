@@ -1449,6 +1449,11 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 finally:
                     drain.end_job()
                 failures = 0
+                try:  # work done: close the browser (and save its profile) unless the same user's next job is waiting
+                    if browser.POOL.handle is not None and not jobs.has_ready_for(conn, job.user_id, job.site):
+                        browser.close_warm()
+                except Exception as e:
+                    log.warning("closing the finished browser failed (%s)", type(e).__name__)
                 infra_strikes = infra_strikes + 1 if _job_infra_failed else 0
                 if infra_strikes >= INFRA_STRIKES_MAX:
                     log.critical("worker %s: %s jobs in a row failed on the browser driver; exiting so a fresh "
