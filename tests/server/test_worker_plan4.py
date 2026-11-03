@@ -244,6 +244,29 @@ def test_learn_job_auto_applies_recipe_without_new_posts(pg, monkeypatch):
     assert _usage(pg, B)[3] == 0  # a learn is not a sync
 
 
+def test_orders_learn_starts_on_the_admins_own_orders_page(pg, monkeypatch):
+    """The admin's connection holds the orders page they landed on at login: the learn starts there, not at the home
+    page, which skips the Profile -> Order History clicks."""
+    store.put_recipe(pg, "zepto", BASE)
+    _admin(pg)
+    _seed_profile(B)
+    store.set_connection(pg, B, "zepto", status="connected", orders_page_url="https://www.zepto.test/my/orders")
+    calls = []
+    monkeypatch.setattr(worker.sync, "learn", _learner(calls))
+    _run(pg, B, "learn", payload={"reason": "manual"})
+    assert calls[0]["start_url"] == "https://www.zepto.test/my/orders"
+
+
+def test_orders_learn_without_a_saved_orders_page_starts_normally(pg, monkeypatch):
+    store.put_recipe(pg, "zepto", BASE)
+    _admin(pg)
+    _seed_profile(B)
+    calls = []
+    monkeypatch.setattr(worker.sync, "learn", _learner(calls))
+    _run(pg, B, "learn", payload={"reason": "manual"})
+    assert calls[0]["start_url"] is None
+
+
 def test_learn_job_waits_for_approval(pg, pg2, monkeypatch):
     store.put_recipe(pg, "zepto", BASE)
     _admin(pg)

@@ -174,7 +174,15 @@ def test_learn_threads_approval_and_never_blocks_media(monkeypatch, tmp_path):
     assert out == {"site": "zepto"} and saved == []
     assert opened == [{"profile_dir": tmp_path, "location": {}, "proxy_server": "http://127.0.0.1:1"}]
     assert not opened[0].get("block_media") and not opened[0].get("login_mode")
-    assert discovered == [{"approve": approve, "preapproved": ["^x$"]}]
+    assert discovered == [{"approve": approve, "preapproved": ["^x$"], "start_url": None}]
+
+
+def test_learn_passes_the_start_url_to_discovery(monkeypatch, tmp_path):
+    discovered = []
+    _fake_open_site(monkeypatch, [])
+    monkeypatch.setattr(agent, "discover", lambda *a, **k: discovered.append(k) or {"site": "zepto"})
+    sync.learn("zepto", profile_dir=tmp_path, location={}, save=False, start_url="https://www.zepto.test/orders")
+    assert discovered[0]["start_url"] == "https://www.zepto.test/orders"
 
 
 def test_learn_saves_by_default(monkeypatch):

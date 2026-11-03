@@ -482,9 +482,13 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
                         if isinstance(e, dict) and e.get("url_regex")]
     location = _location(conn, job.user_id)
     if kind == "orders":
+        extra = {}
+        if not fake:  # start on the admin's own orders page (saved when they connected), not the home page
+            extra["start_url"] = (store.get_connection(conn, job.user_id, sites.db_site(job.site)) or {}).get(
+                "orders_page_url")
         learned = {"orders": (fake_sites.learn if fake else sync.learn)(
             job.site, profile_dir=profile_dir, location=location, proxy_server=proxy_server, approve=approve,
-            preapproved=preapproved, save=False)}
+            preapproved=preapproved, save=False, **extra)}
     elif fake:
         out = fake_sites.learn(job.site, approve, preapproved, kind=kind)
         learned = {"search": out} if kind == "search" else out

@@ -155,13 +155,15 @@ def login(site: str, phone: str | None = None, dry_run: bool = False, prompt=Non
 # --- learn -------------------------------------------------------------------
 
 def learn(site: str, profile_dir=None, location: dict | None = None, proxy_server: str | None = None,
-          approve: Callable[[list[dict]], bool] | None = None, preapproved=(), save: bool = True) -> dict:
+          approve: Callable[[list[dict]], bool] | None = None, preapproved=(), save: bool = True,
+          start_url: str | None = None) -> dict:
     """Run discovery and return the validated recipe. Never blocks media (the agent needs the real page).
     approve(new_entries) -> bool replaces the terminal prompt for new POST-allowlist entries; preapproved regexes
     count as already allowed. save=False leaves recipes/ untouched (the caller stores the recipe)."""
     with open_site(site, profile_dir=profile_dir, location=location,
                    proxy_server=proxy_server) as (_, page, guard, capture):
-        recipe = agent.discover(site, page, guard, capture, approve=approve, preapproved=preapproved)
+        recipe = agent.discover(site, page, guard, capture, approve=approve, preapproved=preapproved,
+                                start_url=start_url)
     if save:
         recipes.save(site, recipe)
         print(f"Saved {recipes.recipe_path(site)}")

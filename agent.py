@@ -444,6 +444,7 @@ class Discovery:
         self.waits = 0
         self.loads = 0
         self.page_no = 1  # the pager page we are on; the next click goes to page_no + 1
+        self.pager_clicks = 0  # pager clicks made by code (auto_load_more), capped so a dead pager cannot loop
         self.force_llm = False
         self.last_key = None
         self.asks = 0
@@ -630,11 +631,13 @@ class Discovery:
             if not self._click_next_page_number():
                 return False
             settle(self.page)
+            self.pager_clicks += 1
             self.history.append(f"system clicked page {self.page_no} of the pager to load more orders")
             log.info("[%s] auto-clicked pager page %d", self.site, self.page_no)
             self.loads += 1
             return self.order_responses() > before or self.order_pages() >= 2
         self.click(target["ref"])
+        self.pager_clicks += 1
         settle(self.page)
         self.history.append(f"system clicked {describe(target)} to load more orders")
         log.info("[%s] auto-clicked %s", self.site, mask_log(describe(target), self.secrets))
@@ -645,7 +648,7 @@ class Discovery:
     def premature(self) -> str | None:
         # Scrolling alone proves nothing (Zepto pages with a "Load More" button): more order data must arrive.
         # After two refusals accept anyway - the history may really be a single page.
-        if (self.loads >= 2 and self.order_pages() >= 2) or self.refusals >= 2:
+        if self.order_pages() >= 2 or self.refusals >= 2:
             return None
         if self.auto_load_more() and self.order_pages() >= 2:
             return None
@@ -662,8 +665,21 @@ class Discovery:
         if not self.snap["overlay"] and shows_login_button(self.snap["elements"]):
             self.done = {"success": False, "note": "LOGGED_OUT", "url": self.page.url}
 
+    PAGER_CLICK_CAP = 4
+
     def fast_decision(self):
-        """A step code can take without any model; None defers to Jev/Claude."""
+        """A step code can take without any model; None defers to Jev/Claude. Order discovery: once orders have
+        loaded, code clicks the pager (a next page number, Load more), and as soon as a DIFFERENT page of orders
+        has arrived the paging is captured and the discovery finishes. Not for the login agent."""
+        if self.login or self.order_responses() < 1:
+            return None
+        if self.order_pages() >= 2:
+            return "finish", {"success": True, "note": "done"}, "code"
+        if self.pager_clicks < self.PAGER_CLICK_CAP:
+            before = self.pager_clicks
+            self.auto_load_more()
+            if self.pager_clicks > before:
+                return "wait", {}, "code"
         return None
 
     def blocked_page(self) -> bool:
@@ -1439,14 +1455,16 @@ def learn_from_seed(site: str, page, guard, capture, seed: dict, approve: Approv
 
 
 def discover(site: str, page, guard, capture, approve: Approve | None = None,
-             preapproved: Iterable[str] = ()) -> dict:
+             preapproved: Iterable[str] = (), start_url: str | None = None) -> dict:
     """Return a validated recipe (not yet saved): from a seed if one exists, else by running the agent.
     approve(new_entries) -> bool decides new POST-allowlist entries instead of the terminal; preapproved regexes
     count as already allowed."""
     if seed := recipes.load_seed(site):
         return learn_from_seed(site, page, guard, capture, seed, approve=approve, preapproved=preapproved)
     hint = recipes.hint_path(site)
-    start = hint.read_text(encoding="utf-8").strip() if hint.exists() else home_url(site)
+    # start_url: the admin's own orders page from their connection (skips Profile -> Order History); else the CLI's
+    # hint file, else the home page.
+    start = start_url or (hint.read_text(encoding="utf-8").strip() if hint.exists() else home_url(site))
     goto(page, start)
     d = Discovery(site, page, guard, capture)
     d.trace.append({"action": "navigate", "url": start, "url_after": urlsplit(page.url).path})

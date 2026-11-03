@@ -74,3 +74,75 @@ def test_a_different_page_of_orders_counts_as_a_second_page():
     d = _disco(None)
     d.capture = SimpleNamespace(items=_items([1, 2, 3], [4, 5, 6]))
     assert d.order_pages() == 2
+
+
+# ---- code shortcuts in order discovery -------------------------------------------------------------------
+
+def _loaded(d, ids_per_response):
+    d.capture = SimpleNamespace(items=_items(*ids_per_response))
+    d.login, d.pager_clicks = False, 0
+    return d
+
+
+def test_the_login_agent_never_gets_the_pager_shortcut():
+    d = _loaded(_disco(None), [[1, 2, 3]])
+    d.login = True
+    assert d.fast_decision() is None
+
+
+def test_nothing_is_decided_before_any_orders_have_loaded():
+    d = _loaded(_disco(None), [])
+    assert d.fast_decision() is None
+
+
+def test_once_a_different_page_has_arrived_discovery_finishes_without_a_model():
+    d = _loaded(_disco(None), [[1, 2, 3], [4, 5, 6]])
+    assert d.fast_decision() == ("finish", {"success": True, "note": "done"}, "code")
+
+
+def test_code_clicks_the_pager_while_only_the_first_page_is_loaded_and_stops_at_the_cap():
+    d = _loaded(_disco(None), [[1, 2, 3], [1, 2, 3]])
+
+    def click():
+        d.pager_clicks += 1
+        return False
+    d.auto_load_more = click
+    for _ in range(agent.Discovery.PAGER_CLICK_CAP):
+        assert d.fast_decision() == ("wait", {}, "code")
+    assert d.fast_decision() is None  # a dead pager hands the page back to the model
+
+
+def test_a_pager_that_cannot_be_clicked_defers_to_the_model():
+    d = _loaded(_disco(None), [[1, 2, 3]])
+    d.auto_load_more = lambda: False  # nothing clicked, nothing counted
+    assert d.fast_decision() is None
+
+
+def test_one_captured_different_page_is_enough_proof_to_finish():
+    d = _loaded(_disco(None), [[1, 2, 3], [4, 5, 6]])
+    d.refusals, d.loads = 0, 1
+    assert d.premature() is None
+
+
+def test_discovery_starts_on_the_admins_own_orders_page_when_given(monkeypatch):
+    seen = []
+    monkeypatch.setattr(agent, "goto", lambda page, url: seen.append(url))
+    monkeypatch.setattr(agent.recipes, "load_seed", lambda site: None)
+    page = SimpleNamespace(url="https://www.zomato.com/users/x/ordering")
+
+    class Stub:
+        trace = []
+
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self):
+            return {"success": False, "note": "LOGGED_OUT", "url": ""}
+    monkeypatch.setattr(agent, "Discovery", Stub)
+    with pytest.raises(agent.SessionExpired):
+        agent.discover("zomato", page, None, None, start_url="https://www.zomato.com/users/me/ordering")
+    assert seen == ["https://www.zomato.com/users/me/ordering"]
+    seen.clear()
+    with pytest.raises(agent.SessionExpired):
+        agent.discover("zomato", page, None, None)  # no start_url: the usual start page
+    assert seen and seen != ["https://www.zomato.com/users/me/ordering"]
