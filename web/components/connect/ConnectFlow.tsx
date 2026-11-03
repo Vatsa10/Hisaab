@@ -23,6 +23,7 @@ type View =
   | { kind: "question"; question: string }
   | { kind: "working"; text: string }
   | { kind: "syncing" }
+  | { kind: "waiting" }
   | { kind: "synced" };
 
 /**
@@ -39,6 +40,7 @@ export function viewForJob(job: Job | null, app: AppInfo): View {
   if (!job) return { kind: "working", text: `Opening ${app.name}…` };
   if (job.status === "failed") return { kind: "failed", message: failureMessage(job.error) };
   const stage = job.progress.stage;
+  if (stage === "waiting_for_setup") return { kind: "waiting" };
   if (job.status === "done" || stage === "synced") return { kind: "synced" };
   if (stage === "otp_needed") return { kind: "otp" };
   if (stage === "question_needed") return { kind: "question", question: job.progress.question ?? "" };
@@ -353,6 +355,7 @@ export function ConnectFlow({
         );
         break;
       case "syncing":
+      case "waiting":
       case "synced":
         title = `${app.name} connected`;
         body = (

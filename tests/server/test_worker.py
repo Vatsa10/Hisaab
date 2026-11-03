@@ -259,6 +259,38 @@ def test_main_survives_a_crashing_job(pg, monkeypatch):
     assert pg.execute("select status, error from jobs").fetchone() == ("failed", "RuntimeError: kaboom")
 
 
+def test_a_dead_browser_driver_fails_the_job_plainly(pg, monkeypatch):
+    def boom(*a, **k):
+        raise AttributeError("'PlaywrightContextManager' object has no attribute '_playwright'")
+    monkeypatch.setattr(worker.sync, "login", boom)
+    jobs.enqueue(pg, A, "connect", "zepto", {"phone": "9876543210"})
+    worker.run_job(jobs.claim(pg, "w", ("connect",)), pg, settings_for_tests())
+    assert pg.execute("select status, error from jobs").fetchone() == ("failed", "worker_unhealthy")
+    assert worker._job_infra_failed is True
+
+
+def test_a_worker_whose_driver_fails_twice_in_a_row_exits(pg, monkeypatch):
+    for _ in range(3):
+        jobs.enqueue(pg, A, "sync", "zepto")
+        jobs.claim(pg, "x", ("sync",))
+        pg.execute("update jobs set status='done' where status='running'")
+    pg.execute("delete from jobs")
+    for site in ("zepto", "blinkit", "swiggy"):
+        jobs.enqueue(pg, A, "sync", site)
+    exits, ran = [], []
+
+    def run(job, conn, s, **k):
+        ran.append(job.id)
+        worker._job_infra_failed = True
+        jobs.finish(conn, job.id, error="worker_unhealthy", worker_id=job.worker_id)
+    monkeypatch.setattr(worker, "run_job", run)
+    monkeypatch.setattr(worker, "settings", settings_for_tests)
+    monkeypatch.setattr(worker.time, "sleep", lambda _: None)
+    worker.main("w1", poll_s=0.01, max_loops=10, exit_process=exits.append)
+    assert exits == [3] and len(ran) == 2  # it stopped after the second strike; the third job stays queued
+    assert pg.execute("select count(*) from jobs where status='queued'").fetchone()[0] == 1
+
+
 def test_main_reconnects_after_a_db_error(pg, monkeypatch):
     import psycopg
     jobs.enqueue(pg, A, "sync", "zepto")

@@ -55,7 +55,8 @@ function FoundCard({
 
 export interface SyncProgressProps {
   app: AppInfo;
-  state: "syncing" | "synced";
+  /** "waiting": signed in, but this app's orders are not set up yet; they import once it is. */
+  state: "syncing" | "synced" | "waiting";
   ordersFound?: number;
   amountFound?: number;
   /** Month of the earliest order found, e.g. "Oct 2025". */
@@ -68,7 +69,8 @@ export interface SyncProgressProps {
 
 /** The first sync after signing in: a live bar (and count so far) while it runs, then what was found. */
 export function SyncProgress({ app, state, ordersFound, amountFound, since, nextApp, onNext, onDone }: SyncProgressProps) {
-  const done = state === "synced";
+  const waiting = state === "waiting";
+  const done = state === "synced" || waiting;
   const orders = ordersFound ?? 0;
 
   return (
@@ -81,11 +83,24 @@ export function SyncProgress({ app, state, ordersFound, amountFound, since, next
           <CheckIcon size={22} strokeWidth={2.25} />
         </span>
         <p className="text-body text-ink-muted">
-          Signed in to {app.name}. {done ? "Your order history is in." : "Reading your order history now."}
+          Signed in to {app.name}.{" "}
+          {waiting
+            ? `Setting up ${app.name}.`
+            : done
+              ? "Your order history is in."
+              : "Reading your order history now."}
         </p>
       </div>
 
-      {done ? (
+      {waiting ? (
+        <div role="status" className="rounded-control bg-canvas px-4 py-3.5">
+          <p className="text-title">Almost there</p>
+          <p className="mt-0.5 text-label text-ink-muted">
+            We&apos;ll import your {app.name} orders as soon as it&apos;s ready. You can close this; your apps list
+            will update.
+          </p>
+        </div>
+      ) : done ? (
         <div role="status">
           <FoundCard label="Found" orders={orders} amount={amountFound} since={since} />
         </div>

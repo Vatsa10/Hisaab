@@ -17,6 +17,7 @@ export type JobStage =
   | "question_needed"
   | "answer_received"
   | "syncing"
+  | "waiting_for_setup"
   | "synced";
 
 export interface JobProgress {

@@ -401,6 +401,15 @@ describe("ConnectFlow", () => {
     expect(await screen.findByText("Oct 2025 – today")).toBeInTheDocument();
   });
 
+  it("a login with no orders recipe yet says it is setting up, not that 0 orders were found", async () => {
+    await startFlow();
+    push(job({ status: "done", progress: { stage: "waiting_for_setup" } }));
+    expect(screen.getByText(/Setting up Swiggy/)).toBeInTheDocument();
+    expect(screen.getByText("Almost there")).toBeInTheDocument();
+    expect(screen.queryByText(/0 orders/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Found")).not.toBeInTheDocument();
+  });
+
   it("moves focus to the sheet title when a step change drops it", async () => {
     await startFlow();
     (document.activeElement as HTMLElement | null)?.blur();

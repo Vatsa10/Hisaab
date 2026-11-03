@@ -178,6 +178,17 @@ def _clean_error(e: Exception, phone: str | None) -> str:
     return f"{type(e).__name__}: {line}"[:MAX_ERROR_LEN]
 
 
+# A dead Playwright driver or Chrome launch is this worker's own fault, not the user's: the job fails with a plain
+# "worker_unhealthy", and a worker that does it twice in a row exits so its supervisor starts a fresh one.
+INFRA_MARKERS = ("Connection closed while reading from the driver", "object has no attribute '_playwright'")
+INFRA_STRIKES_MAX = 2
+_job_infra_failed = False
+
+
+def _is_infra_error(e: BaseException) -> bool:
+    return any(m in str(e) for m in INFRA_MARKERS)
+
+
 def _status(conn, user_id: str, site: str) -> str | None:
     row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user_id, site)).fetchone()
     return row[0] if row else None
@@ -872,6 +883,8 @@ def _do_learn_cart(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_se
 
 
 def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None] | None = None) -> None:
+    global _job_infra_failed
+    _job_infra_failed = False
     """Run one claimed job. The user's encrypted profile is restored into a fresh per-job directory, the browser
     goes out through the user's sticky proxy session (if configured), the job heartbeats while it runs, and the
     profile is saved back only after a success. The plaintext directory is always deleted. A connect job gets
@@ -1220,8 +1233,13 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
         fail("profile_owner_mismatch")
     except Exception as e:
         msg = _clean_error(e, phone)
-        log.error("job %s failed: %s", job.id, msg)
-        fail(msg, interrupted=True)
+        if _is_infra_error(e):
+            _job_infra_failed = True
+            log.error("job %s: worker %s is unhealthy (browser driver failed): %s", job.id, job.worker_id, msg)
+            fail("worker_unhealthy")
+        else:
+            log.error("job %s failed: %s", job.id, msg)
+            fail(msg, interrupted=True)
     finally:
         stop_hb.set()
         heartbeat.join(5)
@@ -1398,7 +1416,7 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
         old_handler = signal.signal(signal.SIGTERM, drain.on_sigterm)
         installed = True
     conn = None
-    failures = loops = 0
+    failures = loops = infra_strikes = 0
     try:
         while (max_loops is None or loops < max_loops) and not drain.requested.is_set():
             loops += 1
@@ -1431,6 +1449,13 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                 finally:
                     drain.end_job()
                 failures = 0
+                infra_strikes = infra_strikes + 1 if _job_infra_failed else 0
+                if infra_strikes >= INFRA_STRIKES_MAX:
+                    log.critical("worker %s: %s jobs in a row failed on the browser driver; exiting so a fresh "
+                                 "worker replaces it", worker_id, infra_strikes)
+                    browser.close_warm(save=False)
+                    exit_process(3)
+                    break
             except Exception as e:
                 failures += 1
                 delay = min(30.0, poll_s * 2 ** failures)
