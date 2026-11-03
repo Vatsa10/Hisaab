@@ -135,16 +135,23 @@ class ChoiceBody(BaseModel):
     address_id: str = Field(min_length=1, max_length=300)
 
 
+class PinBody(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+
+
 class ProfileBody(BaseModel):
-    """Either a typed address (geocoded) or a choice of one of the user's saved app addresses, never both."""
+    """One of: a typed address (geocoded), a choice of one of the user's saved app addresses, or the device's
+    current location (a pin)."""
     address: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=200)] | None = None
     choice: ChoiceBody | None = None
+    pin: PinBody | None = None
     display_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None = None
 
     @model_validator(mode="after")
     def _one_of(self):
-        if (self.address is None) == (self.choice is None):
-            raise ValueError("send either address or choice")
+        if sum(x is not None for x in (self.address, self.choice, self.pin)) != 1:
+            raise ValueError("send exactly one of address, choice or pin")
         return self
 
 
@@ -492,10 +499,31 @@ def _put_choice(body: ProfileBody, user: str, conn) -> dict:
     return {"address": text, "lat": lat, "lon": lon, "display": display, "chosen": chosen}
 
 
+@app.post("/profile/locate")
+def locate(body: PinBody, user: str = Depends(current_user), conn=Depends(get_conn)):
+    """Where the device says you are, matched to your saved addresses on each app (nearest first, within 2 km).
+    The pin is used for this lookup only; nothing is stored."""
+    return {"matches": addresses_store.nearby(conn, user, body.lat, body.lon)}
+
+
+def _put_pin(body: ProfileBody, user: str, conn) -> dict:
+    """Use the device's current location as the delivery place (no app address matched it)."""
+    lat, lon = round(body.pin.lat, 6), round(body.pin.lon, 6)
+    text = "Current location"
+    conn.execute(
+        """INSERT INTO profiles (user_id, display_name, address, lat, lon) VALUES (%s,%s,%s,%s,%s)
+           ON CONFLICT (user_id) DO UPDATE SET display_name=COALESCE(excluded.display_name, profiles.display_name),
+             address=excluded.address, lat=excluded.lat, lon=excluded.lon, chosen=NULL""",
+        (user, body.display_name or None, text, lat, lon))
+    return {"address": text, "lat": lat, "lon": lon, "display": None}
+
+
 @app.put("/profile")
 def put_profile(body: ProfileBody, user: str = Depends(current_user), conn=Depends(get_conn)):
     if body.choice is not None:
         return _put_choice(body, user, conn)
+    if body.pin is not None:
+        return _put_pin(body, user, conn)
     loc = _geocode(body.address)
     lat, lon = float(loc["lat"]), float(loc["lon"])
     conn.execute(

@@ -72,6 +72,23 @@ def get(conn, user_id: str, site: str, address_id: str) -> dict | None:
     return next((r for r in _rows(conn, user_id, db_site(site)) if r["address_id"] == address_id), None)
 
 
+NEARBY_M = 2000.0  # a saved address further than this from where you stand is not offered as "this is you"
+
+
+def nearby(conn, user_id: str, lat: float, lon: float, radius_m: float = NEARBY_M) -> list[dict]:
+    """The user's nearest saved address on each app, within radius_m of a pin (their current location), nearest
+    first: {site, address_id, label, line, area, city, lat, lon, distance_m}."""
+    best: dict[str, dict] = {}
+    for site, address_id, label, line, area, city, a_lat, a_lon in conn.execute(
+            "SELECT site, address_id, label, line, area, city, lat, lon FROM app_addresses "
+            "WHERE user_id=%s AND lat IS NOT NULL AND lon IS NOT NULL", (user_id,)).fetchall():
+        d = addresses.distance_m((lat, lon), (float(a_lat), float(a_lon)))
+        if d <= radius_m and (site not in best or d < best[site]["distance_m"]):
+            best[site] = {"site": site, "address_id": address_id, "label": label, "line": line, "area": area,
+                          "city": city, "lat": float(a_lat), "lon": float(a_lon), "distance_m": round(d)}
+    return sorted(best.values(), key=lambda r: r["distance_m"])
+
+
 def saved_for(conn, user_id: str, site: str, near: tuple[float, float] | None = None) -> dict | None:
     """The app's own saved address to price (or fill) at for the user's chosen place, or None when this app has
     no saved address there (then the app is not priced: "Add this address in <App> to compare here").
