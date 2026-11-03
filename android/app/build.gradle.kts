@@ -14,7 +14,7 @@ android {
         versionCode = 1
         versionName = "0.1.0-beta"
         // The PWA's API. Change it here or on the app's screen.
-        buildConfigField("String", "DEFAULT_SERVER", "\"https://api.gethisaab.online\"")
+        buildConfigField("String", "DEFAULT_SERVER", "\"https://api.hisaab.vatsa.online\"")
     }
 
     buildFeatures { buildConfig = true }

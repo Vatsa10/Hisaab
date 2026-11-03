@@ -49,17 +49,19 @@ and `plan7` specs). That proves the code, not your accounts: sections 7 to 9 are
 
 - [ ] **Proxy vendor** with sticky Indian residential sessions; set `PROXY_URL_TEMPLATE` (with the session-id
   placeholder). Verify: a connect from the worker shows an Indian IP at the vendor's dashboard.
-- [ ] **VAPID keys** (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT=mailto:admin@gethisaab.online`) in `deploy/azure/.env.deploy`;
+- [ ] **VAPID keys** (`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT=mailto:vatsajoshi2@gmail.com`) in `deploy/azure/.env.deploy`;
   `deploy.sh` forwards them (the private key via the params file only).
   Verify: enabling notifications in the PWA subscribes without an error.
 - [ ] **SMTP sender and port.** Set `SMTP_HOST`, `SMTP_PORT` (`deploy.sh` refuses `SMTP_HOST` without it), user and password in `.env.deploy`. Many clouds (Azure included) block
   outbound port 25: use 587 (STARTTLS) or 465 from a provider that allows it. Verify: from the deployed worker
   container (or a Container Apps job with the same settings) send one mail to yourself; it arrives. Without this,
   invites, logged-out and error-budget mails never leave.
-- [ ] **Domains.** The marketing site goes at the apex domain (`gethisaab.online`) and the app at `app.gethisaab.online`.
-- [ ] **DNS for mail.** Set SPF, DKIM and DMARC records for the sending domain (`gethisaab.online`) so invites don't land in
-  spam. Use `SMTP_FROM="Hisaab <no-reply@gethisaab.online>"`.
-- [ ] **`APP_URL`** = the PWA's public address (`https://app.gethisaab.online`; links in mails); `deploy.sh` refuses localhost or non-https. Verify: the invite mail's link opens the PWA.
+- [ ] **Domains.** The marketing site goes at the apex domain (`hisaab.vatsa.online`) and the app at `app.hisaab.vatsa.online`.
+- [ ] **Mail.** All mail comes from `vatsajoshi2@gmail.com`. Send through Gmail SMTP (`smtp.gmail.com`, port 587, STARTTLS) with an
+  app password in `SMTP_USER` / `SMTP_PASSWORD`, so Gmail's own SPF and DKIM apply and no DNS records are needed. Use
+  `SMTP_FROM="Hisaab <vatsajoshi2@gmail.com>"`. Gmail caps a normal account at about 500 mails a day; move to a mail provider before that.
+- [ ] **API address.** The API goes at `api.hisaab.vatsa.online` (the Android app's default server).
+- [ ] **`APP_URL`** = the PWA's public address (`https://app.hisaab.vatsa.online`; links in mails); `deploy.sh` refuses localhost or non-https. Verify: the invite mail's link opens the PWA.
 - [ ] **`CORS_ORIGINS`** = exactly the PWA's origin (scheme and host, no trailing slash; comma-separated for more).
   The default is `http://localhost:3000`, which blocks the deployed PWA. Verify:
   `curl -s -D- -o /dev/null -H "Origin: https://<pwa>" "$API/healthz"` shows `access-control-allow-origin` for it, and
