@@ -505,6 +505,10 @@ def learn_food(site: str, location: dict, profile_dir, proxy_server=None, approv
         rest, rows = _learn_restaurants(site, location, page, guard, capture, approve, pre, llm)
         openable = [r for r in rows if r["is_open"] is not False and r["url"]]
         if len(openable) < 2:
+            log.warning("%s: %d restaurants mapped, %d with a link, %d open; first: %s", site, len(rows),
+                        sum(bool(r["url"]) for r in rows), len(openable),
+                        [{"name": r["name"][:20], "open": r["is_open"], "url": urlsplit(r["url"] or "").path[:70]}
+                         for r in rows[:3]])
             raise sync.RecipeError(f"{site}: need two open restaurants with a page link, found {len(openable)}")
         menu = _learn_menu(site, location, page, guard, capture, approve, pre, llm, openable[0])
     _replay(site, location, profile_dir, proxy_server, rest, menu, openable[1])
