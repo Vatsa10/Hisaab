@@ -68,6 +68,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ---- stop leftovers from an earlier run (a stopped demo can leave workers behind that steal jobs) ---------------
+if command -v powershell.exe >/dev/null 2>&1; then
+  powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'server\.(worker|scheduler)|uvicorn server\.api|next[\/]dist[\/]bin[\/]next' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+else
+  pkill -f "server\.worker|server\.scheduler|uvicorn server\.api" 2>/dev/null || true
+fi
+
 docker info >/dev/null 2>&1 || fail "Docker Desktop is not running"
 
 # ---- master key for your saved app logins (random, kept only in .demo/master.key) ------------------------------
