@@ -33,9 +33,10 @@ class FeeRulesBody(BaseModel):
     verified: bool
 
 
-# Which sites each learn kind covers: order history on connectable sites, grocery search, restaurants+menus.
+# Which sites each learn kind covers: order history on connectable sites, grocery search, restaurants+menus, and
+# saved delivery addresses on every connectable account (Instamart's are Swiggy's: learned on the swiggy account).
 LEARN_SITES = {"orders": admin.CONNECTABLE_SITES, "search": cart.SEARCH_SITES, "food": cart.FOOD_SITES,
-               "cart": cart.SEARCH_SITES}
+               "cart": cart.SEARCH_SITES, "addresses": (*admin.CONNECTABLE_SITES, "instamart")}
 
 
 class DecideBody(BaseModel):
@@ -108,21 +109,23 @@ def build_router(current_user, get_conn) -> APIRouter:
         return Response(status_code=204)
 
     @router.post("/learn/{site}", status_code=202)
-    def learn(site: str, kind: Literal["orders", "search", "food", "cart"] = "orders", user: str = Depends(require_admin),
-              conn=Depends(get_conn)):
+    def learn(site: str, kind: Literal["orders", "search", "food", "cart", "addresses"] = "orders",
+              user: str = Depends(require_admin), conn=Depends(get_conn)):
         _known(site)
         if site not in LEARN_SITES[kind]:
             if kind == "orders":
                 raise HTTPException(400, "Instamart is learned through the swiggy connection")
             raise HTTPException(400, f"{_app(site)} has no {kind} recipe to learn")
         account = cart.db_site(site)
+        if kind == "addresses":
+            site = account  # one saved-address list per account (Instamart -> swiggy)
         row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user, account)).fetchone()
         if row is None or row[0] != "connected":
             raise HTTPException(409, f"Connect {_app(account)} on your own account first.")
         if kind == "cart" and conn.execute(
                 "SELECT 1 FROM recipes WHERE site=%s AND kind='search' AND healthy", (site,)).fetchone() is None:
             raise HTTPException(409, f"Learn {_app(site)} prices (search) first.")
-        if kind != "orders":
+        if kind not in ("orders", "addresses"):  # an address list is read from the account, not a location
             prof = store.get_profile(conn, user) or {}
             if prof.get("lat") is None or prof.get("lon") is None:
                 raise HTTPException(409, "Add your delivery address first.")

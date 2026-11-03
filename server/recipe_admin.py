@@ -269,6 +269,8 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
     auto_applied with reason as given ("learned" or "drift_relearn"). Returns {"approval_id", "status",
     "version"} (version None while pending)."""
     clean, flagged = sanitize_for_sharing(recipe, site)
+    if kind == "addresses" and (err := _addresses_recipe_error(clean)):
+        raise ValueError(f"addresses recipe rejected: {err}")  # only a read-only GET is ever filed
     with conn.transaction():
         # Locked so a publish cannot slip in between reading the base and writing over it.
         base = conn.execute("SELECT recipe, version FROM recipes WHERE site=%s AND kind=%s FOR UPDATE",
@@ -293,6 +295,8 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
         ).fetchone()[0]
     if not hold and kind == "orders":
         enqueue_waiting_syncs(conn, site)
+    if not hold and kind == "addresses":
+        enqueue_address_refresh(conn, site)
     return {"approval_id": str(approval_id), "status": "pending" if hold else "auto_applied", "version": version}
 
 
@@ -335,6 +339,9 @@ def decide(conn, approval_id: str, decision: str, admin_user_id: str) -> str:
                 # The sanitized recipe that would be published is checked again: an invalid one never goes live.
                 log.warning("approval %s refused: %s cart recipe is invalid (%s)", row["id"], row["site"], err)
                 failure = InvalidRecipe(str(approval_id), err)
+            elif row["kind"] == "addresses" and (err := _addresses_recipe_error(row["proposed"])):
+                log.warning("approval %s refused: %s addresses recipe is invalid (%s)", row["id"], row["site"], err)
+                failure = InvalidRecipe(str(approval_id), err)
             else:
                 store.put_recipe(conn, row["site"], row["proposed"], kind=row["kind"])
         if failure is not None:
@@ -347,7 +354,33 @@ def decide(conn, approval_id: str, decision: str, admin_user_id: str) -> str:
         raise failure
     if status == "approved" and row["kind"] == "orders" and not row["live_request"]:
         enqueue_waiting_syncs(conn, row["site"])
+    if status == "approved" and row["kind"] == "addresses" and not row["live_request"]:
+        enqueue_address_refresh(conn, row["site"])
     return status
+
+
+def _addresses_recipe_error(recipe) -> str | None:
+    """Why an addresses recipe must not go live (it is one read-only GET and nothing else), or None."""
+    import addresses  # the browser-side module; imported only when an addresses recipe is filed
+    if not isinstance(recipe, dict):
+        return "not an object"
+    return addresses.check_addresses_recipe(recipe)
+
+
+def enqueue_address_refresh(conn, site: str) -> int:
+    """A site's addresses recipe was just published: queue the lightweight saved-address refresh (search op
+    "addresses") for every user connected to that account, so their addresses appear with no action of theirs.
+    A user with an active job there (Conflict) or deleted (NoSuchUser) is skipped. Returns how many were queued."""
+    users = [str(r[0]) for r in conn.execute(
+        "SELECT user_id FROM connections WHERE site=%s AND status='connected' ORDER BY user_id", (site,))]
+    queued = 0
+    for user_id in users:
+        try:
+            jobs.enqueue(conn, user_id, "search", site, {"op": "addresses"})
+            queued += 1
+        except (jobs.Conflict, jobs.NoSuchUser):
+            continue
+    return queued
 
 
 def enqueue_waiting_syncs(conn, site: str) -> int:

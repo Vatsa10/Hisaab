@@ -1,6 +1,7 @@
 """Worker: claims connect/sync/learn jobs from Postgres and runs the browser login/sync/learn code per user."""
 import _thread
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -355,7 +356,12 @@ PRICE_NO_LEARNER_BODY = "Its price recipe stopped working and no admin account i
 PRICE_RELEARN_FAILED_BODY = ("Its price recipe stopped working and the automatic re-learn did not publish a new one. "
                              "Review it in the admin view.")
 # learn kind -> the recipe kinds it publishes
-LEARN_RECIPE_KINDS = {"orders": ("orders",), "search": ("search",), "food": ("restaurants", "menu")}
+LEARN_RECIPE_KINDS = {"orders": ("orders",), "search": ("search",), "food": ("restaurants", "menu"),
+                      "addresses": ("addresses",)}
+ADDRESSES_NO_LEARNER_BODY = ("Its saved-address recipe stopped working and no admin account is connected to "
+                             "re-learn it.")
+ADDRESSES_RELEARN_FAILED_BODY = ("Its saved-address recipe stopped working and the automatic re-learn did not "
+                                 "publish a new one. Review it in the admin view.")
 
 
 def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str, kind: str = "orders") -> None:
@@ -366,6 +372,8 @@ def _pause_and_alert(conn, s: Settings, site: str, note: str, body: str, kind: s
             recipe_admin.pause_site(conn, site, recipe_kind, note, reason="auto")
         if kind == "orders":
             title, key = f"{_app(site)} sync paused", f"site_paused:{site}:{usage.today(tz=s.app_tz)}"
+        elif kind == "addresses":
+            title, key = f"{_app(site)} saved addresses paused", f"site_paused:{kind}:{site}:{usage.today(tz=s.app_tz)}"
         else:
             title, key = f"{_app(site)} prices paused", f"site_paused:{kind}:{site}:{usage.today(tz=s.app_tz)}"
         notify.alert_admins(conn, kind="site_paused", title=title, body=body, dedupe_key=key)
@@ -390,8 +398,9 @@ def _pause_after_failed_relearn(conn, s: Settings, job: jobs.Job, error: str) ->
     and alerts the admins. A supervised learn never pauses."""
     if _is_auto_learn(job):
         kind = _learn_kind(job)
-        _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN],
-                         RELEARN_FAILED_BODY if kind == "orders" else PRICE_RELEARN_FAILED_BODY, kind)
+        body = {"orders": RELEARN_FAILED_BODY, "addresses": ADDRESSES_RELEARN_FAILED_BODY}.get(
+            kind, PRICE_RELEARN_FAILED_BODY)
+        _pause_and_alert(conn, s, job.site, f"drift re-learn failed: {error}"[:MAX_ERROR_LEN], body, kind)
 
 
 def _requeue_stale(conn, s: Settings) -> int:
@@ -426,7 +435,7 @@ def _on_search_drift(conn, s: Settings, job: jobs.Job, db_site: str, recipe_kind
     """Ruling R11, as _on_drift for a price recipe: on the healthy -> unhealthy transition, enqueue an unattended
     learn of that kind ("search", or "food" for a restaurants / menu recipe) on a connected admin account, or,
     with none, pause the site's recipes of that kind and alert the admins."""
-    kind = "search" if recipe_kind == "search" else "food"
+    kind = recipe_kind if recipe_kind in ("search", "addresses") else "food"
     try:
         if not recipe_admin.mark_drift(conn, job.site, recipe_kind, note[:MAX_ERROR_LEN]):
             return
@@ -435,7 +444,8 @@ def _on_search_drift(conn, s: Settings, job: jobs.Job, db_site: str, recipe_kind
         log.error("drift handling for %s %s failed (%s)", job.site, kind, type(e).__name__)
         return
     if learner is None:
-        return _pause_and_alert(conn, s, job.site, "drift: no admin account connected", PRICE_NO_LEARNER_BODY, kind)
+        body = ADDRESSES_NO_LEARNER_BODY if kind == "addresses" else PRICE_NO_LEARNER_BODY
+        return _pause_and_alert(conn, s, job.site, "drift: no admin account connected", body, kind)
     try:
         jobs.enqueue(conn, learner, "learn", job.site, {"reason": "drift", "auto": True, "kind": kind})
     except jobs.Conflict:
@@ -491,7 +501,12 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
             preapproved=preapproved, save=False, **extra)}
     elif fake:
         out = fake_sites.learn(job.site, approve, preapproved, kind=kind)
-        learned = {"search": out} if kind == "search" else out
+        learned = {kind: out} if kind in ("search", "addresses") else out
+    elif kind == "addresses":  # read-only: one GET of the saved list, learned from the admin's account page
+        start_url = (store.get_connection(conn, job.user_id, sites.db_site(job.site)) or {}).get("orders_page_url")
+        learned = {"addresses": addresses.learn_addresses(
+            job.site, profile_dir, location=location, proxy_server=proxy_server, approve=approve,
+            preapproved=preapproved, llm=_learn_llm, start_url=start_url)}
     elif kind == "search":
         learned = {"search": search_learn.learn_search(job.site, location=location, profile_dir=profile_dir,
                                                        proxy_server=proxy_server, approve=approve,
@@ -548,6 +563,9 @@ def _judge():
     return judge
 
 
+ADDRESS_ENDPOINT_GONE = re.compile(r"HTTP (404|410)")
+
+
 def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, proxy_server: str | None,
                        fake: bool) -> None:
     """Best effort, after a successful login or sync: re-read the user's saved addresses on this app (a GET of
@@ -567,6 +585,15 @@ def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, pro
         log.info("job %s: %d saved addresses on %s", job.id, n, db_site)
     except Exception as e:
         log.warning("job %s: saved addresses not refreshed (%s)", job.id, type(e).__name__)
+        if not fake and isinstance(e, RuntimeError) and ADDRESS_ENDPOINT_GONE.match(str(e)):
+            # The learned GET itself is gone (404/410): like a drifted price recipe, re-learn it on an admin
+            # account once (or pause it and alert the admins). Never fails the job.
+            try:
+                gone = ADDRESS_ENDPOINT_GONE.match(str(e)).group(0)
+                _on_search_drift(conn, Settings(), dataclasses.replace(job, site=db_site), db_site, "addresses",
+                                 f"saved-address list returned {gone}")
+            except Exception as e2:
+                log.error("addresses drift handling failed (%s)", type(e2).__name__)
 
 
 def _address_changed(job: jobs.Job, conn, db_site: str, profile_dir: Path, proxy_server: str | None, fake: bool,

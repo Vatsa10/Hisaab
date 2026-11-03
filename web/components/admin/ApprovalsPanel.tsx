@@ -12,6 +12,7 @@ import {
   loginSteps,
   problem,
   proposedEntries,
+  kindNote,
   reasonLabel,
   statusLabel,
   type Approval,
@@ -172,6 +173,7 @@ function PendingCard({
         </div>
       </div>
       <p className="mt-3 text-label font-medium text-ink">{reasonLabel(a.reason)}</p>
+      {kindNote(a.kind) ? <p className="mt-1 text-label text-ink-muted">{kindNote(a.kind)}</p> : null}
       {a.kind === "cart" ? (
         <div className="mt-3">
           <CartPermissions approval={a} />

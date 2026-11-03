@@ -75,14 +75,22 @@ def _learn_food(site, approve, preapproved) -> dict:
 def learn(site, approve, preapproved=(), kind="orders", **_) -> dict:
     """A deterministic recipe for the fake site. kind "orders" (default): the orders recipe; "search": the grocery
     search recipe (GET; Instamart POSTs); "food": {"restaurants", "menu"} (Swiggy GET; Zomato's restaurant search
-    POSTs). Each POST-allowlist entry goes to approve([entry]) unless preapproved already holds its regex; a
-    refusal is sync.RecipeError("POST allowlist rejected")."""
+    POSTs); "addresses": the saved-address GET. Each POST-allowlist entry goes to approve([entry]) unless
+    preapproved already holds its regex; a refusal is sync.RecipeError("POST allowlist rejected")."""
     if kind == "cart":
         return _learn_cart(site, approve, preapproved)
     if kind == "search":
         return _learn_search(site, approve, preapproved)
     if kind == "food":
         return _learn_food(site, approve, preapproved)
+    if kind == "addresses":  # a read-only GET: nothing to approve
+        account = "swiggy" if site == "instamart" else site
+        return {"kind": "addresses", "site": account, "home_url": f"https://fake.{account}.test/",
+                "endpoint": f"https://fake.{account}.test/api/saved_addresses", "method": "GET", "query": {},
+                "body": None, "headers": {}, "read_post_allowlist": [],
+                "field_map": {"list_path": "addresses", "address_id": "address_id", "label": "label",
+                              "line": "line", "area": "area", "city": "city", "lat": "lat", "lon": "lon",
+                              "is_default": "is_default"}}
     entry ={"url_regex": f"^https://fake\\.{site}\\.test/api/orders$", "why": "fake order list"}
     if entry["url_regex"] not in set(preapproved) and not approve([entry]):
         raise sync.RecipeError("POST allowlist rejected")

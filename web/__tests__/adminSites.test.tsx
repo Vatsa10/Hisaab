@@ -103,6 +103,7 @@ describe("SitesPanel jump nav", () => {
       site({ kind: "food" }),
       site({ kind: "cart" }),
       site({ kind: "addresses" }),
+      site({ kind: "future" }),
     ]);
     render(<SitesPanel onForbidden={() => {}} />);
     const nav = await screen.findByRole("navigation", { name: "Jump to a group" });
@@ -114,6 +115,7 @@ describe("SitesPanel jump nav", () => {
       "Grocery prices",
       "Restaurants & menus",
       "Cart filling",
+      "Delivery addresses",
       "Other",
     ]);
     for (const a of links) {
@@ -122,7 +124,7 @@ describe("SitesPanel jump nav", () => {
       expect(document.getElementById(id)?.tagName).toBe("SECTION");
     }
     expect(links.map((a) => a.getAttribute("href"))).toEqual([
-      "#sites-orders", "#sites-search", "#sites-food", "#sites-cart", "#sites-other",
+      "#sites-orders", "#sites-search", "#sites-food", "#sites-cart", "#sites-addresses", "#sites-other",
     ]);
   });
 });
@@ -144,5 +146,20 @@ describe("SitesPanel users waiting for setup", () => {
     show(site({ waiting_users: 0 }));
     await screen.findByText("Healthy");
     expect(screen.queryByText(/waiting/)).toBeNull();
+  });
+});
+
+describe("SitesPanel delivery addresses", () => {
+  beforeEach(() => api.apiFetch.mockReset());
+
+  it("learns a site's saved-address list with kind=addresses", async () => {
+    api.apiFetch.mockResolvedValueOnce([site({ site: "swiggy", kind: "addresses", admin_connected: true })]);
+    api.apiFetch.mockResolvedValue({ job_id: "j1" });
+    render(<SitesPanel onForbidden={() => {}} />);
+    const learn = await screen.findByRole("button", { name: "Learn Swiggy delivery addresses" });
+    learn.click();
+    await vi.waitFor(() =>
+      expect(api.apiFetch).toHaveBeenCalledWith("/admin/learn/swiggy?kind=addresses", { method: "POST" }),
+    );
   });
 });

@@ -124,7 +124,7 @@ export const getCosts = (month?: string) =>
 export const getSites = () => apiFetch<SiteHealth[]>("/admin/sites");
 export const pauseSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/pause`, { method: "POST" });
 export const resumeSite = (site: string) => apiFetch<void>(`/admin/sites/${enc(site)}/resume`, { method: "POST" });
-export type LearnKind = "orders" | "search" | "food" | "cart";
+export type LearnKind = "orders" | "search" | "food" | "cart" | "addresses";
 export const startLearn = (site: string, kind: LearnKind = "orders") =>
   apiFetch<{ job_id: string }>(`/admin/learn/${enc(site)}${kind === "orders" ? "" : `?kind=${kind}`}`, { method: "POST" });
 export const getInvites = () => apiFetch<Invites>("/admin/invites");
@@ -261,13 +261,14 @@ export const putFees = (site: string, rules: FeeRules, verified: boolean) =>
   });
 
 /** The groups the Sites tab lists recipes under, and the learn kind each one runs. */
-export type SiteGroup = "orders" | "search" | "food" | "cart" | "other";
+export type SiteGroup = "orders" | "search" | "food" | "cart" | "addresses" | "other";
 export const SITE_GROUPS: { id: SiteGroup; title: string; learnLabel: string }[] = [
   { id: "orders", title: "Order history", learnLabel: "" },
   { id: "search", title: "Grocery prices", learnLabel: "grocery prices" },
   { id: "food", title: "Restaurants & menus", learnLabel: "restaurants and menus" },
   { id: "cart", title: "Cart filling", learnLabel: "cart filling" },
-  // Anything else (addresses, future kinds): health and pause, never Learn.
+  { id: "addresses", title: "Delivery addresses", learnLabel: "delivery addresses" },
+  // Anything else (future kinds): health and pause, never Learn.
   { id: "other", title: "Other", learnLabel: "" },
 ];
 
@@ -276,6 +277,7 @@ export function groupOf(kind: string): SiteGroup {
   if (kind === "search") return "search";
   if (kind === "restaurants" || kind === "menu" || kind === "food") return "food";
   if (kind === "cart") return "cart";
+  if (kind === "addresses") return "addresses";
   return "other";
 }
 
@@ -375,4 +377,9 @@ export function cartPermissions(a: Pick<Approval, "proposed"> & { current?: Appr
     read: entryList(p.read_post_allowlist, "read").filter((e) => !already.has(e.url_regex)),
     qty: qtyModeLabel(add.qty_mode),
   };
+}
+
+/** What an approval card says a recipe of this kind does, when that needs saying (null otherwise). */
+export function kindNote(kind: string): string | null {
+  return kind === "addresses" ? "Reads your saved addresses. Never changes them." : null;
 }

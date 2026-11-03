@@ -12,8 +12,11 @@ COLUMNS = ("address_id", "label", "line", "area", "city", "lat", "lon", "is_defa
 
 
 def recipe(conn, site: str) -> dict | None:
-    """The admin-learned `addresses` recipe for a site's account, or None (then nothing is fetched)."""
-    return store.get_recipe(conn, db_site(site), kind="addresses")
+    """The admin-learned `addresses` recipe for a site's account, or None (then nothing is fetched). A recipe the
+    admin (or the error budget) paused is not used either."""
+    row = conn.execute("SELECT recipe, paused FROM recipes WHERE site=%s AND kind='addresses'",
+                       (db_site(site),)).fetchone()
+    return row[0] if row and not row[1] else None
 
 
 def replace(conn, user_id: str, site: str, rows: list[dict]) -> int:

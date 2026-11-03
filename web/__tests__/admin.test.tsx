@@ -387,3 +387,19 @@ describe("login recipe approvals", () => {
     expect(within(card).queryByText("$.steps[0].name")).toBeNull();
   });
 });
+
+describe("addresses approvals", () => {
+  it("says an addresses recipe only reads the saved addresses", async () => {
+    routes({
+      "GET /admin/approvals": () => [
+        approval({ id: "ad1", site: "swiggy", kind: "addresses", reason: "account_specific" }),
+        approval({ id: "o1" }),
+      ],
+    });
+    render(<ApprovalsPanel onForbidden={vi.fn()} />);
+    const card = await screen.findByRole("listitem", { name: /Swiggy addresses/ });
+    expect(within(card).getByText("Reads your saved addresses. Never changes them.")).toBeInTheDocument();
+    const other = screen.getByRole("listitem", { name: /Zepto orders/ });
+    expect(within(other).queryByText(/Never changes them/)).not.toBeInTheDocument();
+  });
+});

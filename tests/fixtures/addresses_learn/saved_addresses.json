@@ -1,0 +1,13 @@
+{
+  "status": "success",
+  "data": {
+    "addresses": [
+      {"id": "fake-addr-101", "address_type": "home", "full_address": "Flat 7, Imaginary Towers, Nowhere Lane",
+       "locality": "Fakepur", "city": "Testville", "latitude": "10.1234", "longitude": "20.5678", "is_default": true},
+      {"id": "fake-addr-102", "address_type": "work", "full_address": "Desk 42, Pretend Plaza, Example Road",
+       "locality": "Mockbagh", "city": "Testville", "latitude": "10.1301", "longitude": "20.5702", "is_default": false},
+      {"id": "fake-addr-103", "address_type": "Grandma", "full_address": "House 9, Sample Street",
+       "locality": "Dummy Nagar", "city": "Testville", "latitude": "10.1422", "longitude": "20.5811", "is_default": false}
+    ]
+  }
+}

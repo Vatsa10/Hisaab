@@ -124,13 +124,17 @@ describe("sites tab, search and food learning", () => {
 });
 
 describe("sites tab, other kinds", () => {
-  it("unknown kinds show under Other with pause but no Learn", async () => {
+  it("unknown kinds show under Other with pause but no Learn; addresses learn", async () => {
     routes({ "GET /admin/sites": () => [site({ site: "zepto", kind: "addresses" }), site({ site: "swiggy", kind: "future_kind" })] });
     render(<SitesPanel onForbidden={vi.fn()} />);
     expect(await screen.findByRole("heading", { name: "Other" })).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Pause Zepto" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^Learn/ })).not.toBeInTheDocument();
+    // Delivery addresses have their own group with Learn; only the unknown kind has none.
+    expect(screen.getByRole("heading", { name: "Delivery addresses" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Learn/ }).map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Learn Zepto delivery addresses",
+    ]);
   });
 });
 

@@ -159,11 +159,12 @@ def _cart_health(conn, since: datetime, now: datetime, admin_user_id: str) -> li
 
 
 def _search_health(conn, since: datetime, now: datetime, admin_user_id: str) -> list[dict]:
-    """One row per grocery search site and per food site and kind (restaurants, menu): the recipe's state, the
-    7 days' search-job outcomes for that op, and whether the admin's own connection for the site's account
-    (Instamart: swiggy) is connected."""
+    """One row per grocery search site, per food site and kind (restaurants, menu) and per connectable account's
+    saved-address list (kind addresses): the recipe's state, the 7 days' search-job outcomes for that op, and
+    whether the admin's own connection for the site's account (Instamart: swiggy) is connected."""
     rows = [(s, "search", "products") for s in cart.SEARCH_SITES]
     rows += [(s, k, k) for s in cart.FOOD_SITES for k in cart.FOOD_KINDS]
+    rows += [(s, "addresses", "addresses") for s in CONNECTABLE_SITES]  # the saved-address refresh (search op)
     recipes = {(r[0], r[1]): r[2:] for r in conn.execute(
         "SELECT site, kind, version, learned_at, healthy, paused, health_note, paused_reason FROM recipes")}
     outcomes = {(r[0], r[1]): r[2:] for r in conn.execute(

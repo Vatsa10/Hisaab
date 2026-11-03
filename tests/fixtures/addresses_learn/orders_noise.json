@@ -1,0 +1,4 @@
+{"orders": [
+  {"order_id": "FAKE-1", "placed_at": "2026-10-01", "total": 240, "delivery_address": "Flat 7, Imaginary Towers"},
+  {"order_id": "FAKE-2", "placed_at": "2026-10-02", "total": 180, "delivery_address": "Desk 42, Pretend Plaza"}
+]}

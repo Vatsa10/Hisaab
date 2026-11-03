@@ -155,7 +155,7 @@ def check_error_budget(conn, s: Settings, now: datetime) -> list[tuple[str, str]
         row = conn.execute("SELECT paused FROM recipes WHERE site=%s AND kind=%s", (site, kind)).fetchone()
         if row is None or row[0]:
             continue
-        what = "syncs" if kind == "orders" else "price checks"
+        what = {"orders": "syncs", "addresses": "address refreshes"}.get(kind, "price checks")
         note = f"Paused automatically: {failed} of {total} {what} failed in the last {h} hours."
         recipe_admin.pause_site(conn, site, kind, note, reason="auto")
         notify.alert_admins(
