@@ -182,6 +182,7 @@ def _clean_error(e: Exception, phone: str | None) -> str:
 # "worker_unhealthy", and a worker that does it twice in a row exits so its supervisor starts a fresh one.
 INFRA_MARKERS = ("Connection closed while reading from the driver", "object has no attribute '_playwright'")
 INFRA_STRIKES_MAX = 2
+SETUP_APPROVAL_WAIT_S = 120
 _job_infra_failed = False
 
 
@@ -495,7 +496,9 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     if auto:
         approve = recipe_admin.deny_new_posts
     else:
-        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, recipe_kinds[0], s.approval_timeout_s)
+        # A one-tap setup run has nobody watching: ask for 2 minutes, not 10, then fail and say why.
+        wait = min(s.approval_timeout_s, SETUP_APPROVAL_WAIT_S) if (job.payload or {}).get("reason") == "setup"             else s.approval_timeout_s
+        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, recipe_kinds[0], wait)
     preapproved = []
     for recipe_kind in recipe_kinds:  # what the site's current recipes already allow needs no new approval
         current = store.get_recipe(conn, job.site, recipe_kind) or {}
