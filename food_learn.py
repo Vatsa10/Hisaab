@@ -495,6 +495,12 @@ def _learn_menu(site, location, page, guard, capture, approve, preapproved, llm,
     _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved, site)
     cands = candidates(capture.items[mark:], DISHISH_KEY, rid)[:6]
     if not cands:
+        try:
+            landed = urlsplit(page.url).path[:80]
+        except Exception:
+            landed = "?"
+        log.warning("%s: opened %s, landed on %s", site, urlsplit(url).path[:80], landed)
+        _log_captured(site, capture.items[mark:], url)
         raise sync.RecipeError(f"{site}: the restaurant page returned no menu-like response")
 
     def validate(c, fm):
