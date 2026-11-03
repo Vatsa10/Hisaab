@@ -159,7 +159,7 @@ def _run_sync(pg, site="zepto"):
 
 def _addresses_recipe(monkeypatch, by_site):
     """An admin-learned `addresses` recipe per site (learning it is Plan 4's admin flow, not this task's)."""
-    monkeypatch.setattr(worker.addresses_store, "recipe", lambda conn, site: by_site.get(site))
+    monkeypatch.setattr(worker.addresses_store, "recipe", lambda conn, site, user_id=None: by_site.get(site))
 
 
 def test_worker_fetch_failure_never_fails_job(pg, monkeypatch, caplog):

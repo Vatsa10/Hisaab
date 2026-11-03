@@ -190,6 +190,14 @@ def _is_infra_error(e: BaseException) -> bool:
     return any(m in str(e) for m in INFRA_MARKERS)
 
 
+def _admin_started(job: jobs.Job) -> bool:
+    """A learn the admin pressed (the Learn button or Set up), not an automatic drift re-learn: their own run is the
+    approval, so its POSTs and a valid cart recipe are published without asking again. A value that looks tied to
+    one account is still held, and every auto-approval is recorded."""
+    payload = job.payload or {}
+    return payload.get("reason") in ("manual", "setup") and not payload.get("auto")
+
+
 def _status(conn, user_id: str, site: str) -> str | None:
     row = conn.execute("SELECT status FROM connections WHERE user_id=%s AND site=%s", (user_id, site)).fetchone()
     return row[0] if row else None
@@ -498,7 +506,8 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     else:
         # A one-tap setup run has nobody watching: ask for 2 minutes, not 10, then fail and say why.
         wait = min(s.approval_timeout_s, SETUP_APPROVAL_WAIT_S) if (job.payload or {}).get("reason") == "setup"             else s.approval_timeout_s
-        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, recipe_kinds[0], wait)
+        approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, recipe_kinds[0], wait,
+                                             auto=_admin_started(job))
     preapproved = []
     for recipe_kind in recipe_kinds:  # what the site's current recipes already allow needs no new approval
         current = store.get_recipe(conn, job.site, recipe_kind) or {}
@@ -532,7 +541,8 @@ def _do_learn(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_server:
     approved = set(getattr(approve, "approved", ()))
     reason = "drift_relearn" if auto else "learned"
     results = [recipe_admin.apply_learned(conn, job.site, recipe_kind, learned[recipe_kind], approved, job.id,
-                                          reason=reason) for recipe_kind in recipe_kinds]
+                                          reason=reason, trusted=_admin_started(job))
+               for recipe_kind in recipe_kinds]
     result = next((r for r in results if r["status"] == "pending"), results[-1])
     jobs.set_progress(conn, job.id, stage="learned", approval_id=result["approval_id"], status=result["status"],
                       version=result["version"])
@@ -863,7 +873,8 @@ def _do_learn_cart(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_se
     the recipe is always filed as pending (apply_learned). The learn adds items to the admin's real cart."""
     import cart_learn
     jobs.set_progress(conn, job.id, stage="learning")
-    approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, "cart", s.approval_timeout_s)
+    approve = recipe_admin.make_approver(listen(), conn, job.id, job.site, "cart", s.approval_timeout_s,
+                                         auto=_admin_started(job))
     current = store.get_recipe(conn, job.site, "cart") or {}
     preapproved = [dict(e, op=e.get("op") or op)
                    for op, key in (("cart", "cart_allowlist"), ("location", "location_allowlist"),
@@ -877,7 +888,7 @@ def _do_learn_cart(job: jobs.Job, conn, s: Settings, profile_dir: Path, proxy_se
                                         preapproved=preapproved, proxy_server=proxy_server)
     save_profile()
     result = recipe_admin.apply_learned(conn, job.site, "cart", learned["recipe"], set(approve.approved), job.id,
-                                        reason="learned")
+                                        reason="learned", trusted=_admin_started(job))
     app = _app(job.site)
     jobs.set_progress(conn, job.id, stage="learned", status=result["status"], approval_id=result["approval_id"],
                       note=f"Learning added 2 × {learned['probe_item']} to your {app} cart. "

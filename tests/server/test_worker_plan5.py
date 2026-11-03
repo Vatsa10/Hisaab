@@ -473,7 +473,7 @@ def test_learn_food_waits_for_post_approval(pg, pg2, monkeypatch):
         return {"restaurants": rest, "menu": menu}
     monkeypatch.setattr(worker.food_learn, "learn_food", learn_food)
     s = dataclasses.replace(settings_for_tests(), approval_timeout_s=20)
-    jid = jobs.enqueue(pg, B, "learn", "swiggy", {"reason": "manual", "kind": "food"})
+    jid = jobs.enqueue(pg, B, "learn", "swiggy", {"reason": "ask_me", "kind": "food"})  # not started by the admin
     job = jobs.claim(pg, "w", ("learn",))
     t = threading.Thread(target=worker.run_job, args=(job, pg, s))
     t.start()

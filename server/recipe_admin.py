@@ -183,9 +183,11 @@ class Approver:
     to timeout_s for the admin's decision relayed via NOTIFY approval_<id hex>. Entries approved in this job are
     collected in .approved (their url_regex) for apply_learned."""
 
-    def __init__(self, listen_conn, job_conn, job_id: str, site: str, kind: str, timeout_s: float):
+    def __init__(self, listen_conn, job_conn, job_id: str, site: str, kind: str, timeout_s: float,
+                 auto: bool = False):
         self.listen_conn, self.job_conn = listen_conn, job_conn
         self.job_id, self.site, self.kind, self.timeout_s = job_id, site, kind, timeout_s
+        self.auto = auto  # the admin started this learn themselves: their own run is the approval
         self.approved: set[str] = set()
 
     def __call__(self, entries: list[dict]) -> bool:
@@ -196,6 +198,13 @@ class Approver:
         if not entries:
             return False
         proposed = {"read_post_allowlist": entries}
+        if self.auto:  # recorded for the audit trail, never waited on
+            self.job_conn.execute(
+                "INSERT INTO recipe_approvals (site, kind, reason, proposed, diff, status, job_id, live_request, "
+                "decided_at) VALUES (%s, %s, 'post_allowlist', %s, %s, 'auto_applied', %s, false, now())",
+                (self.site, self.kind, Jsonb(proposed), Jsonb(diff(None, proposed)), self.job_id))
+            self.approved.update(e["url_regex"] for e in entries if e.get("url_regex"))
+            return True
         approval_id = str(self.job_conn.execute(
             "INSERT INTO recipe_approvals (site, kind, reason, proposed, diff, job_id, live_request) "
             "VALUES (%s, %s, 'post_allowlist', %s, %s, %s, true) RETURNING id",
@@ -245,8 +254,9 @@ class Approver:
         return None
 
 
-def make_approver(listen_conn, job_conn, job_id: str, site: str, kind: str, timeout_s: float) -> Approver:
-    return Approver(listen_conn, job_conn, job_id, site, kind, timeout_s)
+def make_approver(listen_conn, job_conn, job_id: str, site: str, kind: str, timeout_s: float,
+                  auto: bool = False) -> Approver:
+    return Approver(listen_conn, job_conn, job_id, site, kind, timeout_s, auto)
 
 
 def deny_new_posts(entries: list[dict]) -> bool:
@@ -262,7 +272,7 @@ def _post_regexes(recipe: dict | None) -> set[str]:
 
 
 def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], job_id: str | None,
-                  reason: str) -> dict:
+                  reason: str, trusted: bool = False) -> dict:
     """Publish a learned recipe, or file it for the admin. It waits (status pending) when kind is cart (reason
     cart), when a value looks account-specific (account_specific), or when it allows a POST that is neither in
     the current recipe nor in approved (post_allowlist); otherwise it is published at once and recorded as
@@ -276,7 +286,7 @@ def apply_learned(conn, site: str, kind: str, recipe: dict, approved: set[str], 
         base = conn.execute("SELECT recipe, version FROM recipes WHERE site=%s AND kind=%s FOR UPDATE",
                             (site, kind)).fetchone()
         current, base_version = (base[0], base[1]) if base else (None, None)
-        if kind == "cart":
+        if kind == "cart" and not (trusted and _cart_recipe_error(clean, site) is None):
             hold = "cart"
         elif flagged:
             hold = "account_specific"
