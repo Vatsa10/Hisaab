@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 from browser import SITES
-from server import admin, budget, cart, cart_rank, jobs, recipe_admin, store, usage
+from server import admin, budget, cart, cart_rank, jobs, journey, recipe_admin, store, usage
 from server.config import SITE_NAMES, settings
 
 ADMIN_PAUSE_NOTE = "Paused by the admin"
@@ -215,6 +215,30 @@ def build_router(current_user, get_conn) -> APIRouter:
         except recipe_admin.InvalidRecipe as e:
             raise HTTPException(409, f"This cart recipe failed its safety check ({e.reason}), so it was not "
                                      "published. Run a new learn.") from None
+        site = journey.approval_site(conn, aid)
+        if site:  # a held recipe the admin just approved may unblock a running setup
+            journey.advance_after(conn, site)
         return {"status": status}
+
+    @router.get("/journey")
+    def get_journey(user: str = Depends(require_admin), conn=Depends(get_conn)):
+        return journey.journey_all(conn, user)
+
+    @router.post("/setup/{site}")
+    def setup_site(site: str, user: str = Depends(require_admin), conn=Depends(get_conn)):
+        _known(site)
+        if site not in admin.CONNECTABLE_SITES:
+            raise HTTPException(400, f"{_app(site)} is set up through another account")
+        return journey.start_run(conn, site, user)
+
+    @router.post("/setup")
+    def setup_all(user: str = Depends(require_admin), conn=Depends(get_conn)):
+        return [journey.start_run(conn, site, user) for site in admin.CONNECTABLE_SITES]
+
+    @router.delete("/setup/{site}", status_code=204)
+    def stop_setup(site: str, _admin: str = Depends(require_admin), conn=Depends(get_conn)):
+        _known(site)
+        journey.stop_run(conn, site)
+        return Response(status_code=204)
 
     return router

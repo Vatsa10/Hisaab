@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
-from server import budget, cart, config, fill, food_cart, jobs, notify, session, site_health
+from server import budget, cart, config, fill, food_cart, jobs, journey, notify, session, site_health
 from server.config import Settings, settings
 
 log = logging.getLogger("scheduler")
@@ -95,6 +95,10 @@ def tick(conn, s: Settings, now: datetime | None = None) -> dict:
             reminders = session.remind(conn, s, now)
         except Exception as e:
             log.error("session reminders failed (%s)", type(e).__name__)
+        try:  # safety net: a setup run whose job-end call was missed still moves on
+            journey.advance_all(conn)
+        except Exception as e:
+            log.error("setup advance failed (%s)", type(e).__name__)
         sent = notify.dispatch(conn, s)  # always runs: budget alerts, invites and drift emails must not stall
         return {"skipped": False, "level": state.level, "enqueued": enqueued, "sent": sent,
                 "paused_sites": paused, "reminders": reminders, "carts_finalized": finalized, "fills_finalized": fills_finalized}

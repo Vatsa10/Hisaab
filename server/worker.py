@@ -35,8 +35,8 @@ import recipes
 import search
 import search_learn
 import sync
-from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, match, notify, recipe_admin,
-                    session, site_health, sites, store, timing, usage, vault)
+from server import (addresses_store, cart, categorize_pg, fake_sites, food_cart, jobs, journey, match, notify,
+                    recipe_admin, session, site_health, sites, store, timing, usage, vault)
 from guard import redact_path
 from server import fill as fills
 from server import fill_summary
@@ -1454,6 +1454,8 @@ def main(worker_id: str | None = None, poll_s: float = 2.0, max_loops: int | Non
                         browser.close_warm()
                 except Exception as e:
                     log.warning("closing the finished browser failed (%s)", type(e).__name__)
+                if job.type in ("learn", "sync", "connect"):  # a one-tap setup run takes its next step now
+                    journey.advance_after(conn, job.site)
                 infra_strikes = infra_strikes + 1 if _job_infra_failed else 0
                 if infra_strikes >= INFRA_STRIKES_MAX:
                     log.critical("worker %s: %s jobs in a row failed on the browser driver; exiting so a fresh "
