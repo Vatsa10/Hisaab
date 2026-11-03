@@ -93,3 +93,20 @@ def test_sanitize_for_sharing_templates_zomato():
     assert clean["orders_page_url"] == "{orders_page_url}"
     _, flagged = recipe_admin.sanitize_for_sharing(zomato())
     assert flagged
+
+
+ADDR = {"kind": "addresses", "site": "zomato", "endpoint": "https://www.zomato.com/webroutes/getPage", "method": "GET",
+        "query": {"isMobile": "0", "page_url": "/users/vatsa-joshi-323806826/addresses"}}
+
+
+def test_an_addresses_recipe_has_its_account_prefix_templated_and_binds_per_user():
+    templated = recipes.templatize(ADDR)
+    assert templated["query"]["page_url"] == "{account}/addresses"
+    assert "vatsa-joshi" not in json.dumps(templated)
+    bound = recipes.bind(templated, "https://www.zomato.com/users/other-person-99/ordering")
+    assert bound["query"]["page_url"] == "/users/other-person-99/addresses"
+
+
+def test_an_addresses_recipe_with_no_account_prefix_is_left_alone():
+    plain = {"endpoint": "https://x.test/a", "query": {"page_url": "/addresses"}}
+    assert recipes.templatize(plain) is plain

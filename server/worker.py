@@ -587,7 +587,7 @@ def _refresh_addresses(job: jobs.Job, conn, db_site: str, profile_dir: Path, pro
         if fake:
             rows = fake_sites.saved_addresses(db_site)
         else:
-            recipe = addresses_store.recipe(conn, db_site)
+            recipe = addresses_store.recipe(conn, db_site, job.user_id)
             if not recipe:
                 return
             rows = addresses.fetch_for_site(db_site, recipe, profile_dir=profile_dir,

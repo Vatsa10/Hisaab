@@ -294,14 +294,33 @@ def _map_strings(obj, fn):
     return fn(obj) if isinstance(obj, str) else obj
 
 
+_ACCOUNT_IN_TEXT = re.compile(r"/users/[^/?#&\s\"']+")
+
+
+def _find_account_prefix(obj) -> str | None:
+    """The first /users/<slug> found in any string of a recipe (an addresses recipe has no orders_page_url)."""
+    if isinstance(obj, dict):
+        return next((p for v in obj.values() if (p := _find_account_prefix(v))), None)
+    if isinstance(obj, list):
+        return next((p for v in obj if (p := _find_account_prefix(v))), None)
+    if isinstance(obj, str):
+        m = _ACCOUNT_IN_TEXT.search(obj)
+        return m.group(0) if m else None
+    return None
+
+
 def templatize(recipe: dict) -> dict:
     """A copy of recipe with the learning account's /users/<slug> prefix replaced by {account}, the orders page
-    by {orders_page_url}, and the nav_trace up to the orders page replaced by one navigate step.
-    A recipe without that prefix is returned unchanged."""
+    by {orders_page_url}, and the nav_trace up to the orders page replaced by one navigate step. A recipe that has
+    no orders page (addresses) has just its /users/<slug> prefix replaced. A recipe without that prefix is
+    returned unchanged."""
     orders_path = _url_path_of(recipe.get("orders_page_url"))
     m = _ACCOUNT_PREFIX.match(orders_path)
     if not m:
-        return recipe
+        prefix = _find_account_prefix(recipe)
+        if not prefix:
+            return recipe
+        return _map_strings(copy.deepcopy(recipe), lambda s: s.replace(prefix, "{account}") if prefix in s else s)
     prefix = m.group(0)
     out = copy.deepcopy(recipe)
     trace = out.get("nav_trace")

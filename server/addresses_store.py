@@ -3,6 +3,7 @@ per-app address a compare or cart fill uses. Nothing here logs an address or a c
 from psycopg.rows import dict_row
 
 import addresses
+import recipes
 from addresses import db_site
 from server import address_match, store
 
@@ -11,12 +12,22 @@ SAME_PLACE_M = 150.0  # the worker flags a refreshed address whose pin moved fur
 COLUMNS = ("address_id", "label", "line", "area", "city", "lat", "lon", "is_default")
 
 
-def recipe(conn, site: str) -> dict | None:
+def recipe(conn, site: str, user_id: str | None = None) -> dict | None:
     """The admin-learned `addresses` recipe for a site's account, or None (then nothing is fetched). A recipe the
-    admin (or the error budget) paused is not used either."""
+    admin (or the error budget) paused is not used either. A templated one (Zomato's /users/<slug>) is bound to
+    user_id's own account page; when that page is unknown there is nothing to fetch yet (None)."""
     row = conn.execute("SELECT recipe, paused FROM recipes WHERE site=%s AND kind='addresses'",
                        (db_site(site),)).fetchone()
-    return row[0] if row and not row[1] else None
+    if not row or row[1]:
+        return None
+    if user_id is None:
+        return row[0]
+    page = conn.execute("SELECT orders_page_url FROM connections WHERE user_id=%s AND site=%s",
+                        (user_id, db_site(site))).fetchone()
+    try:
+        return recipes.bind(row[0], page[0] if page else None)
+    except recipes.TemplateError:
+        return None
 
 
 def replace(conn, user_id: str, site: str, rows: list[dict]) -> int:
