@@ -305,3 +305,23 @@ def test_food_search_module_errors_are_the_learn_errors():
     # learning and replay raise the same classes the worker catches
     assert food_learn.SearchDrift is food_search.SearchDrift
     assert food_learn.SearchTransient is food_search.SearchTransient
+
+
+def test_third_party_beacons_are_never_offered_for_approval():
+    """Analytics and ad beacons carry the searched text too; only a POST on the site's own host is ever asked about."""
+    import types
+    asked = []
+    guard = types.SimpleNamespace(
+        allowlist=[], blocked=[
+            {"method": "POST", "url": "https://www.google-analytics.com/g/collect?q=biryani", "body": "q=biryani"},
+            {"method": "POST", "url": "https://ad.doubleclick.net/activity;x=1", "body": "biryani"},
+            {"method": "POST", "url": "https://www.swiggy.com/dapi/restaurants/search/v3", "body": '{"q":"biryani"}'},
+        ])
+    page = types.SimpleNamespace(goto=lambda *a, **k: None, wait_for_timeout=lambda ms: None,
+                                 reload=lambda *a, **k: None, url="https://www.swiggy.com/")
+    try:
+        food_learn._approve_blocked(page, guard, "biryani", "restaurant search (read-only)", "https://www.swiggy.com/",
+                                    lambda entries: asked.extend(entries) or True, set(), "swiggy")
+    except Exception:
+        pass  # the page reload after approval needs a real page; only what was asked matters here
+    assert [e["url_regex"] for e in asked] == [r"^https://www\.swiggy\.com/dapi/restaurants/search/v3$"]

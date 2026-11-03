@@ -129,13 +129,16 @@ def _preapproved_entries(preapproved: Iterable) -> list[dict]:
     return out
 
 
-def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approve, preapproved: set[str]) -> None:
+def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approve, preapproved: set[str],
+                     site: str | None = None) -> None:
     """A POST the guard blocked that carries `needle` becomes a narrow allowlist entry, but only once it is
     preapproved or `approve(entries)` returns True; then the page is reloaded so the site makes the call again."""
     new = []
     for b in guard.blocked:
         if b.get("method") != "POST" or b.get("reason") not in (None, "POST not allowlisted"):
             continue
+        if site in browser.SITES and not agent.site_allows_host(site, b["url"]):
+            continue  # analytics and ad beacons carry the search text too; they are never a data call
         body = b.get("body") or ""
         if guard_mod.MUTATION.search(body) or needle.lower() not in (body + b["url"]).lower():
             continue
@@ -353,7 +356,7 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     mark = len(capture.items)
     _visit(page, probe_url)
     _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
-                     preapproved)
+                     preapproved, site)
     cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
     if not cands:
         raise sync.RecipeError(f"{site}: the search page returned no restaurant-like response")
@@ -389,7 +392,7 @@ def _learn_menu(site, location, page, guard, capture, approve, preapproved, llm,
     rid, url = first["restaurant_id"], first["url"]
     mark = len(capture.items)
     _visit(page, url)
-    _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved)
+    _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved, site)
     cands = candidates(capture.items[mark:], DISHISH_KEY, rid)[:6]
     if not cands:
         raise sync.RecipeError(f"{site}: the restaurant page returned no menu-like response")
