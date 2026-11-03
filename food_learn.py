@@ -396,6 +396,26 @@ def _search_in_page(page, text: str) -> bool:
         return False
 
 
+def _has_restaurant_list(cands: list[dict]) -> bool:
+    """Does any captured response hold a list at a path that names restaurants (and not dishes)?"""
+    return any("restaurant" in p.lower() and "dish" not in p.lower()
+               for c in cands for _s, p, _n, _f in _collections(c["json"], RESTAURANTISH_KEY))
+
+
+def _click_tab(page, label: str) -> bool:
+    """Click the visible tab or button with this text (a read: it only switches what the page lists)."""
+    try:
+        tab = page.locator(f'[role="tab"]:has-text("{label}"), button:has-text("{label}"), '
+                           f'div[role="button"]:has-text("{label}")').first
+        tab.wait_for(state="visible", timeout=4000)
+        tab.click(timeout=3000)
+        page.wait_for_timeout(SETTLE_MS)
+        return True
+    except Exception as e:
+        log.info("tab %r not usable (%s)", label, type(e).__name__)
+        return False
+
+
 def _log_captured(site: str, items: list[dict], page_url: str) -> None:
     """What a learn saw when it found nothing usable: host, path and shape only, never a query string or a value."""
     seen = []
@@ -420,6 +440,9 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
             break
         _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
                          preapproved, site)
+        cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
+    if cands and not _has_restaurant_list(cands) and _click_tab(page, "Restaurants"):
+        # The search opened on its dishes tab (Swiggy): open the restaurants tab, as a person would.
         cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
     if not cands:
         _log_captured(site, capture.items[mark:], probe_url)

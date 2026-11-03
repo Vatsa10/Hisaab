@@ -406,3 +406,36 @@ def test_the_restaurant_group_is_shown_to_the_model_before_the_dish_group():
     c = {"id": 1, "method": "GET", "url": "https://x.test/s", "sample": "{}", "json": data}
     text = food_learn._describe(c, food_learn.RESTAURANTISH_KEY)
     assert text.index("RESTAURANT.cards") < text.index("DISH.cards")
+
+
+def test_a_dishes_only_response_is_not_a_restaurant_list():
+    info = {"name": "Margherita", "locality": "Gorwa", "avgRating": 4.5, "cuisines": ["Pizza"], "id": "d1", "area": "x"}
+    dish = {"id": 1, "json": {"data": {"cards": [{"groupedCard": {"cardGroupMap": {
+        "DISH": {"cards": [{"card": {"card": {"info": info}}}] * 4}}}}]}}}
+    rest = {"id": 2, "json": {"data": {"cards": [{"groupedCard": {"cardGroupMap": {
+        "RESTAURANT": {"cards": [{"card": {"card": {"info": info}}}] * 4}}}}]}}}
+    assert food_learn._has_restaurant_list([dish]) is False
+    assert food_learn._has_restaurant_list([dish, rest]) is True
+
+
+def test_the_restaurants_tab_is_clicked_when_it_is_there_and_skipped_when_it_is_not():
+    clicks = []
+
+    class Tab:
+        def __init__(self, ok):
+            self.ok = ok
+
+        @property
+        def first(self):
+            return self
+
+        def wait_for(self, state="visible", timeout=0):
+            if not self.ok:
+                raise TimeoutError("no tab")
+
+        def click(self, timeout=0):
+            clicks.append("click")
+    yes = SimpleNamespace(locator=lambda sel: Tab(True), wait_for_timeout=lambda ms: None)
+    no = SimpleNamespace(locator=lambda sel: Tab(False), wait_for_timeout=lambda ms: None)
+    assert food_learn._click_tab(yes, "Restaurants") is True and clicks == ["click"]
+    assert food_learn._click_tab(no, "Restaurants") is False
