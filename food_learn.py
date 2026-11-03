@@ -351,6 +351,27 @@ def _visit(page, url: str) -> None:
 
 # --- learning ----------------------------------------------------------------
 
+SEARCH_BOX = ('input[type="search"], input[placeholder*="earch" i], input[aria-label*="earch" i], '
+              'input[type="text"]')
+
+
+def _search_in_page(page, text: str) -> bool:
+    """Type the probe into the page's visible search box and press Enter (a read: it only asks the site to search).
+    False when there is no such box or typing failed; never raises."""
+    try:
+        box = page.locator(SEARCH_BOX).first
+        if not box.is_visible(timeout=2000):
+            return False
+        box.click(timeout=3000)
+        box.fill(text, timeout=3000)
+        box.press("Enter", timeout=3000)
+        page.wait_for_timeout(SETTLE_MS)
+        return True
+    except Exception as e:
+        log.info("search box not usable (%s)", type(e).__name__)
+        return False
+
+
 def _log_captured(site: str, items: list[dict], page_url: str) -> None:
     """What a learn saw when it found nothing usable: host, path and shape only, never a query string or a value."""
     seen = []
@@ -370,6 +391,11 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
                      preapproved, site)
     cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
+    if not cands and _search_in_page(page, RESTAURANT_PROBE):
+        # The page only showed suggestions until a search was typed (Swiggy): do what a person does.
+        _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
+                         preapproved, site)
+        cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
     if not cands:
         _log_captured(site, capture.items[mark:], probe_url)
         raise sync.RecipeError(f"{site}: the search page returned no restaurant-like response")

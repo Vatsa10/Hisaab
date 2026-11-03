@@ -325,3 +325,36 @@ def test_third_party_beacons_are_never_offered_for_approval():
     except Exception:
         pass  # the page reload after approval needs a real page; only what was asked matters here
     assert [e["url_regex"] for e in asked] == [r"^https://www\.swiggy\.com/dapi/restaurants/search/v3$"]
+
+
+class _Box:
+    def __init__(self, visible=True):
+        self.visible, self.steps = visible, []
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self, timeout=0):
+        return self.visible
+
+    def click(self, timeout=0):
+        self.steps.append("click")
+
+    def fill(self, text, timeout=0):
+        self.steps.append(f"fill:{text}")
+
+    def press(self, key, timeout=0):
+        self.steps.append(f"press:{key}")
+
+
+def test_the_search_is_typed_into_the_page_like_a_person_would():
+    box = _Box()
+    page = SimpleNamespace(locator=lambda sel: box, wait_for_timeout=lambda ms: None)
+    assert food_learn._search_in_page(page, "pizza") is True
+    assert box.steps == ["click", "fill:pizza", "press:Enter"]
+
+
+def test_a_page_with_no_search_box_is_left_alone():
+    page = SimpleNamespace(locator=lambda sel: _Box(visible=False), wait_for_timeout=lambda ms: None)
+    assert food_learn._search_in_page(page, "pizza") is False
