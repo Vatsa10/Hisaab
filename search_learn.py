@@ -150,10 +150,29 @@ def find_query_param(c: dict, probe: str) -> str | None:
     return next((k for k, v in parse_qsl(urlsplit(c["url"]).query) if v.strip().lower() == p), None)
 
 
+_LAT_NAME = re.compile(r"(^|[._\[])(lat|latitude)\]?$", re.I)
+_LON_NAME = re.compile(r"(^|[._\[])(lng|lon|long|longitude)\]?$", re.I)
+
+
 def find_location_inputs(c: dict, lat: float, lon: float) -> list[dict]:
-    """Query parameters, headers and body paths carrying the saved lat/lon."""
-    return [{"in": where, "name": name, "value": which} for where, name, v in request_inputs(c)
-            if (which := _coord(v, lat, lon))]
+    """Query parameters, headers and body paths carrying the saved lat/lon. A signed-in site often searches around
+    its own selected address, not our pin, so when the values do not match, the request's own latitude and
+    longitude parameters (found by name) are the inputs: replaying binds them to the user's pin."""
+    inputs = request_inputs(c)
+    exact = [{"in": where, "name": name, "value": which} for where, name, v in inputs
+             if (which := _coord(v, lat, lon))]
+    if {i["value"] for i in exact} >= {"lat", "lon"}:
+        return exact
+    named = []
+    for where, name, v in inputs:
+        n = _num(v)
+        if n is None or where == "header":
+            continue
+        if _LAT_NAME.search(name) and abs(n) <= 90:
+            named.append({"in": where, "name": name, "value": "lat"})
+        elif _LON_NAME.search(name) and abs(n) <= 180:
+            named.append({"in": where, "name": name, "value": "lon"})
+    return named if {i["value"] for i in named} >= {"lat", "lon"} else exact
 
 
 def _find_value_path(data, text: str) -> str | None:

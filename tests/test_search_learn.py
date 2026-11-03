@@ -318,3 +318,16 @@ def test_learn_needs_location_and_llm(monkeypatch):
     with pytest.raises(sync.RecipeError, match="LLM"):
         search_learn.learn_search("zepto", LOC, Path("/admin/profile"), llm=None)
     assert site.seen["open_site"] == []
+
+
+def test_a_site_searching_around_its_own_address_still_gets_its_lat_lng_bound():
+    c = {"url": "https://www.swiggy.com/dapi/restaurants/search/v3?lat=22.31&lng=73.13&str=pizza&submitAction=ENTER",
+         "method": "GET", "request_headers": {}}
+    got = search_learn.find_location_inputs(c, 22.329102, 73.155447)  # the user's pin is elsewhere
+    assert sorted((i["name"], i["value"]) for i in got) == [("lat", "lat"), ("lng", "lon")]
+
+
+def test_matching_values_are_still_bound_exactly():
+    c = {"url": "https://x.test/s?a=22.3291&b=73.1554&str=pizza", "method": "GET", "request_headers": {}}
+    got = search_learn.find_location_inputs(c, 22.329102, 73.155447)
+    assert sorted((i["name"], i["value"]) for i in got) == [("a", "lat"), ("b", "lon")]

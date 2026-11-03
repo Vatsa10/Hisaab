@@ -174,7 +174,11 @@ def ensure_location(conn, user_id: str) -> bool:
         "ORDER BY is_default DESC, fetched_at DESC LIMIT 1", (user_id,)).fetchone()
     if row is None:
         return False
-    text = ", ".join(p for p in row[:3] if p)
+    parts: list[str] = []
+    for p in row[:3]:  # "Society, Area, City" without repeating what an earlier part already says
+        if p and not any(p.lower() in q.lower() for q in parts):
+            parts.append(p)
+    text = ", ".join(parts)
     conn.execute("INSERT INTO profiles (user_id, address, lat, lon) VALUES (%s, %s, %s, %s) "
                  "ON CONFLICT (user_id) DO UPDATE SET address=EXCLUDED.address, lat=EXCLUDED.lat, lon=EXCLUDED.lon "
                  "WHERE profiles.lat IS NULL", (user_id, text, row[3], row[4]))
