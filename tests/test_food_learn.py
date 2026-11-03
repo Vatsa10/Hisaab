@@ -462,3 +462,15 @@ def test_nothing_is_asked_for_when_no_captured_call_looks_like_a_menu():
     other = {"id": 1, "method": "GET", "status": 200, "request_headers": {}, "json": {},
              "url": "https://www.swiggy.com/dapi/cart"}
     assert food_learn._menu_by_direct_request(object(), [other], "555", {"lat": 1.0, "lon": 2.0}) is None
+
+
+def test_the_menu_is_asked_for_by_the_requests_own_restaurant_param_when_the_page_sent_a_wrong_id(monkeypatch):
+    dish = {"name": "Margherita", "price": 100, "veg": 1, "category": "Pizza", "variant": "x"}
+    good = {"data": {"menu": {"items": [dict(dish, id=f"d{i}") for i in range(6)]}}}
+    asked = []
+    monkeypatch.setattr(food_learn.food_search, "fast_attempt", lambda page, req: (asked.append(req["url"]), ("ok", good))[1])
+    bad = {"id": 3, "method": "GET", "status": 200, "request_headers": {},
+           "url": "https://www.swiggy.com/dapi/menu/pl?lat=22.1&lng=73.1&restaurantId=undefined",
+           "json": {"statusCode": 1, "statusMessage": "Oops"}, "sample": "{}"}
+    got = food_learn._menu_by_direct_request(object(), [bad], "126944", {"lat": 22.329, "lon": 73.155})
+    assert got is not None and "restaurantId=126944" in asked[0] and "lat=22.329" in asked[0]

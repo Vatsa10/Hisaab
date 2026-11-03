@@ -512,6 +512,15 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     return recipe, rows
 
 
+_REST_PARAM = re.compile(r"^(restaurant_?id|rest_?id|restaurant)$", re.I)
+
+
+def _restaurant_param_by_name(c: dict) -> str | None:
+    """The request's own restaurant-id parameter, found by name, when the page sent a value that is not our
+    restaurant's id (it can send a wrong or empty one when it could not read the address)."""
+    return next((name for where, name, _v in request_inputs(c) if where != "header" and _REST_PARAM.match(name)), None)
+
+
 def _menu_by_direct_request(page, items: list[dict], rid: str, location: dict) -> dict | None:
     """Re-issue a captured menu-like GET from inside the page with the user's location and this restaurant bound
     into it; the capture item for the answer when it holds a menu, else None. A read of the site's own endpoint."""
@@ -519,7 +528,7 @@ def _menu_by_direct_request(page, items: list[dict], rid: str, location: dict) -
         if c.get("method", "").upper() != "GET" or "menu" not in urlsplit(c["url"]).path.lower():
             continue
         lat, lon = location["lat"], location["lon"]
-        draft = {**_request_parts(c), "restaurant_param": find_value_param(c, rid),
+        draft = {**_request_parts(c), "restaurant_param": find_value_param(c, rid) or _restaurant_param_by_name(c),
                  "location_inputs": find_location_inputs(c, lat, lon)}
         if not draft["restaurant_param"]:
             continue
@@ -529,6 +538,7 @@ def _menu_by_direct_request(page, items: list[dict], rid: str, location: dict) -
         except Exception as e:
             log.info("direct menu request not usable (%s)", type(e).__name__)
             continue
+        log.info("direct menu request for %s: %s", urlsplit(c["url"]).path[:40], kind)
         if kind != "ok":
             continue
         item = {"id": len(items) + 1000, "url": req["url"], "method": "GET", "status": 200,
