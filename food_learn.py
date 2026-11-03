@@ -163,11 +163,14 @@ def _approve_blocked(page, guard, needle: str, why: str, reload_url: str, approv
 
 # --- capture analysis --------------------------------------------------------
 
-def _row_keys(item: dict) -> set[str]:
+def _row_keys(item: dict, depth: int = 3) -> set[str]:
+    """The keys of one row and of the objects nested inside it, a few levels down (Swiggy wraps each restaurant as
+    {card: {card: {info: {name, locality, ...}}}})."""
     keys = set(item)
-    for v in item.values():
-        if isinstance(v, dict):
-            keys |= set(v)
+    if depth > 0:
+        for v in item.values():
+            if isinstance(v, dict):
+                keys |= _row_keys(v, depth - 1)
     return keys
 
 

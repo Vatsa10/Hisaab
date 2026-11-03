@@ -359,3 +359,11 @@ def test_the_search_is_typed_into_the_page_like_a_person_would():
 def test_a_page_with_no_search_box_is_left_alone():
     page = SimpleNamespace(locator=lambda sel: _Box(visible=False), wait_for_timeout=lambda ms: None)
     assert food_learn._search_in_page(page, "pizza") is False
+
+
+def test_a_restaurant_list_whose_rows_are_wrapped_in_cards_is_still_found():
+    card = {"card": {"card": {"@type": "x", "info": {"name": "Pizza Place", "locality": "Gorwa", "avgRating": 4.2,
+                                                     "cuisines": ["Pizza"], "areaName": "Gorwa", "id": "1"}}}}
+    data = {"statusCode": 0, "data": {"cards": [{"groupedCard": {"cardGroupMap": {"RESTAURANT": {"cards": [card, card, card]}}}}]}}
+    found = food_learn._collections(data, food_learn.RESTAURANTISH_KEY)
+    assert any(path.endswith("RESTAURANT.cards") and n == 3 for _, path, n, _ in found)
