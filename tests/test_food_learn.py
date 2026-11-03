@@ -336,8 +336,12 @@ class _Box:
     def first(self):
         return self
 
-    def is_visible(self, timeout=0):
-        return self.visible
+    def wait_for(self, state="visible", timeout=0):
+        if not self.visible:
+            raise TimeoutError("no search box")
+
+    def press_sequentially(self, text, delay=0):
+        self.steps.append(f"type:{text}")
 
     def click(self, timeout=0):
         self.steps.append("click")
@@ -353,7 +357,7 @@ def test_the_search_is_typed_into_the_page_like_a_person_would():
     box = _Box()
     page = SimpleNamespace(locator=lambda sel: box, wait_for_timeout=lambda ms: None)
     assert food_learn._search_in_page(page, "pizza") is True
-    assert box.steps == ["click", "fill:pizza", "press:Enter"]
+    assert box.steps == ["click", "fill:", "type:pizza", "press:Enter"]
 
 
 def test_a_page_with_no_search_box_is_left_alone():

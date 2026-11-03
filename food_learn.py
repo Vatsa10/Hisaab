@@ -379,15 +379,17 @@ SEARCH_BOX = ('input[type="search"], input[placeholder*="earch" i], input[aria-l
 
 def _search_in_page(page, text: str) -> bool:
     """Type the probe into the page's visible search box and press Enter (a read: it only asks the site to search).
+    Typed key by key, as a person does, because a single fill can skip the page's own search handlers.
     False when there is no such box or typing failed; never raises."""
     try:
         box = page.locator(SEARCH_BOX).first
-        if not box.is_visible(timeout=2000):
-            return False
+        box.wait_for(state="visible", timeout=6000)
         box.click(timeout=3000)
-        box.fill(text, timeout=3000)
+        box.fill("", timeout=3000)
+        box.press_sequentially(text, delay=70)
+        page.wait_for_timeout(900)
         box.press("Enter", timeout=3000)
-        page.wait_for_timeout(SETTLE_MS)
+        page.wait_for_timeout(SETTLE_MS + 1500)
         return True
     except Exception as e:
         log.info("search box not usable (%s)", type(e).__name__)
@@ -413,8 +415,9 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
                      preapproved, site)
     cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
-    if not cands and _search_in_page(page, RESTAURANT_PROBE):
-        # The page only showed suggestions until a search was typed (Swiggy): do what a person does.
+    for _ in range(2):  # the page only showed suggestions until a search was typed (Swiggy): do what a person does
+        if cands or not _search_in_page(page, RESTAURANT_PROBE):
+            break
         _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
                          preapproved, site)
         cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
