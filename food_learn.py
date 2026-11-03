@@ -297,7 +297,8 @@ def _ask(llm: Llm, prompt: str, cands: list[dict], kind: str, validate) -> tuple
             obj, cand, fm, err = {}, None, None, f"invalid reply: {type(e).__name__}: {e}"
         if err is None:
             return cand, fm, obj.get("fee_map") if isinstance(obj.get("fee_map"), dict) else None
-        log.warning("%s field map attempt %d failed", kind, attempt + 1)
+        log.warning("%s field map attempt %d failed: %s | map: %s", kind, attempt + 1, str(err)[:240],
+                    json.dumps(fm, ensure_ascii=False)[:500] if fm else None)
         messages = [*messages, {"role": "assistant", "content": reply if isinstance(reply, str) else json.dumps(reply)},
                     {"role": "user", "content": f"Validation failed: {err}\nReturn a corrected JSON object."}]
     raise sync.RecipeError(f"could not map the {kind} response")
