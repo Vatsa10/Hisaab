@@ -560,12 +560,12 @@ _DRIVER_DEAD = ("Connection closed while reading from the driver", "object has n
 PLAYWRIGHT_START_TRIES = 3
 
 
-def _start_playwright():
-    """sync_playwright().start(), tried again (a fresh driver process each time) when the driver dies at startup:
-    seen after memory pressure and in a long-lived worker. Any other error, or the last failure, is raised."""
+def _with_driver_retry(call):
+    """call(), tried again (a fresh driver process each time) when the Playwright driver dies at startup: seen
+    after memory pressure and in a long-lived worker. Any other error, or the last failure, is raised."""
     for attempt in range(1, PLAYWRIGHT_START_TRIES + 1):
         try:
-            return sync_playwright().start()
+            return call()
         except Exception as e:
             if attempt == PLAYWRIGHT_START_TRIES or not any(m in str(e) for m in _DRIVER_DEAD):
                 raise
@@ -574,14 +574,23 @@ def _start_playwright():
             time.sleep(0.5 * attempt)
 
 
+def _start_playwright():
+    return _with_driver_retry(lambda: sync_playwright().start())
+
+
 @contextlib.contextmanager
 def _playwright():
-    pw = _start_playwright()
+    managers = []
+
+    def enter():
+        managers.append(sync_playwright())  # a manager whose start failed is not reused
+        return managers[-1].__enter__()
+    pw = _with_driver_retry(enter)
+    cm = managers[-1]
     try:
         yield pw
     finally:
-        with contextlib.suppress(Exception):
-            pw.stop()
+        cm.__exit__(None, None, None)
 
 
 def _launch_warm(key, profile: Path, proxy_server: str | None) -> WarmChrome:
