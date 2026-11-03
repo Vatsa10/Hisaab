@@ -424,6 +424,10 @@ def _log_captured(site: str, items: list[dict], page_url: str) -> None:
         j = c.get("json")
         shape = list(j)[:6] if isinstance(j, dict) else type(j).__name__
         msg = ""
+        if isinstance(j, dict):  # the shape of any list of objects, keys only: what a mapper would have to work with
+            for k, v in list(j.items())[:4]:
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    msg += f" {k}[{len(v)}]{{{','.join(list(v[0])[:10])}}}"
         if isinstance(j, dict) and isinstance(j.get("statusMessage"), str):  # a site's own status text, no user data
             msg = f" [{j.get('statusCode')}: {j['statusMessage'][:80]}]"
         seen.append(f"{c.get('status')} {u.netloc}{u.path[:60]} {shape}{msg}")
