@@ -351,6 +351,18 @@ def _visit(page, url: str) -> None:
 
 # --- learning ----------------------------------------------------------------
 
+def _log_captured(site: str, items: list[dict], page_url: str) -> None:
+    """What a learn saw when it found nothing usable: host, path and shape only, never a query string or a value."""
+    seen = []
+    for c in items[:40]:
+        u = urlsplit(c.get("url", ""))
+        j = c.get("json")
+        shape = list(j)[:6] if isinstance(j, dict) else type(j).__name__
+        seen.append(f"{c.get('status')} {u.netloc}{u.path[:60]} {shape}")
+    log.warning("%s: no restaurant-like response on %s; %d captured: %s", site, urlsplit(page_url).path, len(items),
+                " | ".join(seen))
+
+
 def _learn_restaurants(site, location, page, guard, capture, approve, preapproved, llm) -> tuple[dict, list[dict]]:
     probe_url = food_search.food_page_url(site, RESTAURANT_PROBE, location)
     mark = len(capture.items)
@@ -359,6 +371,7 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
                      preapproved, site)
     cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
     if not cands:
+        _log_captured(site, capture.items[mark:], probe_url)
         raise sync.RecipeError(f"{site}: the search page returned no restaurant-like response")
 
     def validate(c, fm):
