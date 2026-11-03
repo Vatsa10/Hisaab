@@ -431,6 +431,25 @@ def _log_captured(site: str, items: list[dict], page_url: str) -> None:
                 " | ".join(seen))
 
 
+_ID_LIKE = re.compile(r"(^|[._])(id|link|url|slug|href|cta)([._]|$)|restaurantid|rest_id", re.I)
+
+
+def _id_like(obj, path: str = "", out: list | None = None, depth: int = 0) -> list:
+    """(path, short value) of the id, link and slug fields in one row: structure for a log line, not user data."""
+    out = [] if out is None else out
+    if depth > 6 or len(out) >= 14:
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _id_like(v, f"{path}.{k}" if path else str(k), out, depth + 1)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:2]):
+            _id_like(v, f"{path}.{i}", out, depth + 1)
+    elif isinstance(obj, (str, int)) and _ID_LIKE.search(path):
+        out.append((path, str(obj)[:90]))
+    return out
+
+
 def _learn_restaurants(site, location, page, guard, capture, approve, preapproved, llm) -> tuple[dict, list[dict]]:
     probe_url = food_search.food_page_url(site, RESTAURANT_PROBE, location)
     mark = len(capture.items)
@@ -488,6 +507,8 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     rows = food_search.extract_restaurants(cand["json"], fm)
     for r in rows:
         r["url"] = urljoin(probe_url, r["url"]) if r["url"] else None
+    raw = food_search._rows(cand["json"], fm.get("restaurants_path"))
+    log.info("%s: first restaurant row id-like fields: %s", site, _id_like(raw[0]) if raw else None)
     return recipe, rows
 
 
