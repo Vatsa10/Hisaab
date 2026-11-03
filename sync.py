@@ -12,11 +12,13 @@ import recipes
 import browser
 from guard import redact_path
 from server import timing
-from browser import LOGIN_URL, SITES, SessionExpired, SiteThrottled, fetch_in_page, open_site, raise_if_blocked
+from browser import (LOGIN_URL, SITES, SessionExpired, SiteThrottled, fetch_in_page, fetch_many_in_page, open_site,
+                     raise_if_blocked)
 
 log = logging.getLogger("sync")
 
 MAX_PAGES = 200
+PARALLEL_PAGES = 4  # a full first import of a numbered-page feed fetches this many pages at a time
 MAX_REPLAY_SCROLLS = 30
 # Statuses that are not spending (the spend views leave them out too).
 NOT_COUNTED = ("cancelled", "refunded", "failed")
@@ -173,6 +175,8 @@ def _stop(batch: list[dict], since: str | None) -> bool:
 
 def fast_path(page, recipe: dict, since: str | None, on_progress: Progress | None = None) -> list[dict]:
     """Call the learned endpoint from inside the page and paginate (on_progress after each page)."""
+    if since is None and (recipe.get("pagination") or {}).get("type") == "page":
+        return _fast_path_parallel(page, recipe, on_progress)
     req, seen, out = recipes.first_request(recipe), set(), []
     for n in range(MAX_PAGES):
         data = fetch_in_page(page, req)
@@ -192,6 +196,38 @@ def fast_path(page, recipe: dict, since: str | None, on_progress: Progress | Non
         if not req:
             break
         time.sleep(random.uniform(1, 2))
+    return out
+
+
+def _fast_path_parallel(page, recipe: dict, on_progress: Progress | None) -> list[dict]:
+    """A full import of a feed with numbered pages (page=1, 2, 3...): the pages do not depend on each other, so
+    fetch PARALLEL_PAGES at a time and handle them in page order. Pages past the end come back empty (or repeat
+    earlier orders, which are dropped), which ends the import. Any failed request raises, as in the sequential path."""
+    pag = recipe["pagination"]
+    req0 = recipes.first_request(recipe)
+    cur = recipes.to_number(recipes.current_param(req0, pag.get("param")))
+    first = int(cur if cur is not None else pag.get("start", 1))
+    seen, out, done, n = set(), [], False, 0
+    while not done and n < MAX_PAGES:
+        count = min(PARALLEL_PAGES, MAX_PAGES - n)
+        reqs = [recipes.apply_param(req0, pag["param"], first + n + i) for i in range(count)]
+        for i, data in enumerate(fetch_many_in_page(page, reqs)):
+            if isinstance(data, Exception):
+                raise data
+            raw = recipes.extract_orders(data, recipe["field_map"])
+            batch = [o for o in recipes.valid_orders(raw) if o["order_id"] not in seen]
+            if n + i == 0 and not batch:
+                raise RecipeError("page 1 returned no valid orders")
+            if not batch:
+                done = True
+                break
+            seen.update(o["order_id"] for o in batch)
+            out += batch
+            log.info("page %d: %d orders", n + i + 1, len(batch))
+            report_progress(on_progress, out)
+        n += count
+        if not done:
+            time.sleep(random.uniform(0.5, 1))
     return out
 
 
