@@ -381,3 +381,14 @@ def test_a_rest_id_suffix_becomes_a_template_that_fits_other_restaurants():
         "https://www.swiggy.com/restaurants/menu-rest{restaurant_id}"
     assert food_learn.page_template("https://x.test/r/12345/menu", "12345") == "https://x.test/r/{restaurant_id}/menu"
     assert food_learn.page_template("https://x.test/r/ab12345", "12345") is None  # still only part of a slug
+
+
+def test_the_restaurant_group_is_shown_to_the_model_before_the_dish_group():
+    row = {"info": {"name": "Pizza Place", "locality": "Gorwa", "avgRating": 4.2, "cuisines": ["Pizza"], "id": "1"}}
+    data = {"data": {"cards": [{"groupedCard": {"cardGroupMap": {
+        "DISH": {"cards": [{"card": {"card": {"info": {"name": "Margherita", "locality": "Gorwa", "avgRating": 4.5,
+                                                        "cuisines": ["Pizza"], "id": "d1", "area": "x"}}}}] * 6},
+        "RESTAURANT": {"cards": [{"card": {"card": row}}] * 3}}}}]}}
+    c = {"id": 1, "method": "GET", "url": "https://x.test/s", "sample": "{}", "json": data}
+    text = food_learn._describe(c, food_learn.RESTAURANTISH_KEY)
+    assert text.index("RESTAURANT.cards") < text.index("DISH.cards")

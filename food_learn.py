@@ -212,7 +212,8 @@ def candidates(items: list[dict], key_re, needle: str | None = None) -> list[dic
 
 
 def _describe(c: dict, key_re) -> str:
-    cols = sorted(_collections(c["json"], key_re), key=lambda x: (-x[0], -x[2]))[:5]
+    cols = sorted(_collections(c["json"], key_re),
+                  key=lambda x: (-("restaurant" in x[1].lower() and "dish" not in x[1].lower()), -x[0], -x[2]))[:5]
     shapes = "\n".join(f"  collection at {p!r} ({n} items); first item: {json.dumps(first, ensure_ascii=False)[:2500]}"
                        for _, p, n, first in cols)
     return (f"#{c['id']} {c['method']} {c['url'][:300]}\n"
@@ -234,7 +235,8 @@ logged-in user. Pick the ONE call that returns the list of restaurants and map i
                 "lat": str|null, "lon": str|null, "distance_km": str|null, "is_open": str|null,
                 "url": str|null (the restaurant page's link)}},
  "fee_map": object|null}}
-Paths other than restaurants_path are relative to ONE restaurant object. A literal value is written "=value".
+If the response groups its results by type (for example RESTAURANT and DISH), map the RESTAURANT group, never the
+dishes. Paths other than restaurants_path are relative to ONE restaurant object. A literal value is written "=value".
 {fee_rules}
 Reply with JSON only.
 
