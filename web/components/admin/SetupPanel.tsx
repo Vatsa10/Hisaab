@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Spinner } from "@/components/connect/icons";
-import { Button } from "@/components/ui/Button";
+import { Button, buttonClassName } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import {
   getJourney,
@@ -118,6 +119,10 @@ export function SetupPanel({ onForbidden }: PanelProps) {
                       <Button variant="ghost" disabled={busy !== null} onClick={() => act(j.site, () => stopSetup(j.site))}>
                         Stop
                       </Button>
+                    ) : j.next?.op === "connect" ? (
+                      <Link href={`/accounts?reconnect=${j.site}`} className={buttonClassName({})}>
+                        Connect {j.name}
+                      </Link>
                     ) : (
                       <Button
                         aria-busy={busy === j.site}

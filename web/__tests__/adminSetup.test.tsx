@@ -62,6 +62,16 @@ describe("SetupPanel", () => {
     expect(screen.queryByRole("button", { name: /Set up/ })).not.toBeInTheDocument();
   });
 
+  it("an app that is not connected yet links to its connect step instead of Set up", async () => {
+    api.apiFetch.mockResolvedValueOnce([
+      journey({ done: 0, next: { id: "connect", label: "Connect your account", status: "todo", detail: null, op: "connect", kind: null } }),
+    ]);
+    render(<SetupPanel onForbidden={() => {}} />);
+    const link = await screen.findByRole("link", { name: "Connect Swiggy" });
+    expect(link).toHaveAttribute("href", "/accounts?reconnect=swiggy");
+    expect(screen.queryByRole("button", { name: "Set up Swiggy" })).not.toBeInTheDocument();
+  });
+
   it("a failed start shows the problem", async () => {
     api.apiFetch.mockResolvedValueOnce([journey()]).mockRejectedValueOnce(new Error("boom"));
     render(<SetupPanel onForbidden={() => {}} />);

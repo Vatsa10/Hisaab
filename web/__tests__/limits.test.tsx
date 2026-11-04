@@ -73,15 +73,15 @@ describe("refresh limits", () => {
     expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
   });
 
-  it("admin link only for admins", async () => {
+  it("owner tools link only for admins", async () => {
     const { unmount } = render(<AccountsScreen {...screenProps} />);
     await screen.findByRole("button", { name: /Refresh now/ });
     await waitFor(() => expect(me.getMe).toHaveBeenCalled());
-    expect(screen.queryByRole("link", { name: /Admin/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Owner tools/ })).toBeNull();
     unmount();
     me.getMe.mockResolvedValue({ user_id: "u", email: "a@b.co", is_admin: true });
     render(<AccountsScreen {...screenProps} />);
-    expect(await screen.findByRole("link", { name: /Admin/ })).toHaveAttribute("href", "/admin");
+    expect(await screen.findByRole("link", { name: /Owner tools/ })).toHaveAttribute("href", "/admin");
   });
 });
 

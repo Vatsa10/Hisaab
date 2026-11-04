@@ -31,7 +31,7 @@ const PRIVACY_SECTIONS: ReadonlyArray<{ heading: string; body: string }> = [
   },
   {
     heading: "Your controls",
-    body: "Disconnect an app on the Accounts tab to delete its session and orders. Delete your account to remove everything, including your sign-in. Deletion is immediate; server logs keep only an anonymous id and expire within 30 days.",
+    body: "Disconnect an app on the Settings tab to delete its session and orders. Delete your account to remove everything, including your sign-in. Deletion is immediate; server logs keep only an anonymous id and expire within 30 days.",
   },
 ];
 

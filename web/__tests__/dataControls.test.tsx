@@ -259,7 +259,7 @@ describe("reconnect", () => {
     await act(async () => {});
   });
 
-  it("a reconnect that arrives while Accounts is open opens the phone step", async () => {
+  it("a reconnect that arrives while Settings is open opens the phone step", async () => {
     const props = {
       initialConnections: [{ site: "zepto", status: "needs_login", last_synced_at: null }],
       initialConsents: [{ site: "zepto", text_version: CONSENT_VERSION }],

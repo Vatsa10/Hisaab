@@ -11,11 +11,11 @@ describe("TabBar", () => {
     pathname.value = "/spend";
   });
 
-  it("renders five links in order: Spend, Orders, Cart, Ask, Accounts", () => {
+  it("renders five links in order: Spend, Orders, Cart, Ask, Settings", () => {
     render(<TabBar />);
     const nav = screen.getByRole("navigation", { name: "Main" });
     const links = within(nav).getAllByRole("link");
-    expect(links.map((a) => a.textContent)).toEqual(["Spend", "Orders", "Cart", "Ask", "Accounts"]);
+    expect(links.map((a) => a.textContent)).toEqual(["Spend", "Orders", "Cart", "Ask", "Settings"]);
     expect(links.map((a) => a.getAttribute("href"))).toEqual([
       "/spend",
       "/orders",
@@ -30,7 +30,7 @@ describe("TabBar", () => {
     render(<TabBar />);
     const active = screen.getByRole("link", { name: "Orders" });
     expect(active).toHaveAttribute("aria-current", "page");
-    for (const name of ["Spend", "Cart", "Ask", "Accounts"]) {
+    for (const name of ["Spend", "Cart", "Ask", "Settings"]) {
       expect(screen.getByRole("link", { name })).not.toHaveAttribute("aria-current");
     }
   });

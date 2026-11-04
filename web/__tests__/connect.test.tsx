@@ -532,7 +532,7 @@ describe("AccountsScreen", () => {
       <AccountsScreen initialConnections={[]} initialConsents={[]} initialProfile={null} initialJobs={[]} />,
     );
     expect(screen.getByText("Instamart orders come in with your Swiggy account.")).toBeInTheDocument();
-    expect(screen.getByText("Read-only. We never order or pay.")).toBeInTheDocument();
+    expect(screen.getByText(/Read-only: we never order or pay\./)).toBeInTheDocument();
     expect(watchConnections).toHaveBeenCalledOnce();
     const rows: Connection[] = [{ site: "blinkit", status: "connected", last_synced_at: new Date().toISOString() }];
     act(() => live.connections[0]!(rows));

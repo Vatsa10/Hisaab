@@ -198,7 +198,7 @@ export function AccountsScreen({
 
   return (
     <>
-      <PageHeader title="Your apps" subtitle="Read-only. We never order or pay." />
+      <PageHeader title="Settings" subtitle="Your apps, delivery address and data. Read-only: we never order or pay." />
 
       <Card as="section" aria-label="Delivery apps" padding="none">
         <ul>
@@ -229,24 +229,27 @@ export function AccountsScreen({
         </p>
       ) : null}
 
+      <AddressRow profile={profile} onSaved={setProfile} initialAddresses={initialAddresses} userId={userId} />
+
+      <DataCard connected={APPS.filter((a) => connectionFor.has(a.id))} />
+      <OtpDevicesCard />
+
       {isAdmin ? (
-        <Card as="section" aria-label="Admin" padding="none" className="mt-6">
+        <Card as="section" aria-label="Owner tools" padding="none" className="mt-6">
           <Link
             href="/admin"
-            className="flex min-h-14 items-center justify-between px-4 font-medium transition-colors duration-150 active:bg-canvas"
+            className="flex min-h-14 items-center justify-between gap-3 px-4 py-2 transition-colors duration-150 active:bg-canvas"
           >
-            <span>Admin</span>
+            <span>
+              <span className="block font-medium">Owner tools</span>
+              <span className="block text-label text-ink-muted">Set up apps, costs and invites. Only you see this.</span>
+            </span>
             <span aria-hidden="true" className="text-label font-semibold text-accent">
               ›
             </span>
           </Link>
         </Card>
       ) : null}
-
-      <AddressRow profile={profile} onSaved={setProfile} initialAddresses={initialAddresses} userId={userId} />
-
-      <DataCard connected={APPS.filter((a) => connectionFor.has(a.id))} />
-      <OtpDevicesCard />
 
       {flow && flowApp ? (
         <ConnectFlow

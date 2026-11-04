@@ -66,7 +66,7 @@ export const TABS: readonly Tab[] = [
   },
   {
     href: "/accounts",
-    label: "Accounts",
+    label: "Settings",
     icon: (
       <svg {...ICON_PROPS}>
         <circle cx="12" cy="8.5" r="3.5" />

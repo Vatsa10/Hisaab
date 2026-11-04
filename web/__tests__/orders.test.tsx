@@ -108,7 +108,7 @@ describe("OrdersList", () => {
     expect(await screen.findByRole("region", { name: "October 2026" })).toBeInTheDocument();
   });
 
-  it("explains an empty list and links to Accounts", async () => {
+  it("explains an empty list and links to Settings", async () => {
     q.getOrders.mockResolvedValueOnce({ orders: [], nextCursor: null });
     render(<OrdersList />);
     expect(await screen.findByRole("link", { name: "Connect an app" })).toHaveAttribute("href", "/accounts");
