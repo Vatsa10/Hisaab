@@ -183,6 +183,8 @@ def _clean_error(e: Exception, phone: str | None) -> str:
 INFRA_MARKERS = ("Connection closed while reading from the driver", "object has no attribute '_playwright'")
 INFRA_STRIKES_MAX = 2
 SETUP_APPROVAL_WAIT_S = 120
+SEARCH_SAVE_EVERY_S = 600  # a lookup job saves its browser profile to the vault at most this often per profile
+_LAST_PROFILE_SAVE: dict[tuple[str, str], float] = {}
 _job_infra_failed = False
 
 
@@ -1015,6 +1017,10 @@ def run_job(job: jobs.Job, conn, s: Settings, exit_process: Callable[[int], None
     def save_profile() -> None:
         if fake:
             return
+        key = (job.user_id, profile_name)
+        if job.type == "search" and time.monotonic() - _LAST_PROFILE_SAVE.get(key, -1e9) < SEARCH_SAVE_EVERY_S:
+            return  # a read-only lookup rarely changes the session: tar and encrypt it at most every few minutes
+        _LAST_PROFILE_SAVE[key] = time.monotonic()
         pooled = browser.POOL.handle
         if warm_key is not None and pooled is not None and browser.POOL.key == warm_key:
             # Chrome stays warm for the next job: the profile is saved once, when the pool closes (after Chrome

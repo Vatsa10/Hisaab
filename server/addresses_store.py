@@ -72,6 +72,7 @@ def get(conn, user_id: str, site: str, address_id: str) -> dict | None:
     return next((r for r in _rows(conn, user_id, db_site(site)) if r["address_id"] == address_id), None)
 
 
+SAME_SPOT_M = 60.0  # two apps' pins this close are one place even when the address text differs
 NEARBY_M = 2000.0  # a saved address further than this from where you stand is not offered as "this is you"
 
 
@@ -121,4 +122,19 @@ def saved_for(conn, user_id: str, site: str, near: tuple[float, float] | None = 
         return min(close, key=lambda x: x[0])[1] if close else None
     scored = [(address_match.score(ref, r), r) for r in rows]
     scored = [(sc, r) for sc, r in scored if sc >= address_match.THRESHOLD]
-    return max(scored, key=lambda x: x[0])[1] if scored else None
+    if scored:
+        return max(scored, key=lambda x: x[0])[1]
+    # Names differ between apps ("Surmandir Society" on one, "A3, Abhay Nagar" on another) while the pins sit on the
+    # same spot: the same place, unless both name a different flat or unit.
+    if near is not None:
+        pa = address_match._parsed(ref)
+        close = []
+        for r in rows:
+            pin = _pin(r)
+            d = addresses.distance_m(near, pin) if pin else None
+            pb = address_match._parsed(r)
+            if d is not None and d <= SAME_SPOT_M and not (pa["unit"] and pb["unit"] and pa["unit"] != pb["unit"]):
+                close.append((d, r))
+        if close:
+            return min(close, key=lambda x: x[0])[1]
+    return None

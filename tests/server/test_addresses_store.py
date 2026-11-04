@@ -252,3 +252,24 @@ def test_saved_for_uses_scorer_vetoes_and_threshold(pg):
     # the best scoring one wins when two pass
     addresses_store.replace(pg, A, "blinkit", [row("b-1", *NEAR_HOME, line="Lakeview Residency"), row("b-2", *HOME)])
     assert addresses_store.saved_for(pg, A, "blinkit", near=HOME)["address_id"] == "b-2"
+
+
+def test_pins_on_the_same_spot_are_one_place_even_when_the_apps_name_it_differently(pg):
+    addresses_store.replace(pg, A, "swiggy", [row("s-home", *HOME, line="Surmandir Society, Gorwa, Vadodara")])
+    addresses_store.replace(pg, A, "zomato", [row("z-home", HOME[0] + 0.0003, HOME[1], line="A3, Abhay Nagar")])
+    _choose(pg, "swiggy", "s-home", *HOME)
+    assert addresses_store.saved_for(pg, A, "zomato", near=HOME)["address_id"] == "z-home"  # about 33 m away
+
+
+def test_a_different_flat_in_the_same_building_is_still_a_different_place(pg):
+    addresses_store.replace(pg, A, "swiggy", [row("s-home", *HOME, line="Flat 12, Lakeview Residency")])
+    addresses_store.replace(pg, A, "zomato", [row("z-other", *HOME, line="Flat 99, Other Name")])
+    _choose(pg, "swiggy", "s-home", *HOME)
+    assert addresses_store.saved_for(pg, A, "zomato", near=HOME) is None
+
+
+def test_a_saved_pin_further_than_the_same_spot_distance_is_not_the_same_place(pg):
+    addresses_store.replace(pg, A, "swiggy", [row("s-home", *HOME, line="Surmandir Society, Gorwa, Vadodara")])
+    addresses_store.replace(pg, A, "zomato", [row("z-far", HOME[0] + 0.002, HOME[1], line="A3, Abhay Nagar")])  # ~220 m
+    _choose(pg, "swiggy", "s-home", *HOME)
+    assert addresses_store.saved_for(pg, A, "zomato", near=HOME) is None
