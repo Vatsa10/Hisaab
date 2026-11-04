@@ -461,6 +461,9 @@ def _id_like(obj, path: str = "", out: list | None = None, depth: int = 0) -> li
 # (it arrives built into the page).
 GETPAGE = {"zomato": "https://www.zomato.com/webroutes/getPage"}
 GETPAGE_TEMPLATE = {"zomato": "/{city}/delivery?q={q}"}
+# Where such a site keeps the fields a model tends to leave out (read from its real responses): the restaurant's
+# page path and whether it takes orders now.
+GETPAGE_FIELD_DEFAULTS = {"zomato": {"restaurants": {"url": "cardAction.clickUrl", "is_open": "order.isServiceable"}}}
 
 
 def _getpage_item(page, site: str, page_path: str) -> dict | None:
@@ -533,6 +536,9 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
     prompt = RESTAURANTS_PROMPT.format(site=site, probe=RESTAURANT_PROBE, fee_rules=FEE_RULES,
                                        samples="\n\n".join(_describe(c, RESTAURANTISH_KEY) for c in cands))
     cand, fm, fee_map = _ask(llm, prompt, cands, "restaurants", validate)
+    for k, v in GETPAGE_FIELD_DEFAULTS.get(site, {}).get("restaurants", {}).items():
+        if not fm.get(k):
+            fm[k] = v
     req = _request_parts(cand)
     recipe = {"kind": "restaurants", "site": site, "search_page_url": FOOD_PAGES[site], **req,
               "query_param": find_query_param(cand, RESTAURANT_PROBE),

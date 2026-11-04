@@ -511,8 +511,7 @@ def test_zomato_restaurants_are_read_from_getpage_and_the_recipe_carries_the_pag
         cid = int(re.search(r"#(\d+) GET", messages[0]["content"]).group(1))
         return json.dumps({"candidate": cid, "field_map": {
             "restaurants_path": "page_data.sections.SECTION_SEARCH_RESULT", "restaurant_id": "info.resId",
-            "name": "info.name", "locality": "info.locality.name", "url": "cardAction.clickUrl",
-            "is_open": "order.isServiceable"}, "fee_map": None})
+            "name": "info.name", "locality": "info.locality.name"}, "fee_map": None})  # no url, no is_open
     rec, rows = food_learn._learn_restaurants("zomato", ZOMATO_LOC, object(), guard, capture, None, set(), good_llm)
     assert "page_url=%2Fvadodara%2Fdelivery%3Fq%3Dpizza" in seen[0]
     assert rec["query_param"] == "page_url" and rec["query_template"] == "/{city}/delivery?q={q}"
