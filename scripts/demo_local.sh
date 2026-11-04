@@ -143,10 +143,14 @@ log "starting the API on $API_URL"
 PIDS+=($!)
 wait_for "API" 60 "$API_URL/healthz"
 
-log "starting the worker (a real Chrome will open when you connect an app)"
-# exit code 3: the worker found its browser driver broken and stopped itself; start a fresh one
-( server_env; while true; do "$PY" -m server.worker; [ $? -eq 3 ] || break; echo "worker restarting after a browser driver failure"; done ) >"$LOGS/worker.log" 2>&1 &
-PIDS+=($!)
+WORKERS="${WORKERS:-2}"  # two workers: Swiggy and Zomato lookups for one compare run side by side
+log "starting $WORKERS workers (a real Chrome will open when you connect an app)"
+for i in $(seq 1 "$WORKERS"); do
+  # exit code 3: the worker found its browser driver broken and stopped itself; start a fresh one
+  ( server_env; while true; do "$PY" -m server.worker; [ $? -eq 3 ] || break; echo "worker restarting after a browser driver failure"; done ) >"$LOGS/worker$i.log" 2>&1 &
+  PIDS+=($!)
+done
+ln -sf "$LOGS/worker1.log" "$LOGS/worker.log" 2>/dev/null || cp -f "$LOGS/worker1.log" "$LOGS/worker.log" 2>/dev/null || true
 
 log "starting the scheduler"
 ( server_env; exec "$PY" -m server.scheduler ) >"$LOGS/scheduler.log" 2>&1 &
