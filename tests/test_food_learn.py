@@ -512,7 +512,8 @@ def test_zomato_restaurants_are_read_from_getpage_and_the_recipe_carries_the_pag
         return json.dumps({"candidate": cid, "field_map": {
             "restaurants_path": "page_data.sections.SECTION_SEARCH_RESULT", "restaurant_id": "info.resId",
             "name": "info.name", "locality": "info.locality.name"}, "fee_map": None})  # no url, no is_open
-    rec, rows = food_learn._learn_restaurants("zomato", ZOMATO_LOC, object(), guard, capture, None, set(), good_llm)
+    rec, rows = food_learn._learn_restaurants("zomato", ZOMATO_LOC, object(), guard, capture, None, set(),
+                                              lambda m: pytest.fail("the known Zomato map needs no model"))
     assert "page_url=%2Fvadodara%2Fdelivery%3Fq%3Dpizza" in seen[0]
     assert rec["query_param"] == "page_url" and rec["query_template"] == "/{city}/delivery?q={q}"
     assert rec["location_inputs"] == [] and rec["location_via_session"] is True

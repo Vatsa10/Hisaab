@@ -461,9 +461,12 @@ def _id_like(obj, path: str = "", out: list | None = None, depth: int = 0) -> li
 # (it arrives built into the page).
 GETPAGE = {"zomato": "https://www.zomato.com/webroutes/getPage"}
 GETPAGE_TEMPLATE = {"zomato": "/{city}/delivery?q={q}"}
-# Where such a site keeps the fields a model tends to leave out (read from its real responses): the restaurant's
-# page path and whether it takes orders now.
-GETPAGE_FIELD_DEFAULTS = {"zomato": {"restaurants": {"url": "cardAction.clickUrl", "is_open": "order.isServiceable"}}}
+# The field map for a getPage site's restaurant list, read from its real responses. Tried first: when it extracts
+# restaurants from the live response, no model is needed (cheaper, and it cannot drift into the wrong list).
+GETPAGE_RESTAURANT_MAP = {"zomato": {
+    "restaurants_path": "page_data.sections.SECTION_SEARCH_RESULT", "restaurant_id": "info.resId",
+    "name": "info.name", "locality": "info.locality.name", "lat": None, "lon": None, "distance_km": None,
+    "is_open": "order.isServiceable", "url": "cardAction.clickUrl"}}
 
 
 def _getpage_item(page, site: str, page_path: str) -> dict | None:
@@ -535,10 +538,11 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
 
     prompt = RESTAURANTS_PROMPT.format(site=site, probe=RESTAURANT_PROBE, fee_rules=FEE_RULES,
                                        samples="\n\n".join(_describe(c, RESTAURANTISH_KEY) for c in cands))
-    cand, fm, fee_map = _ask(llm, prompt, cands, "restaurants", validate)
-    for k, v in GETPAGE_FIELD_DEFAULTS.get(site, {}).get("restaurants", {}).items():
-        if not fm.get(k):
-            fm[k] = v
+    known = GETPAGE_RESTAURANT_MAP.get(site)
+    if known and len(food_search.extract_restaurants(cands[0]["json"], known)) >= MIN_RESTAURANTS:
+        cand, fm, fee_map = cands[0], dict(known), None  # the known map reads this response: no model call
+    else:
+        cand, fm, fee_map = _ask(llm, prompt, cands, "restaurants", validate)
     req = _request_parts(cand)
     recipe = {"kind": "restaurants", "site": site, "search_page_url": FOOD_PAGES[site], **req,
               "query_param": find_query_param(cand, RESTAURANT_PROBE),
