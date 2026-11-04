@@ -15,7 +15,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Iterable
-from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlsplit, urlunsplit
 
 import agent
 import browser
@@ -91,6 +91,8 @@ def check_food_recipe(recipe: dict) -> str | None:
         if not recipe.get("query_param"):
             return "restaurants recipe needs a query_param for the search text"
         bound = {i["value"] for i in recipe.get("location_inputs") or []}
+        if recipe.get("location_via_session"):
+            return None  # the site answers for the account's selected address; there is no lat/lon to bind
         if not {"lat", "lon"} <= bound:
             return "restaurants recipe must bind the location (lat and lon)"
         return None
@@ -454,14 +456,45 @@ def _id_like(obj, path: str = "", out: list | None = None, depth: int = 0) -> li
     return out
 
 
+# Sites that deliver a page's data as JSON from one endpoint keyed by the page's address, and answer for the
+# account's selected address: Zomato's webroutes/getPage. The listing is read there, not from the page's own calls
+# (it arrives built into the page).
+GETPAGE = {"zomato": "https://www.zomato.com/webroutes/getPage"}
+GETPAGE_TEMPLATE = {"zomato": "/{city}/delivery?q={q}"}
+
+
+def _getpage_item(page, site: str, page_path: str) -> dict | None:
+    """The page's data as a capture-like item, fetched from inside the logged-in page; None when it fails."""
+    url = f"{GETPAGE[site]}?page_url={quote(page_path, safe='')}&isMobile=0"
+    req = {"method": "GET", "url": url, "headers": {"accept": "*/*", "content-type": "application/json"},
+           "body": None}
+    kind, data = food_search.fast_attempt(page, req)
+    if kind != "ok" or not isinstance(data, dict):
+        log.info("%s getPage for %s: %s", site, page_path.split("?")[0], kind)
+        return None
+    text = json.dumps(data, ensure_ascii=False)
+    return {"id": 5000 + len(page_path), "url": url, "method": "GET", "status": 200,
+            "request_headers": req["headers"], "request_body": None, "sample": text[:browser.SAMPLE_LIMIT],
+            "size": len(text), "json": data}
+
+
 def _learn_restaurants(site, location, page, guard, capture, approve, preapproved, llm) -> tuple[dict, list[dict]]:
     probe_url = food_search.food_page_url(site, RESTAURANT_PROBE, location)
     mark = len(capture.items)
-    _visit(page, probe_url)
-    _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
-                     preapproved, site)
-    cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
-    for _ in range(2):  # the page only showed suggestions until a search was typed (Swiggy): do what a person does
+    if site in GETPAGE:
+        city = browser.city_slug(location)
+        if not city:
+            raise sync.RecipeError(f"{site}: give the delivery address as 'area, city, state' so the city is known")
+        item = _getpage_item(page, site, GETPAGE_TEMPLATE[site].replace("{city}", city).replace("{q}", RESTAURANT_PROBE))
+        cands = candidates([item], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6] if item else []
+        if not cands:
+            raise sync.RecipeError(f"{site}: its page data returned no restaurant-like list")
+    else:
+        _visit(page, probe_url)
+        _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
+                         preapproved, site)
+        cands = candidates(capture.items[mark:], RESTAURANTISH_KEY, RESTAURANT_PROBE)[:6]
+    for _ in range(2 if site not in GETPAGE else 0):  # the page only showed suggestions until a search was typed (Swiggy): do what a person does
         if cands or not _search_in_page(page, RESTAURANT_PROBE):
             break
         _approve_blocked(page, guard, RESTAURANT_PROBE, "restaurant search (read-only)", probe_url, approve,
@@ -506,6 +539,9 @@ def _learn_restaurants(site, location, page, guard, capture, approve, preapprove
               "location_inputs": find_location_inputs(cand, location["lat"], location["lon"]),
               "field_map": fm, "fee_map": keep_fee_map(fee_map, cand["json"]),
               "read_post_allowlist": _covering(guard.allowlist, req["endpoint"], req["method"])}
+    if site in GETPAGE:  # the search text goes inside the page address; the account's address sets the place
+        recipe.update(query_param="page_url", query_template=GETPAGE_TEMPLATE[site], location_inputs=[],
+                      location_via_session=True)
     if err := check_food_recipe(recipe):
         raise sync.RecipeError(f"restaurants recipe rejected: {err}")
     rows = food_search.extract_restaurants(cand["json"], fm)
@@ -557,10 +593,16 @@ def _menu_by_direct_request(page, items: list[dict], rid: str, location: dict) -
 def _learn_menu(site, location, page, guard, capture, approve, preapproved, llm, first: dict) -> dict:
     rid, url = first["restaurant_id"], first["url"]
     mark = len(capture.items)
-    _visit(page, url)
-    _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved, site)
-    cands = candidates(capture.items[mark:], DISHISH_KEY, rid)[:6]
-    if not cands:
+    if site in GETPAGE:
+        item = _getpage_item(page, site, urlsplit(url).path)
+        cands = candidates([item], DISHISH_KEY, rid)[:6] if item else []
+        if not cands:
+            raise sync.RecipeError(f"{site}: the restaurant's page data returned no menu-like list")
+    else:
+        _visit(page, url)
+        _approve_blocked(page, guard, rid, "restaurant menu (read-only)", url, approve, preapproved, site)
+        cands = candidates(capture.items[mark:], DISHISH_KEY, rid)[:6]
+    if not cands and site not in GETPAGE:
         # The page's own menu call may have been made for the site's selected address, not ours (Swiggy answers
         # "Something went wrong" for a restaurant it does not serve there): ask again for our location.
         direct = _menu_by_direct_request(page, capture.items[mark:], rid, location)
@@ -595,6 +637,9 @@ def _learn_menu(site, location, page, guard, capture, approve, preapproved, llm,
               "location_inputs": find_location_inputs(cand, location["lat"], location["lon"]),
               "field_map": fm, "fee_map": keep_fee_map(fee_map, cand["json"]),
               "read_post_allowlist": _covering(guard.allowlist, req["endpoint"], req["method"])}
+    if site in GETPAGE:  # the data call is keyed by the restaurant's page path
+        recipe.update(page_url_template=None, restaurant_param="page_url", restaurant_value="url_path",
+                      location_inputs=[])
     if err := check_food_recipe(recipe):
         raise sync.RecipeError(f"menu recipe rejected: {err}")
     return recipe

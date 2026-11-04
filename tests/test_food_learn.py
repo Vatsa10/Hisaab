@@ -474,3 +474,75 @@ def test_the_menu_is_asked_for_by_the_requests_own_restaurant_param_when_the_pag
            "json": {"statusCode": 1, "statusMessage": "Oops"}, "sample": "{}"}
     got = food_learn._menu_by_direct_request(object(), [bad], "126944", {"lat": 22.329, "lon": 73.155})
     assert got is not None and "restaurantId=126944" in asked[0] and "lat=22.329" in asked[0]
+
+
+# ---- Zomato: the listing and the menu come from webroutes/getPage, keyed by the page's address ------------
+
+def _zomato_listing():
+    def card(i):
+        return {"type": "restaurant", "info": {"resId": 1000 + i, "name": f"Place {i}",
+                                               "locality": {"name": "Mandvi, Vadodara"}, "cuisine": [{"name": "x"}],
+                                               "rating": {"aggregate_rating": "4.1"}, "costText": "x"},
+                "order": {"isServiceable": True, "deliveryTime": "20 min"}, "distance": "1.1 km",
+                "cardAction": {"clickUrl": f"/vadodara/place-{i}/order"}}
+    return {"page_data": {"sections": {"SECTION_SEARCH_RESULT": [{"title": "t", "items": []}] + [card(i) for i in range(6)]}}}
+
+
+def _zomato_menu():
+    item = lambda i: {"item": {"id": 100 + i, "name": f"Dish {i}", "price": 120, "dietary_slugs": ["veg"], "isVeg": True}}
+    return {"page_data": {"order": {"menuList": {"menus": [{"menu": {"categories": [
+        {"category": {"name": "c", "items": [item(i) for i in range(6)]}}]}}]}}}}
+
+
+ZOMATO_LOC = {"lat": 22.33, "lon": 73.15, "query": "Surmandir Society, Gorwa, Vadodara, Gujarat 390003"}
+
+
+def test_zomato_restaurants_are_read_from_getpage_and_the_recipe_carries_the_page_template(monkeypatch):
+    seen = []
+
+    def fast(page, req):
+        seen.append(req["url"])
+        return "ok", _zomato_listing()
+    monkeypatch.setattr(food_learn.food_search, "fast_attempt", fast)
+    guard = SimpleNamespace(allowlist=[], blocked=[])
+    capture = SimpleNamespace(items=[])
+
+    def good_llm(messages):
+        cid = int(re.search(r"#(\d+) GET", messages[0]["content"]).group(1))
+        return json.dumps({"candidate": cid, "field_map": {
+            "restaurants_path": "page_data.sections.SECTION_SEARCH_RESULT", "restaurant_id": "info.resId",
+            "name": "info.name", "locality": "info.locality.name", "url": "cardAction.clickUrl",
+            "is_open": "order.isServiceable"}, "fee_map": None})
+    rec, rows = food_learn._learn_restaurants("zomato", ZOMATO_LOC, object(), guard, capture, None, set(), good_llm)
+    assert "page_url=%2Fvadodara%2Fdelivery%3Fq%3Dpizza" in seen[0]
+    assert rec["query_param"] == "page_url" and rec["query_template"] == "/{city}/delivery?q={q}"
+    assert rec["location_inputs"] == [] and rec["location_via_session"] is True
+    assert len(rows) == 6 and rows[0]["url"] == "https://www.zomato.com/vadodara/place-0/order"
+
+
+def test_zomato_menu_is_keyed_by_the_restaurant_page_path(monkeypatch):
+    seen = []
+    monkeypatch.setattr(food_learn.food_search, "fast_attempt", lambda page, req: (seen.append(req["url"]), ("ok", _zomato_menu()))[1])
+
+    def good_llm(messages):
+        cid = int(re.search(r"#(\d+) GET", messages[0]["content"]).group(1))
+        return json.dumps({"candidate": cid, "field_map": {
+            "dishes_path": "page_data.order.menuList.menus.*.menu.categories.*.category.items.*.item",
+            "dish_id": "id", "name": "name", "price": "price", "veg": "isVeg"}, "fee_map": None})
+    first = {"restaurant_id": "1000", "url": "https://www.zomato.com/vadodara/place-0/order"}
+    rec = food_learn._learn_menu("zomato", ZOMATO_LOC, object(), SimpleNamespace(allowlist=[]),
+                                 SimpleNamespace(items=[]), None, set(), good_llm, first)
+    assert "page_url=%2Fvadodara%2Fplace-0%2Forder" in seen[0]
+    assert rec["restaurant_param"] == "page_url" and rec["restaurant_value"] == "url_path"
+    assert rec["page_url_template"] is None and rec["location_inputs"] == []
+
+
+def test_replay_binds_the_search_into_the_template_and_the_menu_to_the_page_path():
+    rest = {"endpoint": "https://www.zomato.com/webroutes/getPage", "method": "GET",
+            "query": {"page_url": "/x", "isMobile": "0"}, "headers": {}, "body": None,
+            "query_param": "page_url", "query_template": "/{city}/delivery?q={q}", "location_inputs": []}
+    req = food_learn.food_search.build_request(rest, ZOMATO_LOC, "page_url", "chicken biryani")
+    assert "page_url=%2Fvadodara%2Fdelivery%3Fq%3Dchicken%2520biryani" in req["url"]
+    menu = {**rest, "query_template": None, "query_param": None}
+    req = food_learn.food_search.build_request(menu, ZOMATO_LOC, "page_url", "/vadodara/place-0/order")
+    assert "page_url=%2Fvadodara%2Fplace-0%2Forder" in req["url"]

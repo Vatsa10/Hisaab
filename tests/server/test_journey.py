@@ -220,3 +220,14 @@ def test_a_user_with_no_profile_row_gets_one_from_the_saved_address(pg):
     assert journey.ensure_location(pg, B) is True
     assert pg.execute("select address, lat from profiles where user_id=%s", (B,)).fetchone() == (
         "Surmandir Society, Gorwa, Vadodara", 22.3)
+
+
+def test_the_address_text_from_an_app_keeps_its_city_and_state_and_drops_the_country(pg):
+    _admin(pg)
+    pg.execute("delete from profiles")
+    pg.execute("insert into app_addresses (user_id, site, address_id, label, line, area, city, lat, lon) values "
+               "(%s,'swiggy','a1','HOME','Surmandir Society, Gorwa, Vadodara, Gujarat 390003, India','Gorwa',"
+               "'Vadodara',22.3,73.1)", (B,))
+    journey.ensure_location(pg, B)
+    assert pg.execute("select address from profiles where user_id=%s", (B,)).fetchone()[0] == \
+        "Surmandir Society, Gorwa, Vadodara, Gujarat 390003"

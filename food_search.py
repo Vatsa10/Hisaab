@@ -265,6 +265,13 @@ def build_request(recipe: dict, location: dict, param: str | None = None, value=
     user's lat/lon bound at every location input."""
     req = recipes.first_request(recipe)
     if param:
+        if recipe.get("query_template") and param == recipe.get("query_param"):
+            # The search text goes inside a page address the site serves its data for (Zomato's getPage):
+            # "/{city}/delivery?q={q}" -> "/vadodara/delivery?q=pizza".
+            city = browser.city_slug(location)
+            if "{city}" in recipe["query_template"] and not city:
+                raise Unserviceable("give the delivery address as 'area, city, state' so the city is known")
+            value = recipe["query_template"].replace("{city}", city or "").replace("{q}", quote(str(value)))
         _set_input(req, _param_where(req), param, value)
     for inp in recipe.get("location_inputs") or []:
         v = (location or {}).get(inp["value"])
@@ -388,10 +395,11 @@ def fetch_menu(site: str, restaurant_id: str, location: dict, recipe: dict, prof
     with _open(site, recipe, profile_dir, location, proxy_server, block_media) as (_ctx, page, _guard, capture):
         _goto(page, browser.home_url(site, location))
         menu, data, kind = None, None, "none"
-        if recipe.get("restaurant_param"):
+        if recipe.get("restaurant_param") and (recipe.get("restaurant_value") != "url_path" or page_url):
+            # restaurant_value "url_path": the site's data call is keyed by the restaurant's page path, not its id
+            bound = urlsplit(page_url).path if recipe.get("restaurant_value") == "url_path" else str(restaurant_id)
             with timing.Phase("fetch"):
-                kind, data = fast_attempt(page, build_request(recipe, location, recipe["restaurant_param"],
-                                                              str(restaurant_id)))
+                kind, data = fast_attempt(page, build_request(recipe, location, recipe["restaurant_param"], bound))
             menu = menu_result(data, fm) if kind == "ok" else None
             if menu is None and kind == "ok":
                 kind = "shape"

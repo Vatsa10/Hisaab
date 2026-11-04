@@ -10,6 +10,7 @@ scheduler as a safety net, so a missed call only delays the next step. A learn t
 admin (account-specific values, new POSTs) is never approved here: the run pauses on "Needs your OK". The cart
 learn adds items to a real cart and always needs the admin live, so it is never started by a run."""
 import logging
+import re
 from dataclasses import dataclass
 
 from psycopg.types.json import Jsonb
@@ -179,6 +180,9 @@ def ensure_location(conn, user_id: str) -> bool:
         if p and not any(p.lower() in q.lower() for q in parts):
             parts.append(p)
     text = ", ".join(parts)
+    line, city = row[0] or "", row[2] or ""
+    if line and city and city.lower() in line.lower():  # the app's own line is already "society, area, city, state"
+        text = re.sub(r",\s*india\s*$", "", line, flags=re.I).strip()
     conn.execute("INSERT INTO profiles (user_id, address, lat, lon) VALUES (%s, %s, %s, %s) "
                  "ON CONFLICT (user_id) DO UPDATE SET address=EXCLUDED.address, lat=EXCLUDED.lat, lon=EXCLUDED.lon "
                  "WHERE profiles.lat IS NULL", (user_id, text, row[3], row[4]))
